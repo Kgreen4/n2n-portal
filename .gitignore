@@ -1,0 +1,28 @@
+# Secrets & credentials
+*.key.json
+*.key.json.json
+cardio-sa-key*
+.env
+.env.*
+
+# Node/Deno
+node_modules/
+.deno/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Sample documents (large PDFs - don't version control)
+Sample Docs/
+
+# n8n workflow backups (keep the main ones)
+*.bak
+
+# Logs
+*.log
