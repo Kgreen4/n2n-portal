@@ -123,7 +123,8 @@ const GEMINI_RETRY_BASE_MS = 10000;  // 10s initial backoff
 const GEMINI_RETRY_MULTIPLIER = 1.5; // backoffs: 10s, 15s
 
 // ──────────────────────────────────────────────────────────────
-// Enhanced Gemini Prompt (13 fields, per-page extraction)
+// Gemini Prompt (13 fields, per-page extraction, header memory)
+// Uses remark_code/remark_reason (CARC/RARC) instead of denial_code
 // ──────────────────────────────────────────────────────────────
 const GEMINI_PROMPT = `Extract ALL medical line items from this EOB (Explanation of Benefits) page.
 
@@ -138,11 +139,16 @@ Return a JSON object with an 'items' array. Each item must include these fields 
 - paid_amount: Amount paid by the insurance company (numeric, no $ sign)
 - patient_responsibility: Amount the patient owes (numeric, no $ sign)
 - rendering_provider_npi: NPI number of the rendering provider
-- denial_code: Denial/reason code if the claim was denied or adjusted
-- denial_reason: Text explanation for denial or adjustment
+- remark_code: CARC/RARC remark/reason code (e.g., "CO-45", "PR-1", "OA-23") if the claim was adjusted or denied
+- remark_reason: Text explanation for the remark, adjustment, or denial
 - claim_status: Status of the claim (e.g., "Paid", "Denied", "Adjusted", "Partially Paid")
 
-Important:
+IMPORTANT — Header Memory:
+- If the rendering provider name or NPI appears in the page header or at the top of the page (e.g., "RENDERING PROVIDER: Arizona Heart Specialist") but NOT on each individual line item, apply that provider information to ALL line items on this page.
+- Similarly, if the patient name or member ID appears only in the page header, carry it down to every line item.
+- Look for provider names, NPIs, patient info, and payer info in page headers, footers, and section headings — not just inline with line items.
+
+Other instructions:
 - Extract EVERY line item on the page, do not skip any
 - If a field is not present on the EOB, set it to null
 - Return amounts as numbers without dollar signs or commas
@@ -245,10 +251,30 @@ Deno.serve(async (req) => {
 
     // STEP 4: PERSIST TO BIGQUERY
     if (extracted.length > 0) {
+      // 4a: Delete any existing rows for this document+page (idempotent re-runs)
+      const BQ_QUERY_URL = `https://bigquery.googleapis.com/bigquery/v2/projects/${BQ_PROJECT}/queries`;
+      const deleteQuery = `DELETE FROM \`${BQ_PROJECT}.${BQ_DATASET}.${BQ_TABLE}\` WHERE eob_document_id = '${job.eob_document_id}' AND page_number = ${job.page_number}`;
+      try {
+        const delResp = await fetch(BQ_QUERY_URL, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${gToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: deleteQuery, useLegacySql: false })
+        });
+        const delResult = await delResp.json();
+        if (delResult.numDmlAffectedRows && parseInt(delResult.numDmlAffectedRows) > 0) {
+          console.info(`[eob-worker] Cleared ${delResult.numDmlAffectedRows} existing BQ rows for doc ${job.eob_document_id} page ${job.page_number}`);
+        }
+      } catch (delErr: any) {
+        // Non-fatal: if delete fails (e.g., streaming buffer), insert will still work
+        // Worst case: duplicates, which is better than losing data
+        console.warn(`[eob-worker] BQ pre-delete failed (non-fatal): ${delErr.message}`);
+      }
+
+      // 4b: Insert fresh rows
       const now = formatBQTimestamp(new Date());
 
       const rows = extracted.map((it: any, idx: number) => ({
-        insertId: `${job.eob_document_id}_p${job.page_number}_${idx}`,  // dedup key for retries
+        insertId: `${job.eob_document_id}_p${job.page_number}_${idx}`,  // dedup key for short-window retries
         json: {
           id: crypto.randomUUID(),
           eob_document_id: job.eob_document_id,
@@ -264,8 +290,8 @@ Deno.serve(async (req) => {
           paid_amount: parseCurrency(it.paid_amount),
           patient_responsibility: parseCurrency(it.patient_responsibility),
           rendering_provider_npi: it.rendering_provider_npi || null,
-          denial_code: it.denial_code || null,
-          denial_reason: it.denial_reason || null,
+          remark_code: it.remark_code || null,
+          remark_reason: it.remark_reason || null,
           claim_status: it.claim_status || null,
           created_at: now,
         }

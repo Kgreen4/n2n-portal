@@ -7,6 +7,10 @@
 //   - Enqueueing page jobs
 //   - Firing eob-worker for each page
 //
+// Supports two PDF source modes:
+//   1. GCS:              { gcs_bucket, gcs_object_name }     — Google Cloud Storage
+//   2. Supabase Storage: { storage_bucket, storage_path }    — Supabase Storage (frontend uploads)
+//
 // This function does NOT charge credits — eob-enqueue does, because only
 // it knows the actual page count after loading the PDF.
 
@@ -57,14 +61,35 @@ Deno.serve(async (req) => {
     }
 
     const practice_id = body?.practice_id;
+    const uploaded_by = body?.uploaded_by || null;  // auth.uid() from frontend
+
+    // Source mode 1: GCS (legacy / n8n / GCS bucket watcher)
     const gcs_object_name = body?.gcs_object_name;
     const gcs_bucket = body?.gcs_bucket || DEFAULT_GCS_BUCKET;
 
-    if (!practice_id || !gcs_object_name) {
-      return json({ error: "Missing practice_id or gcs_object_name" }, 400);
+    // Source mode 2: Supabase Storage (frontend uploads)
+    const storage_bucket = body?.storage_bucket || null;
+    const storage_path = body?.storage_path || null;
+
+    const has_gcs = !!gcs_object_name;
+    const has_storage = !!storage_bucket && !!storage_path;
+
+    if (!practice_id) {
+      return json({ error: "Missing practice_id" }, 400);
+    }
+    if (!has_gcs && !has_storage) {
+      return json({ error: "Must provide either gcs_object_name or (storage_bucket + storage_path)" }, 400);
     }
 
-    console.info("[trigger-eob-parser] start", { practice_id, gcs_object_name, gcs_bucket });
+    // Derive file_name and file_path from whichever source is provided
+    const file_path = has_storage ? storage_path : gcs_object_name;
+    const file_name = file_path!.split("/").pop();
+
+    console.info("[trigger-eob-parser] start", {
+      practice_id,
+      source: has_storage ? "supabase_storage" : "gcs",
+      file_path,
+    });
 
     // ──────────────────────────────────────────────────────────────
     // 1) Create eob_documents entry (status: 'pending')
@@ -74,9 +99,10 @@ Deno.serve(async (req) => {
       .from("eob_documents")
       .insert({
         practice_id,
-        file_path: gcs_object_name,
-        file_name: gcs_object_name.split("/").pop(),
+        file_path,
+        file_name,
         status: "pending",
+        ...(uploaded_by && { uploaded_by }),
       })
       .select()
       .single();
@@ -98,7 +124,7 @@ Deno.serve(async (req) => {
       .insert({
         practice_id,
         eob_document_id,
-        gcs_object_name,
+        gcs_object_name: file_path,  // use file_path regardless of source
         status: "pending",
         credits_used: 0,  // actual credits charged by eob-enqueue (per-page)
       });
@@ -118,12 +144,20 @@ Deno.serve(async (req) => {
     //    Passes GCS metadata so eob-enqueue can download directly
     //    from Google Cloud Storage using its own GCP auth.
     // ──────────────────────────────────────────────────────────────
-    const enqueuePayload = {
+    const enqueuePayload: Record<string, unknown> = {
       practice_id,
       eob_document_id,
-      gcs_bucket,
-      gcs_object_name,
     };
+
+    if (has_storage) {
+      // Supabase Storage source (frontend uploads)
+      enqueuePayload.storage_bucket = storage_bucket;
+      enqueuePayload.storage_path = storage_path;
+    } else {
+      // GCS source (n8n / bucket watcher)
+      enqueuePayload.gcs_bucket = gcs_bucket;
+      enqueuePayload.gcs_object_name = gcs_object_name;
+    }
 
     console.info("[trigger-eob-parser] calling eob-enqueue", enqueuePayload);
 

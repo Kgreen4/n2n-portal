@@ -1,7 +1,10 @@
 // eob-enqueue.js — PDF splitting orchestrator
-// Downloads a multi-page EOB PDF (from signed URL or GCS), splits into individual
-// pages, uploads each to Supabase Storage, enqueues page jobs, and fire-and-forget
-// triggers eob-worker for each page with a 500ms delay for rate limiting.
+// Downloads a multi-page EOB PDF from one of three sources:
+//   1. Signed URL (signed_pdf_url)
+//   2. GCS bucket/object (gcs_bucket + gcs_object_name)
+//   3. Supabase Storage (storage_bucket + storage_path) — for frontend uploads
+// Splits into individual pages, uploads each to Supabase Storage, enqueues page
+// jobs, and fire-and-forget triggers eob-worker for each page.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
@@ -117,13 +120,16 @@ Deno.serve(async (req) => {
   const signed_pdf_url = body?.signed_pdf_url;
   const gcs_bucket = body?.gcs_bucket;
   const gcs_object_name = body?.gcs_object_name;
+  // Supabase Storage source (frontend uploads)
+  const storage_bucket = body?.storage_bucket;
+  const storage_path = body?.storage_path;
 
-  // Require practice_id + eob_document_id + (signed_pdf_url OR gcs_bucket+gcs_object_name)
+  // Require practice_id + eob_document_id + one of three source modes
   if (!practice_id || !eob_document_id) {
     return json({ error: "Missing practice_id or eob_document_id" }, 400);
   }
-  if (!signed_pdf_url && !(gcs_bucket && gcs_object_name)) {
-    return json({ error: "Missing signed_pdf_url or (gcs_bucket + gcs_object_name)" }, 400);
+  if (!signed_pdf_url && !(gcs_bucket && gcs_object_name) && !(storage_bucket && storage_path)) {
+    return json({ error: "Missing PDF source: provide signed_pdf_url, (gcs_bucket + gcs_object_name), or (storage_bucket + storage_path)" }, 400);
   }
 
   console.info("[eob-enqueue] start", { practice_id, eob_document_id });
@@ -138,35 +144,50 @@ Deno.serve(async (req) => {
   };
 
   // ──────────────────────────────────────────────────────────────
-  // 1) Download PDF — from signed URL or GCS bucket/object path
+  // 1) Download PDF — from Supabase Storage, signed URL, or GCS
   // ──────────────────────────────────────────────────────────────
   let pdfBytes: Uint8Array;
   try {
-    let downloadUrl = signed_pdf_url;
-    let downloadHeaders: Record<string, string> = {};
+    if (storage_bucket && storage_path) {
+      // Source mode 3: Supabase Storage (frontend uploads)
+      console.info("[eob-enqueue] downloading from Supabase Storage:", storage_bucket, storage_path);
+      const { data: fileBlob, error: storageErr } = await supabase.storage
+        .from(storage_bucket)
+        .download(storage_path);
 
-    // If no signed URL, build GCS download URL with GCP auth
-    if (!downloadUrl && gcs_bucket && gcs_object_name) {
-      const GCP_SA_JSON_STR = Deno.env.get("GCP_SA_JSON");
-      if (!GCP_SA_JSON_STR) {
-        return json({ error: "GCS download requested but GCP_SA_JSON not configured" }, 500);
+      if (storageErr || !fileBlob) {
+        console.error("[eob-enqueue] Supabase Storage download error:", storageErr);
+        return json({ error: "Failed to download PDF from Supabase Storage", error_code: "file_not_found", details: storageErr?.message }, 400);
       }
-      const sa = JSON.parse(GCP_SA_JSON_STR.trim());
-      const gToken = await getGoogleAccessToken(sa);
-      downloadUrl = `https://storage.googleapis.com/storage/v1/b/${gcs_bucket}/o/${encodeURIComponent(gcs_object_name)}?alt=media`;
-      downloadHeaders = { 'Authorization': `Bearer ${gToken}` };
-      console.info("[eob-enqueue] downloading from GCS:", gcs_bucket, gcs_object_name);
-    }
+      pdfBytes = new Uint8Array(await fileBlob.arrayBuffer());
+    } else {
+      // Source mode 1 (signed URL) or 2 (GCS)
+      let downloadUrl = signed_pdf_url;
+      let downloadHeaders: Record<string, string> = {};
 
-    const resp = await fetch(downloadUrl, { method: "GET", headers: downloadHeaders });
-    if (!resp.ok) {
-      console.error("[eob-enqueue] fetch pdf failed", resp.status, resp.statusText);
-      return json({ error: "Failed to fetch PDF", status: resp.status, statusText: resp.statusText }, 400);
+      // If no signed URL, build GCS download URL with GCP auth
+      if (!downloadUrl && gcs_bucket && gcs_object_name) {
+        const GCP_SA_JSON_STR = Deno.env.get("GCP_SA_JSON");
+        if (!GCP_SA_JSON_STR) {
+          return json({ error: "GCS download requested but GCP_SA_JSON not configured" }, 500);
+        }
+        const sa = JSON.parse(GCP_SA_JSON_STR.trim());
+        const gToken = await getGoogleAccessToken(sa);
+        downloadUrl = `https://storage.googleapis.com/storage/v1/b/${gcs_bucket}/o/${encodeURIComponent(gcs_object_name)}?alt=media`;
+        downloadHeaders = { 'Authorization': `Bearer ${gToken}` };
+        console.info("[eob-enqueue] downloading from GCS:", gcs_bucket, gcs_object_name);
+      }
+
+      const resp = await fetch(downloadUrl, { method: "GET", headers: downloadHeaders });
+      if (!resp.ok) {
+        console.error("[eob-enqueue] fetch pdf failed", resp.status, resp.statusText);
+        return json({ error: "Failed to fetch PDF", error_code: "file_not_found", status: resp.status, statusText: resp.statusText }, 400);
+      }
+      pdfBytes = new Uint8Array(await resp.arrayBuffer());
     }
-    pdfBytes = new Uint8Array(await resp.arrayBuffer());
   } catch (e) {
     console.error("[eob-enqueue] fetch error", e);
-    return json({ error: "Failed to download PDF" }, 400);
+    return json({ error: "Failed to download PDF", error_code: "storage_error" }, 400);
   }
 
   // 2) Load PDF, count pages, validate
@@ -216,7 +237,7 @@ Deno.serve(async (req) => {
   try {
     const { error: docErr } = await supabase
       .from("eob_documents")
-      .update({ status: "queued", updated_at: nowIso, error_message: null })
+      .update({ status: "queued", updated_at: nowIso, error_message: null, total_pages: totalPages })
       .eq("id", eob_document_id);
 
     if (docErr) {
@@ -423,7 +444,7 @@ Deno.serve(async (req) => {
       .eq("id", eob_document_id)
       .single();
 
-    if (docCheck?.status !== "completed") {
+    if (docCheck?.status !== "completed" && docCheck?.status !== "partial_failure" && docCheck?.status !== "failed") {
       await supabase
         .from("eob_documents")
         .update({ status: "processing", updated_at: new Date().toISOString() })
