@@ -115,6 +115,14 @@ async function getGoogleAccessToken(sa: any) {
 }
 
 // ──────────────────────────────────────────────────────────────
+// Helpers: Retry Logic for Gemini 429/503
+// ──────────────────────────────────────────────────────────────
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const GEMINI_MAX_RETRIES = 2;        // 2 retries = 3 total attempts
+const GEMINI_RETRY_BASE_MS = 10000;  // 10s initial backoff
+const GEMINI_RETRY_MULTIPLIER = 1.5; // backoffs: 10s, 15s
+
+// ──────────────────────────────────────────────────────────────
 // Enhanced Gemini Prompt (13 fields, per-page extraction)
 // ──────────────────────────────────────────────────────────────
 const GEMINI_PROMPT = `Extract ALL medical line items from this EOB (Explanation of Benefits) page.
@@ -176,28 +184,57 @@ Deno.serve(async (req) => {
     // STEP 2: AUTHENTICATE to GCP
     const gToken = await getGoogleAccessToken(sa);
 
-    // STEP 3: CALL GEMINI 2.0 FLASH (Vertex AI) — per-page extraction
+    // STEP 3: CALL GEMINI 2.0 FLASH (Vertex AI) — per-page extraction with retry
     const VERTEX_URL = `https://us-central1-aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/us-central1/publishers/google/models/gemini-2.0-flash-exp:generateContent`;
-    const aiResp = await fetch(VERTEX_URL, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${gToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ "role": "user", "parts": [
-          { "text": GEMINI_PROMPT },
-          { "inlineData": { "mimeType": "application/pdf", "data": base64PDF } }
-        ]}],
-        generationConfig: {
-          "responseMimeType": "application/json",
-          "maxOutputTokens": 4096
-        }
-      })
+    const geminiBody = JSON.stringify({
+      contents: [{ "role": "user", "parts": [
+        { "text": GEMINI_PROMPT },
+        { "inlineData": { "mimeType": "application/pdf", "data": base64PDF } }
+      ]}],
+      generationConfig: { "responseMimeType": "application/json", "maxOutputTokens": 4096 }
     });
-    const aiData = await aiResp.json();
+
+    let aiResp!: Response;
+    let aiData: any;
+
+    for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
+      aiResp = await fetch(VERTEX_URL, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${gToken}`, 'Content-Type': 'application/json' },
+        body: geminiBody
+      });
+      aiData = await aiResp.json();
+
+      if (aiResp.ok && !aiData.error) break;  // success
+
+      const isRetryable = aiResp.status === 429 || aiResp.status === 503;
+      const errMsg = aiData.error?.message || `Gemini HTTP ${aiResp.status}`;
+
+      if (!isRetryable || attempt === GEMINI_MAX_RETRIES) {
+        console.error(`[eob-worker] Gemini API error for page ${job.page_number}: ${errMsg}`);
+        throw new Error(`Gemini API error: ${errMsg}`);
+      }
+
+      // Exponential backoff, respecting Retry-After header if present
+      const retryAfterHeader = aiResp.headers.get('Retry-After');
+      const retryAfterMs = retryAfterHeader ? parseInt(retryAfterHeader, 10) * 1000 : 0;
+      const backoffMs = Math.max(
+        GEMINI_RETRY_BASE_MS * Math.pow(GEMINI_RETRY_MULTIPLIER, attempt),
+        retryAfterMs
+      );
+      console.warn(`[eob-worker] Gemini ${aiResp.status} on page ${job.page_number} (attempt ${attempt + 1}/${GEMINI_MAX_RETRIES + 1}), retrying in ${backoffMs / 1000}s...`);
+      await sleep(backoffMs);
+    }
 
     // Handle empty/blocked Gemini responses (cover pages, blank pages)
     if (!aiData.candidates || !aiData.candidates[0]?.content?.parts?.[0]?.text) {
       console.info(`[eob-worker] No content from Gemini for page ${job.page_number} — likely a cover/summary page`);
-      await supabase.rpc('succeed_eob_page_job', { p_page_job_id: job.id });
+      await supabase.rpc('succeed_eob_page_job', {
+        p_page_job_id: job.id,
+        p_items_extracted: 0,
+        p_gemini_response_type: 'no_candidates',
+        p_gemini_raw_response: aiData
+      });
       return new Response(JSON.stringify({ status: 'succeeded', count: 0, note: 'No extractable content on this page' }), { status: 200 });
     }
 
@@ -257,8 +294,13 @@ Deno.serve(async (req) => {
       console.info(`[eob-worker] Inserted ${rows.length} rows into BigQuery for page ${job.page_number}`);
     }
 
-    // STEP 5: FINALIZE — mark job as succeeded
-    await supabase.rpc('succeed_eob_page_job', { p_page_job_id: job.id });
+    // STEP 5: FINALIZE — mark job as succeeded with audit data
+    await supabase.rpc('succeed_eob_page_job', {
+      p_page_job_id: job.id,
+      p_items_extracted: extracted.length,
+      p_gemini_response_type: extracted.length > 0 ? 'items_found' : 'empty_items_array',
+      p_gemini_raw_response: aiData
+    });
     return new Response(JSON.stringify({
       status: 'succeeded',
       count: extracted.length,

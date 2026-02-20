@@ -1,7 +1,8 @@
 -- ============================================================
 -- RUN #1: enqueue_eob_page_job (run by itself)
--- Inserts a page job and RETURNS its UUID.
--- Called by eob-enqueue.js for each page after splitting.
+-- Creates a page job row. Uses ON CONFLICT for idempotency —
+-- if the same (document, page) already exists, just touches
+-- updated_at and returns the existing job ID.
 -- ============================================================
 CREATE OR REPLACE FUNCTION public.enqueue_eob_page_job(
   p_eob_document_id uuid,
@@ -15,7 +16,7 @@ CREATE OR REPLACE FUNCTION public.enqueue_eob_page_job(
 RETURNS uuid
 LANGUAGE plpgsql
 SECURITY DEFINER
-AS $$
+AS $fn$
 DECLARE
   v_job_id uuid;
 BEGIN
@@ -28,7 +29,9 @@ BEGIN
     p_page_storage_bucket, p_page_storage_path, p_run_after,
     'queued', 3, 0
   )
+  ON CONFLICT (eob_document_id, page_number) DO UPDATE
+    SET updated_at = now()
   RETURNING id INTO v_job_id;
   RETURN v_job_id;
 END;
-$$;
+$fn$;

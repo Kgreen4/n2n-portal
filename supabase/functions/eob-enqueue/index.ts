@@ -9,7 +9,8 @@ import { PDFDocument } from "npm:pdf-lib@1.17.1";
 
 const MAX_PAGES_PER_DOC = 500;
 const STORAGE_BUCKET = "eob-pages";
-const WORKER_DELAY_MS = 500; // Delay between worker triggers to avoid Gemini 429
+// Worker triggering: fire in batches to avoid Gemini 429 rate limits
+// Each batch fires concurrently, with delays between batches
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -249,9 +250,10 @@ Deno.serve(async (req) => {
   }
 
   // ──────────────────────────────────────────────────────────────
-  // 6) Process pages: split, upload, enqueue, and fire workers
+  // 6) PHASE 1: Split, upload, and enqueue ALL page jobs first
+  //    (no worker triggers yet — just get all jobs into the DB)
   // ──────────────────────────────────────────────────────────────
-  const workerTriggers: Array<{ page: number; status: string }> = [];
+  const enqueuedJobs: Array<{ jobId: string; pageNumber: number }> = [];
 
   try {
     for (let i = 0; i < totalPages; i++) {
@@ -324,60 +326,95 @@ Deno.serve(async (req) => {
         // Capture the job ID returned by the RPC (if it returns one)
         jobId = enqueueResult?.id || enqueueResult || null;
         console.info(`[eob-enqueue] enqueued job for ${pagePath}, jobId: ${jobId}`);
+        enqueuedJobs.push({ jobId: jobId!, pageNumber });
       } catch (e) {
         console.error("[eob-enqueue] enqueue rpc thrown", e);
         await refundCredits();
         return json({ error: "Failed to enqueue page job" }, 500);
       }
-
-      // ── D. Trigger eob-worker for this page ──
-      // We await the fetch to ensure the request is delivered before the
-      // edge function runtime exits. We don't wait for the worker to finish
-      // processing — just confirm the trigger was accepted (HTTP 2xx).
-      const workerPayload = {
-        job: {
-          id: jobId,
-          eob_document_id: eob_document_id,
-          page_number: pageNumber,
-          practice_id: practice_id,  // Pass directly so worker skips DB lookup
-        }
-      };
-
-      try {
-        const wResp = await fetch(`${SUPABASE_URL}/functions/v1/eob-worker`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-          },
-          body: JSON.stringify(workerPayload),
-        });
-        // Read and discard the response body so the connection is released,
-        // but don't block on the worker's full processing time.
-        // Note: Supabase edge functions respond immediately with the return value,
-        // so this await is fast — the worker runs its Gemini call synchronously
-        // before returning.
-        const wResult = await wResp.text();
-        console.info(`[eob-enqueue] worker page ${pageNumber}: HTTP ${wResp.status}`);
-        workerTriggers.push({ page: pageNumber, status: wResp.ok ? 'triggered' : 'trigger_error' });
-      } catch (e) {
-        console.warn(`[eob-enqueue] worker trigger failed for page ${pageNumber}:`, e.message);
-        workerTriggers.push({ page: pageNumber, status: 'trigger_error' });
-      }
-
-      // ── E. Rate limiting: 500ms delay between worker triggers ──
-      if (i < totalPages - 1) {
-        await sleep(WORKER_DELAY_MS);
-      }
-
-    } // end pages loop
+    } // end enqueue loop
   } catch (e) {
-    console.error("[eob-enqueue] processing loop error", e);
+    console.error("[eob-enqueue] enqueue phase error", e);
     await refundCredits();
-    return json({ error: "Processing error" }, 500);
+    return json({ error: "Enqueue phase error" }, 500);
   }
 
-  // 7) Final status check — only update to "processing" if workers haven't
+  console.info(`[eob-enqueue] Phase 1 complete: ${enqueuedJobs.length} jobs enqueued for ${totalPages} pages`);
+
+  // ──────────────────────────────────────────────────────────────
+  // 7) PHASE 2: Fire ALL workers in parallel (fire-and-forget)
+  //    We send requests without awaiting the full response body.
+  //    Workers run independently and update their own job status.
+  //    We batch-fire with small delays to avoid Gemini rate limits.
+  // ──────────────────────────────────────────────────────────────
+  const BATCH_SIZE = 3;          // fire 3 workers at a time (conservative to avoid Gemini 429)
+  const BATCH_DELAY_MS = 3000;   // wait 3s between batches to respect Gemini rate limits
+  const workerTriggers: Array<{ page: number; status: string }> = [];
+
+  try {
+    for (let b = 0; b < enqueuedJobs.length; b += BATCH_SIZE) {
+      const batch = enqueuedJobs.slice(b, b + BATCH_SIZE);
+
+      // Fire all workers in this batch concurrently.
+      // We use AbortController with a short timeout to ensure the request
+      // reaches the Supabase API gateway without waiting for the worker to
+      // finish processing (which takes 5-10s per page due to Gemini).
+      // The gateway will keep the worker running even if we abort.
+      const batchPromises = batch.map(async ({ jobId, pageNumber }) => {
+        const workerPayload = {
+          job: {
+            id: jobId,
+            eob_document_id: eob_document_id,
+            page_number: pageNumber,
+            practice_id: practice_id,
+          }
+        };
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s to dispatch
+          await fetch(`${SUPABASE_URL}/functions/v1/eob-worker`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+            },
+            body: JSON.stringify(workerPayload),
+            signal: controller.signal,
+          }).catch(() => {/* abort is expected */});
+          clearTimeout(timeoutId);
+          console.info(`[eob-enqueue] worker fired for page ${pageNumber}`);
+          return { page: pageNumber, status: 'triggered' };
+        } catch (e: any) {
+          // AbortError is expected — it means the request was dispatched
+          // but we didn't wait for the response. The worker still runs.
+          if (e.name === 'AbortError') {
+            console.info(`[eob-enqueue] worker dispatched for page ${pageNumber} (abort after dispatch)`);
+            return { page: pageNumber, status: 'triggered' };
+          }
+          console.warn(`[eob-enqueue] worker trigger failed for page ${pageNumber}:`, e.message);
+          return { page: pageNumber, status: 'trigger_error' };
+        }
+      });
+
+      const batchResults = await Promise.allSettled(batchPromises);
+      for (const result of batchResults) {
+        if (result.status === 'fulfilled') {
+          workerTriggers.push(result.value);
+        }
+      }
+
+      // Rate limit between batches
+      if (b + BATCH_SIZE < enqueuedJobs.length) {
+        await sleep(BATCH_DELAY_MS);
+      }
+    }
+  } catch (e) {
+    console.warn("[eob-enqueue] worker trigger phase error (non-fatal):", e);
+  }
+
+  console.info(`[eob-enqueue] Phase 2 complete: ${workerTriggers.length} workers triggered`);
+
+  // 8) Final status check — only update to "processing" if workers haven't
   //    already completed the document (succeed_eob_page_job auto-sets "completed")
   try {
     const { data: docCheck } = await supabase
@@ -396,14 +433,15 @@ Deno.serve(async (req) => {
     console.warn("[eob-enqueue] final eob_documents status check failed", e);
   }
 
-  // 8) Return success summary
-  console.info(`[eob-enqueue] complete: ${totalPages} pages split, uploaded, enqueued, and workers triggered`);
+  // 9) Return success summary — don't wait for workers to finish
+  console.info(`[eob-enqueue] complete: ${totalPages} pages split, uploaded, enqueued, and ${workerTriggers.length} workers triggered`);
   return json({
     success: true,
     eob_document_id,
     practice_id,
     total_pages: totalPages,
+    jobs_enqueued: enqueuedJobs.length,
     workers_triggered: workerTriggers.length,
-    message: `Split ${totalPages} pages, uploaded to storage, enqueued jobs, and triggered ${workerTriggers.length} workers.`,
+    message: `Split ${totalPages} pages, enqueued ${enqueuedJobs.length} jobs, triggered ${workerTriggers.length} workers. Workers process asynchronously.`,
   });
 });

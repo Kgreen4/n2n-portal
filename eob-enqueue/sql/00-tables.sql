@@ -17,20 +17,21 @@ CREATE TABLE IF NOT EXISTS public.eob_page_jobs (
   attempt_count int DEFAULT 0,
   error_message text,
   completed_at timestamptz,
+  items_extracted int,
+  gemini_response_type text,
+  gemini_raw_response jsonb,
   created_at timestamptz DEFAULT now(),
-  updated_at timestamptz DEFAULT now()
+  updated_at timestamptz DEFAULT now(),
+  CONSTRAINT uq_eob_page_jobs_doc_page UNIQUE (eob_document_id, page_number)
 );
-
-CREATE INDEX IF NOT EXISTS idx_eob_page_jobs_document
-  ON public.eob_page_jobs (eob_document_id, page_number);
 
 CREATE INDEX IF NOT EXISTS idx_eob_page_jobs_status
   ON public.eob_page_jobs (status, run_after);
 
 -- practice_credits — credit balance per practice
 CREATE TABLE IF NOT EXISTS public.practice_credits (
-  id uuid PRIMARY KEY,
-  credit_balance int DEFAULT 0,
+  practice_id uuid PRIMARY KEY,
+  credits_remaining int DEFAULT 0,
   created_at timestamptz DEFAULT now(),
   updated_at timestamptz DEFAULT now()
 );
