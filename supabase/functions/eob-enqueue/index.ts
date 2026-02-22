@@ -4,7 +4,7 @@
 //   2. GCS bucket/object (gcs_bucket + gcs_object_name)
 //   3. Supabase Storage (storage_bucket + storage_path) — for frontend uploads
 // Splits into individual pages, uploads each to Supabase Storage, enqueues page
-// jobs, and fire-and-forget triggers eob-worker for each page.
+// jobs, and triggers eob-worker for each page (awaited in batches of 3).
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
@@ -363,24 +363,24 @@ Deno.serve(async (req) => {
   console.info(`[eob-enqueue] Phase 1 complete: ${enqueuedJobs.length} jobs enqueued for ${totalPages} pages`);
 
   // ──────────────────────────────────────────────────────────────
-  // 7) PHASE 2: Fire ALL workers in parallel (fire-and-forget)
-  //    We send requests without awaiting the full response body.
-  //    Workers run independently and update their own job status.
-  //    We batch-fire with small delays to avoid Gemini rate limits.
+  // 7) PHASE 2: Fire workers in batches, AWAIT each batch fully.
+  //    Previously used AbortController fire-and-forget, but the 3s
+  //    abort often fired before the request reached the Supabase
+  //    gateway, leaving pages stuck as "queued" forever.
+  //    Now we await the full worker response. Each worker takes
+  //    5-10s (Gemini), so batches of 3 with delays keeps us well
+  //    within the 150s edge function timeout.
+  //    trigger-eob-parser already returned to the caller, so the
+  //    user isn't waiting for this.
   // ──────────────────────────────────────────────────────────────
   const BATCH_SIZE = 3;          // fire 3 workers at a time (conservative to avoid Gemini 429)
   const BATCH_DELAY_MS = 3000;   // wait 3s between batches to respect Gemini rate limits
-  const workerTriggers: Array<{ page: number; status: string }> = [];
+  const workerResults: Array<{ page: number; status: string; items?: number }> = [];
 
   try {
     for (let b = 0; b < enqueuedJobs.length; b += BATCH_SIZE) {
       const batch = enqueuedJobs.slice(b, b + BATCH_SIZE);
 
-      // Fire all workers in this batch concurrently.
-      // We use AbortController with a short timeout to ensure the request
-      // reaches the Supabase API gateway without waiting for the worker to
-      // finish processing (which takes 5-10s per page due to Gemini).
-      // The gateway will keep the worker running even if we abort.
       const batchPromises = batch.map(async ({ jobId, pageNumber }) => {
         const workerPayload = {
           job: {
@@ -391,28 +391,24 @@ Deno.serve(async (req) => {
           }
         };
         try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s to dispatch
-          await fetch(`${SUPABASE_URL}/functions/v1/eob-worker`, {
+          const response = await fetch(`${SUPABASE_URL}/functions/v1/eob-worker`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
             },
             body: JSON.stringify(workerPayload),
-            signal: controller.signal,
-          }).catch(() => {/* abort is expected */});
-          clearTimeout(timeoutId);
-          console.info(`[eob-enqueue] worker fired for page ${pageNumber}`);
-          return { page: pageNumber, status: 'triggered' };
-        } catch (e: any) {
-          // AbortError is expected — it means the request was dispatched
-          // but we didn't wait for the response. The worker still runs.
-          if (e.name === 'AbortError') {
-            console.info(`[eob-enqueue] worker dispatched for page ${pageNumber} (abort after dispatch)`);
-            return { page: pageNumber, status: 'triggered' };
+          });
+          const result = await response.json();
+          if (response.ok) {
+            console.info(`[eob-enqueue] worker succeeded for page ${pageNumber}: ${result.count} items`);
+            return { page: pageNumber, status: 'succeeded', items: result.count || 0 };
+          } else {
+            console.warn(`[eob-enqueue] worker returned error for page ${pageNumber}: ${result.details || result.error}`);
+            return { page: pageNumber, status: 'worker_error' };
           }
-          console.warn(`[eob-enqueue] worker trigger failed for page ${pageNumber}:`, e.message);
+        } catch (e: any) {
+          console.warn(`[eob-enqueue] worker fetch failed for page ${pageNumber}: ${e.message}`);
           return { page: pageNumber, status: 'trigger_error' };
         }
       });
@@ -420,7 +416,7 @@ Deno.serve(async (req) => {
       const batchResults = await Promise.allSettled(batchPromises);
       for (const result of batchResults) {
         if (result.status === 'fulfilled') {
-          workerTriggers.push(result.value);
+          workerResults.push(result.value);
         }
       }
 
@@ -430,10 +426,12 @@ Deno.serve(async (req) => {
       }
     }
   } catch (e) {
-    console.warn("[eob-enqueue] worker trigger phase error (non-fatal):", e);
+    console.warn("[eob-enqueue] worker phase error (non-fatal):", e);
   }
 
-  console.info(`[eob-enqueue] Phase 2 complete: ${workerTriggers.length} workers triggered`);
+  const succeededCount = workerResults.filter(r => r.status === 'succeeded').length;
+  const totalItems = workerResults.reduce((sum, r) => sum + (r.items || 0), 0);
+  console.info(`[eob-enqueue] Phase 2 complete: ${succeededCount}/${workerResults.length} workers succeeded, ${totalItems} items extracted`);
 
   // 8) Final status check — only update to "processing" if workers haven't
   //    already completed the document (succeed_eob_page_job auto-sets "completed")
@@ -454,15 +452,17 @@ Deno.serve(async (req) => {
     console.warn("[eob-enqueue] final eob_documents status check failed", e);
   }
 
-  // 9) Return success summary — don't wait for workers to finish
-  console.info(`[eob-enqueue] complete: ${totalPages} pages split, uploaded, enqueued, and ${workerTriggers.length} workers triggered`);
+  // 9) Return success summary
+  console.info(`[eob-enqueue] complete: ${totalPages} pages, ${succeededCount}/${workerResults.length} workers succeeded, ${totalItems} items`);
   return json({
     success: true,
     eob_document_id,
     practice_id,
     total_pages: totalPages,
     jobs_enqueued: enqueuedJobs.length,
-    workers_triggered: workerTriggers.length,
-    message: `Split ${totalPages} pages, enqueued ${enqueuedJobs.length} jobs, triggered ${workerTriggers.length} workers. Workers process asynchronously.`,
+    workers_completed: workerResults.length,
+    workers_succeeded: succeededCount,
+    total_items_extracted: totalItems,
+    message: `Split ${totalPages} pages, ${succeededCount}/${workerResults.length} workers succeeded, ${totalItems} items extracted.`,
   });
 });
