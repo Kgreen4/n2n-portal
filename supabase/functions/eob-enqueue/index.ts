@@ -134,6 +134,22 @@ Deno.serve(async (req) => {
 
   console.info("[eob-enqueue] start", { practice_id, eob_document_id });
 
+  // Look up file_name from eob_documents for denormalization into page jobs + worker payload
+  let file_name: string | null = null;
+  try {
+    const { data: docRow, error: docErr } = await supabase
+      .from("eob_documents")
+      .select("file_name")
+      .eq("id", eob_document_id)
+      .single();
+    if (!docErr && docRow?.file_name) {
+      file_name = docRow.file_name;
+    }
+    console.info("[eob-enqueue] file_name for denormalization:", file_name);
+  } catch (e) {
+    console.warn("[eob-enqueue] file_name lookup failed (non-fatal):", e);
+  }
+
   // Helper to refund credits on error (best-effort)
   const refundCredits = async () => {
     try {
@@ -336,6 +352,7 @@ Deno.serve(async (req) => {
           p_page_storage_bucket: STORAGE_BUCKET,
           p_page_storage_path: pagePath,
           p_run_after: nowIso,
+          p_file_name: file_name,  // denormalized from eob_documents
         });
 
         if (enqueueErr) {
@@ -388,6 +405,7 @@ Deno.serve(async (req) => {
             eob_document_id: eob_document_id,
             page_number: pageNumber,
             practice_id: practice_id,
+            file_name: file_name,  // denormalized for BQ inserts
           }
         };
         try {

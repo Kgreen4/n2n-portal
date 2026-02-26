@@ -57,7 +57,7 @@ Deno.serve(async (req) => {
     // ──────────────────────────────────────────────────────────────
     const { data: stuckJobs, error: stuckErr } = await supabase
       .from("eob_page_jobs")
-      .select("id, eob_document_id, page_number, practice_id")
+      .select("id, eob_document_id, page_number, practice_id, file_name")
       .eq("status", "queued")
       .lt("created_at", new Date(Date.now() - 5 * 60 * 1000).toISOString())
       .limit(10);
@@ -71,7 +71,7 @@ Deno.serve(async (req) => {
       for (const job of stuckJobs) {
         const result = await fireWorker(
           SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-          job.id, job.eob_document_id, job.page_number, job.practice_id
+          job.id, job.eob_document_id, job.page_number, job.practice_id, job.file_name
         );
         summary.stuck_queued.fired++;
         if (result === 'succeeded') summary.stuck_queued.succeeded++;
@@ -86,7 +86,7 @@ Deno.serve(async (req) => {
     // ──────────────────────────────────────────────────────────────
     const { data: retryableJobs, error: retryErr } = await supabase
       .from("eob_page_jobs")
-      .select("id, eob_document_id, page_number, practice_id, attempt_count")
+      .select("id, eob_document_id, page_number, practice_id, attempt_count, file_name")
       .eq("status", "retryable")
       .lt("updated_at", new Date(Date.now() - 2 * 60 * 1000).toISOString())
       .limit(10);
@@ -106,7 +106,7 @@ Deno.serve(async (req) => {
 
         const result = await fireWorker(
           SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-          job.id, job.eob_document_id, job.page_number, job.practice_id
+          job.id, job.eob_document_id, job.page_number, job.practice_id, job.file_name
         );
         summary.retryable.fired++;
         if (result === 'succeeded') summary.retryable.succeeded++;
@@ -247,6 +247,7 @@ async function fireWorker(
   eobDocumentId: string,
   pageNumber: number,
   practiceId: string,
+  fileName: string | null = null,
 ): Promise<'succeeded' | 'worker_error' | 'fetch_error'> {
   const workerPayload = {
     job: {
@@ -254,6 +255,7 @@ async function fireWorker(
       eob_document_id: eobDocumentId,
       page_number: pageNumber,
       practice_id: practiceId,
+      file_name: fileName,
     },
   };
 

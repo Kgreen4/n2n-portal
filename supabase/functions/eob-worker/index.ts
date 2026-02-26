@@ -123,36 +123,65 @@ const GEMINI_RETRY_BASE_MS = 10000;  // 10s initial backoff
 const GEMINI_RETRY_MULTIPLIER = 1.5; // backoffs: 10s, 15s
 
 // ──────────────────────────────────────────────────────────────
-// Gemini Prompt (13 fields, per-page extraction, header memory)
+// Gemini Prompt (19 fields, polymorphic extraction + 835-ready)
+// Handles standard claims, MIPS/incentive bonuses, and adjustments
 // Uses remark_code/remark_reason (CARC/RARC) instead of denial_code
+// Extracts claim_number, payment_date, payer_name, payer_id,
+// and adjustment_amount for ANSI X12 835 file generation
 // ──────────────────────────────────────────────────────────────
-const GEMINI_PROMPT = `Extract ALL medical line items from this EOB (Explanation of Benefits) page.
+const GEMINI_PROMPT = `Extract ALL line items from this EOB (Explanation of Benefits) or payment document page.
+
+FIRST — Identify the document type for this page:
+- STANDARD CLAIM EOB: Contains CPT/HCPCS procedure codes, dates of service, billed/allowed/paid amounts per service line
+- MIPS/INCENTIVE BONUS: Contains Merit-Based Incentive Payment System (MIPS) bonuses, quality incentive payments, or similar non-service-line payments. These typically list Claim IDs, Member IDs, and Bonus Amounts but NO procedure codes.
+- SUMMARY/CHECK PAGE: Contains check-level totals, payment summaries, or provider-level payment totals. These pages show the total amount paid via a check or EFT, often with a check number.
+- COVER PAGE: Contains only headers, instructions, or administrative info with no extractable data
 
 Return a JSON object with an 'items' array. Each item must include these fields (use null if not found):
+- line_type: "medical_service" for standard claims, "incentive_bonus" for MIPS/quality bonuses, "adjustment" for payment adjustments, "summary_total" for check/payment totals
 - patient_name: Full name of the patient
 - member_id: Member/subscriber ID number
 - date_of_service: Date service was provided (format: YYYY-MM-DD)
-- cpt_code: CPT/HCPCS procedure code
-- cpt_description: Description of the procedure/service
+- cpt_code: CPT/HCPCS procedure code. For MIPS/incentive bonuses, use "MIPS_BONUS". For summary totals, use "SUMMARY"
+- cpt_description: Description of the procedure/service. For MIPS bonuses, use "MIPS Incentive Payment" or the bonus category description. For summary totals, use "Check Total" or "EFT Total" as appropriate
 - billed_amount: Amount billed by the provider (numeric, no $ sign)
 - allowed_amount: Amount allowed by the insurance plan (numeric, no $ sign)
-- paid_amount: Amount paid by the insurance company (numeric, no $ sign)
+- paid_amount: Amount paid by the insurance company (numeric, no $ sign). For MIPS bonuses, this is the bonus/incentive amount. For summary totals, this is the check/EFT total amount
 - patient_responsibility: Amount the patient owes (numeric, no $ sign)
 - rendering_provider_npi: NPI number of the rendering provider
-- remark_code: CARC/RARC remark/reason code (e.g., "CO-45", "PR-1", "OA-23") if the claim was adjusted or denied
-- remark_reason: Text explanation for the remark, adjustment, or denial
-- claim_status: Status of the claim (e.g., "Paid", "Denied", "Adjusted", "Partially Paid")
+- remark_code: CARC/RARC remark/reason code (e.g., "CO-45", "PR-1", "OA-23") if the claim was adjusted or denied. For summary totals, use the check number or EFT trace number if available
+- remark_reason: Text explanation for the remark, adjustment, or denial. For MIPS bonuses, include the Claim ID here if available. For summary totals, include the payer name or payment method
+- claim_status: Status of the claim (e.g., "Paid", "Denied", "Adjusted", "Partially Paid"). For MIPS bonuses, use "Incentive Paid". For summary totals, use "Summary"
+- claim_number: The payer's claim control number / ICN (Internal Claim Number). This is the reference number assigned by the insurance company to this specific claim. Often printed as "Claim #", "ICN", "DCN", "Claim Reference", or "Reference #" on the EOB. Use null if not visible.
+- payment_date: Date the check or EFT was issued (format: YYYY-MM-DD). Usually printed on the check stub, payment summary, or in the page header as "Payment Date", "Check Date", or "Date Issued". Apply the same date to all items on the page if it appears only in the header. Use null if not visible on this page.
+- payer_name: Name of the insurance company / payer issuing this payment. Look in page headers, footers, letterhead, or the "From" / "Payer" section. Apply to all items on the page. Use null if not visible.
+- payer_id: Payer identifier number (if visible). Sometimes shown as "Payer ID", "Plan ID", or near the payer name. Use null if not visible.
+- adjustment_amount: For adjustment or denial lines, the dollar amount of the adjustment (numeric, no $ sign). This is typically billed_amount minus allowed_amount, or the specific denied/adjusted/contractual amount shown on the line. Use null for fully paid lines or if no adjustment amount is shown.
 
 IMPORTANT — Header Memory:
-- If the rendering provider name or NPI appears in the page header or at the top of the page (e.g., "RENDERING PROVIDER: Arizona Heart Specialist") but NOT on each individual line item, apply that provider information to ALL line items on this page.
+- If the rendering provider name or NPI appears in the page header but NOT on each line item, apply that provider info to ALL line items on this page.
 - Similarly, if the patient name or member ID appears only in the page header, carry it down to every line item.
-- Look for provider names, NPIs, patient info, and payer info in page headers, footers, and section headings — not just inline with line items.
+- If the payer name, payment date, or claim number appears in the page header, apply it to ALL items on the page.
+- Look for provider names, NPIs, patient info, and payer info in page headers, footers, and section headings.
+
+IMPORTANT — MIPS/Bonus Pages:
+- Do NOT put Member IDs, NPIs, or Account IDs into the cpt_code field. If there is no CPT code, set cpt_code to "MIPS_BONUS" for incentive pages.
+- Map the incentive/bonus dollar amount to paid_amount.
+- If the page shows a summary of multiple claims with incentive adjustments, extract each claim as a separate line item.
+
+IMPORTANT — Summary/Check Pages:
+- If the page shows a check total, EFT total, or provider payment summary, extract ONE summary_total item per check or EFT payment.
+- Set paid_amount to the total check/EFT amount.
+- Set remark_code to the check number or EFT trace number (e.g., "CHK-12345" or "EFT-98765").
+- Set payment_date to the check/EFT issue date if visible.
+- If the page lists both individual claim lines AND a total, extract BOTH: the individual lines as "medical_service" and the total as "summary_total".
+- Do NOT double-count: the summary_total represents the check total, not an additional payment.
 
 Other instructions:
 - Extract EVERY line item on the page, do not skip any
-- If a field is not present on the EOB, set it to null
+- If a field is not present, set it to null
 - Return amounts as numbers without dollar signs or commas
-- If the page has no line items (e.g., it is a cover page or summary page), return: {"items": []}`;
+- If the page has absolutely no extractable data (blank page, signature-only page), return: {"items": []}`;
 
 // ──────────────────────────────────────────────────────────────
 // Main Worker Handler
@@ -169,14 +198,16 @@ Deno.serve(async (req) => {
     // Use practice_id from payload if provided (passed by eob-enqueue),
     // otherwise look it up from eob_documents
     let practice_id = job.practice_id;
-    if (!practice_id) {
+    let file_name = job.file_name || null;
+    if (!practice_id || !file_name) {
       const { data: docRow, error: docErr } = await supabase
         .from('eob_documents')
-        .select('practice_id')
+        .select('practice_id, file_name')
         .eq('id', job.eob_document_id)
         .single();
       if (docErr) throw new Error(`Doc lookup failed: ${docErr.message}`);
-      practice_id = docRow.practice_id;
+      if (!practice_id) practice_id = docRow.practice_id;
+      if (!file_name) file_name = docRow.file_name || null;
     }
 
     // STEP 1: DOWNLOAD PDF PAGE from Supabase Storage
@@ -280,6 +311,8 @@ Deno.serve(async (req) => {
           eob_document_id: job.eob_document_id,
           practice_id: practice_id,
           page_number: job.page_number,
+          file_name: file_name,
+          line_type: it.line_type || 'medical_service',
           patient_name: it.patient_name || null,
           member_id: it.member_id || null,
           date_of_service: formatBQDate(it.date_of_service),
@@ -293,6 +326,12 @@ Deno.serve(async (req) => {
           remark_code: it.remark_code || null,
           remark_reason: it.remark_reason || null,
           claim_status: it.claim_status || null,
+          // 835-ready fields (Phase 2)
+          claim_number: it.claim_number || null,
+          payment_date: formatBQDate(it.payment_date),
+          payer_name: it.payer_name || null,
+          payer_id: it.payer_id || null,
+          adjustment_amount: parseCurrency(it.adjustment_amount),
           created_at: now,
         }
       }));

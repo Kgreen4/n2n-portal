@@ -26,3 +26,9 @@ Sample Docs/
 
 # Logs
 *.log
+
+# Claude Code session files
+.claude/
+
+# Windows artifacts
+nul
