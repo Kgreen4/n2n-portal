@@ -34,10 +34,11 @@ export async function proxy(request: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser()
 
   // Route Protection Logic
-  // If the user is NOT logged in and tries to access protected routes, redirect to /login
+  // If the user is NOT logged in, redirect to /login from root or protected routes
   if (
     !user &&
-    (request.nextUrl.pathname.startsWith('/dashboard') ||
+    (request.nextUrl.pathname === '/' ||
+     request.nextUrl.pathname.startsWith('/dashboard') ||
      request.nextUrl.pathname.startsWith('/upload') ||
      request.nextUrl.pathname.startsWith('/documents') ||
      request.nextUrl.pathname.startsWith('/inbox') ||
