@@ -10,13 +10,14 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { getCorsHeaders, corsResponse } from "../_shared/cors.ts";
 
 const WORKER_DELAY_MS = 5000; // 5s between individual worker calls (conservative)
 
-function json(data: unknown, status = 200) {
+function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...extraHeaders },
   });
 }
 
@@ -24,18 +25,10 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 Deno.serve(async (req) => {
   // CORS preflight
-  if (req.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-      },
-    });
-  }
+  if (req.method === "OPTIONS") return corsResponse(req);
+  const corsHeaders = getCorsHeaders(req);
 
-  if (req.method !== "POST") return json({ error: "Use POST" }, 405);
+  if (req.method !== "POST") return json({ error: "Use POST" }, 405, corsHeaders);
 
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
   const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");

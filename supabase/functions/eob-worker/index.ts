@@ -3,6 +3,7 @@
 // for extraction, and inserts structured line items into BigQuery.
 
 import { createClient } from "npm:@supabase/supabase-js@2.39.7";
+import { getCorsHeaders, corsResponse } from "../_shared/cors.ts";
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -156,7 +157,12 @@ Return a JSON object with an 'items' array. Each item must include these fields 
 - payment_date: Date the check or EFT was issued (format: YYYY-MM-DD). Usually printed on the check stub, payment summary, or in the page header as "Payment Date", "Check Date", or "Date Issued". Apply the same date to all items on the page if it appears only in the header. Use null if not visible on this page.
 - payer_name: Name of the insurance company / payer issuing this payment. Look in page headers, footers, letterhead, or the "From" / "Payer" section. Apply to all items on the page. Use null if not visible.
 - payer_id: Payer identifier number (if visible). Sometimes shown as "Payer ID", "Plan ID", or near the payer name. Use null if not visible.
-- adjustment_amount: For adjustment or denial lines, the dollar amount of the adjustment (numeric, no $ sign). This is typically billed_amount minus allowed_amount, or the specific denied/adjusted/contractual amount shown on the line. Use null for fully paid lines or if no adjustment amount is shown.
+- adjustment_amount: For adjustment or denial lines, the TOTAL dollar amount of the adjustment (numeric, no $ sign). This is typically billed_amount minus paid_amount, or the specific denied/adjusted/contractual amount shown on the line. Use null for fully paid lines or if no adjustment amount is shown.
+- deductible_amount: The portion of patient responsibility attributed to the deductible (numeric, no $ sign). On many EOBs this appears in a "Deductible" or "Ded" column, or within a combined "Not Covered Ded-Coin-Inst" breakdown. Use null if not broken out separately on the EOB.
+- coinsurance_amount: The portion of patient responsibility attributed to coinsurance (numeric, no $ sign). Often shown as "Coinsurance", "Coins", "Co-Ins" column, or within the combined "Not Covered Ded-Coin-Inst" breakdown. Use null if not broken out separately.
+- copay_amount: The portion of patient responsibility attributed to the copay (numeric, no $ sign). Often shown as "Copay" or "Co-Pay" column. Use null if not broken out separately.
+- contractual_adjustment: The contractual write-off amount — typically billed_amount minus allowed_amount, representing the amount the provider agreed to waive per their payer contract (numeric, no $ sign). Usually labeled "Above Allowed Amount", "Contractual", or the CO-45 amount on the EOB. If not explicitly shown but billed_amount and allowed_amount are both present, calculate as billed_amount minus allowed_amount. Use null if neither value is present.
+- confidence_score: Your confidence (0-100) that this line item was extracted correctly. 100 = all fields clearly printed and unambiguous. 80-99 = most fields clear, minor ambiguity on one field. 50-79 = some fields guessed or partially visible. Below 50 = significant uncertainty, OCR artifacts, or fields inferred from context. Consider: text clarity, field alignment on the page, whether amounts are clearly tied to the correct patient/CPT line.
 
 IMPORTANT — Header Memory:
 - If the rendering provider name or NPI appears in the page header but NOT on each line item, apply that provider info to ALL line items on this page.
@@ -177,6 +183,12 @@ IMPORTANT — Summary/Check Pages:
 - If the page lists both individual claim lines AND a total, extract BOTH: the individual lines as "medical_service" and the total as "summary_total".
 - Do NOT double-count: the summary_total represents the check total, not an additional payment.
 
+IMPORTANT — Financial Breakdown:
+- patient_responsibility should equal deductible_amount + coinsurance_amount + copay_amount (when all three are present).
+- contractual_adjustment is ONLY the contractual/write-off portion (CO-45), NOT total adjustments. adjustment_amount is the TOTAL of all adjustments combined.
+- If the EOB only shows a lump "patient responsibility" without breaking it into deductible/coinsurance/copay, set patient_responsibility to that amount and leave deductible_amount, coinsurance_amount, and copay_amount as null.
+- For BCBS-style EOBs: "Above Allow Amt" maps to contractual_adjustment, "Not Covered Ded-Coin-Inst" is the sum of deductible + coinsurance amounts, "Patient Resp" maps to patient_responsibility.
+
 Other instructions:
 - Extract EVERY line item on the page, do not skip any
 - If a field is not present, set it to null
@@ -187,6 +199,8 @@ Other instructions:
 // Main Worker Handler
 // ──────────────────────────────────────────────────────────────
 Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') return corsResponse(req);
+  const corsHeaders = getCorsHeaders(req);
   let jobId: string | null = null;  // Track job ID for error handling
 
   try {
@@ -222,7 +236,7 @@ Deno.serve(async (req) => {
     const gToken = await getGoogleAccessToken(sa);
 
     // STEP 3: CALL GEMINI 2.0 FLASH (Vertex AI) — per-page extraction with retry
-    const VERTEX_URL = `https://us-central1-aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/us-central1/publishers/google/models/gemini-2.0-flash-exp:generateContent`;
+    const VERTEX_URL = `https://us-central1-aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/us-central1/publishers/google/models/gemini-2.0-flash-001:generateContent`;
     const geminiBody = JSON.stringify({
       contents: [{ "role": "user", "parts": [
         { "text": GEMINI_PROMPT },
@@ -332,6 +346,13 @@ Deno.serve(async (req) => {
           payer_name: it.payer_name || null,
           payer_id: it.payer_id || null,
           adjustment_amount: parseCurrency(it.adjustment_amount),
+          // Financial breakdown (Phase 7)
+          deductible_amount: parseCurrency(it.deductible_amount),
+          coinsurance_amount: parseCurrency(it.coinsurance_amount),
+          copay_amount: parseCurrency(it.copay_amount),
+          contractual_adjustment: parseCurrency(it.contractual_adjustment),
+          // Confidence scoring (Error Inbox Phase 0)
+          confidence_score: parseInt(it.confidence_score) || null,
           created_at: now,
         }
       }));
@@ -366,6 +387,29 @@ Deno.serve(async (req) => {
       p_gemini_response_type: extracted.length > 0 ? 'items_found' : 'empty_items_array',
       p_gemini_raw_response: aiData
     });
+
+    // STEP 6: CHECK EXCEPTIONS — fire if document reached terminal state
+    // Non-blocking: if check-exceptions fails, it doesn't block the worker response
+    const { data: docStatus } = await supabase
+      .from('eob_documents')
+      .select('status')
+      .eq('id', job.eob_document_id)
+      .single();
+
+    if (docStatus && ['completed', 'partial_failure'].includes(docStatus.status)) {
+      const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
+      const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+      fetch(`${SUPABASE_URL}/functions/v1/check-exceptions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ eob_document_id: job.eob_document_id })
+      }).then(r => console.info(`[eob-worker] check-exceptions fired: ${r.status}`))
+        .catch(err => console.warn('[eob-worker] check-exceptions fire failed:', err.message));
+    }
+
     return new Response(JSON.stringify({
       status: 'succeeded',
       count: extracted.length,

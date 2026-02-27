@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
+import { logAuditEvent } from '@/lib/audit'
 
 type UploadStatus = 'idle' | 'uploading' | 'triggering' | 'processing' | 'completed' | 'failed'
 
@@ -92,7 +93,14 @@ export default function PdfUploader({ practiceId }: { practiceId: string }) {
 
       if (triggerError) {
         console.error('[PdfUploader] trigger error:', triggerError)
-        throw new Error(`Pipeline trigger failed: ${triggerError.message}`)
+        // Try to extract the actual error message from the response body
+        let errorMessage = triggerError.message
+        try {
+          const errorBody = await (triggerError as any).context?.json?.()
+          if (errorBody?.message) errorMessage = errorBody.message
+          else if (errorBody?.error === 'duplicate_upload') errorMessage = errorBody.message || 'This file has already been uploaded.'
+        } catch { /* ignore parse errors */ }
+        throw new Error(errorMessage)
       }
       if (!triggerData?.success) {
         console.error('[PdfUploader] trigger returned failure:', triggerData)
@@ -112,6 +120,14 @@ export default function PdfUploader({ practiceId }: { practiceId: string }) {
         itemsExtracted: 0,
       })
       setStatus('processing')
+
+      // Audit log — track upload for HIPAA compliance
+      logAuditEvent(supabase, {
+        action: 'document.upload',
+        resourceType: 'eob_document',
+        resourceId: eobDocId,
+        metadata: { file_name: file.name },
+      })
     } catch (err: any) {
       console.error('[PdfUploader] upload failed:', err)
       setError(err.message || 'An unexpected error occurred during upload.')

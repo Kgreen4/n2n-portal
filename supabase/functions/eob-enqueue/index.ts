@@ -9,16 +9,17 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { PDFDocument } from "npm:pdf-lib@1.17.1";
+import { getCorsHeaders, corsResponse } from "../_shared/cors.ts";
 
 const MAX_PAGES_PER_DOC = 500;
 const STORAGE_BUCKET = "eob-pages";
 // Worker triggering: fire in batches to avoid Gemini 429 rate limits
 // Each batch fires concurrently, with delays between batches
 
-function json(data: unknown, status = 200) {
+function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...extraHeaders },
   });
 }
 
@@ -84,18 +85,10 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 // ──────────────────────────────────────────────────────────────
 Deno.serve(async (req) => {
   // CORS preflight
-  if (req.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-      },
-    });
-  }
+  if (req.method === "OPTIONS") return corsResponse(req);
+  const corsHeaders = getCorsHeaders(req);
 
-  if (req.method !== "POST") return json({ error: "Use POST" }, 405);
+  if (req.method !== "POST") return json({ error: "Use POST" }, 405, corsHeaders);
 
   // Env check
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");

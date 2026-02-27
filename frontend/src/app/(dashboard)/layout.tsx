@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
+import SessionTimeout from '@/components/SessionTimeout'
 
 export default async function DashboardLayout({
   children,
@@ -28,6 +29,7 @@ export default async function DashboardLayout({
   // If no practice, the proxy should have redirected to /setup,
   // but handle the edge case here too
   let practiceName = 'My Practice'
+  let inboxCount = 0
   if (practiceLink) {
     const { data: practice } = await supabase
       .from('practices')
@@ -35,6 +37,14 @@ export default async function DashboardLayout({
       .eq('id', practiceLink.practice_id)
       .single()
     practiceName = practice?.name ?? 'My Practice'
+
+    // Inbox badge count — needs_review documents for this practice
+    const { count } = await supabase
+      .from('eob_documents')
+      .select('*', { count: 'exact', head: true })
+      .eq('practice_id', practiceLink.practice_id)
+      .eq('review_status', 'needs_review')
+    inboxCount = count ?? 0
   }
 
   return (
@@ -62,6 +72,20 @@ export default async function DashboardLayout({
               <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
             </svg>
             Upload EOBs
+          </Link>
+          <Link
+            href="/inbox"
+            className="flex items-center rounded-md px-3 py-2 text-sm font-medium text-gray-300 hover:bg-gray-800 hover:text-white"
+          >
+            <svg className="mr-3 h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+            </svg>
+            Inbox
+            {inboxCount > 0 && (
+              <span className="ml-auto inline-flex items-center justify-center rounded-full bg-red-500 px-2 py-0.5 text-xs font-bold text-white">
+                {inboxCount}
+              </span>
+            )}
           </Link>
           <Link
             href="/documents"
@@ -107,6 +131,7 @@ export default async function DashboardLayout({
       <main className="flex-1 overflow-y-auto">
         <div className="p-8">{children}</div>
       </main>
+      <SessionTimeout />
     </div>
   )
 }
