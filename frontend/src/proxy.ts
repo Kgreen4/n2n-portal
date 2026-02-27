@@ -40,6 +40,7 @@ export async function proxy(request: NextRequest) {
     (request.nextUrl.pathname.startsWith('/dashboard') ||
      request.nextUrl.pathname.startsWith('/upload') ||
      request.nextUrl.pathname.startsWith('/documents') ||
+     request.nextUrl.pathname.startsWith('/inbox') ||
      request.nextUrl.pathname.startsWith('/settings'))
   ) {
     const url = request.nextUrl.clone()
@@ -47,10 +48,10 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(url)
   }
 
-  // If the user IS logged in and visits the root ('/') or '/login', send them to the dashboard
+  // If the user IS logged in and visits the root ('/') or '/login', send them to documents
   if (user && (request.nextUrl.pathname === '/' || request.nextUrl.pathname === '/login')) {
     const url = request.nextUrl.clone()
-    url.pathname = '/dashboard'
+    url.pathname = '/documents'
     return NextResponse.redirect(url)
   }
 
@@ -64,6 +65,7 @@ export async function proxy(request: NextRequest) {
     (request.nextUrl.pathname.startsWith('/dashboard') ||
      request.nextUrl.pathname.startsWith('/upload') ||
      request.nextUrl.pathname.startsWith('/documents') ||
+     request.nextUrl.pathname.startsWith('/inbox') ||
      request.nextUrl.pathname.startsWith('/settings'))
   ) {
     const { data: practiceLink } = await supabase

@@ -126,7 +126,7 @@ export default function PdfUploader({ practiceId }: { practiceId: string }) {
         action: 'document.upload',
         resourceType: 'eob_document',
         resourceId: eobDocId,
-        metadata: { file_name: file.name },
+        metadata: { file_name: file?.name ?? 'unknown' },
       })
     } catch (err: any) {
       console.error('[PdfUploader] upload failed:', err)

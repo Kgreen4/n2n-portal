@@ -9,6 +9,10 @@ cardio-sa-key*
 node_modules/
 .deno/
 
+# Next.js / Vercel
+.next/
+.vercel/
+
 # OS files
 .DS_Store
 Thumbs.db
