@@ -19,6 +19,9 @@ interface Document {
   export_total_paid: number | null
   export_total_patient_resp: number | null
   export_claim_count: number | null
+  export_found_revenue_amount: number | null
+  export_found_revenue_count: number | null
+  has_found_revenue: boolean
 }
 
 interface BatchGroup {
@@ -28,6 +31,8 @@ interface BatchGroup {
   totalPaid: number
   totalPatientResp: number
   claimCount: number
+  foundRevenueAmount: number
+  foundRevenueCount: number
 }
 
 interface Props {
@@ -64,6 +69,8 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
       totalPaid: docs.reduce((s, d) => s + (d.export_total_paid || 0), 0),
       totalPatientResp: docs.reduce((s, d) => s + (d.export_total_patient_resp || 0), 0),
       claimCount: docs.reduce((s, d) => s + (d.export_claim_count || 0), 0),
+      foundRevenueAmount: docs.reduce((s, d) => s + (d.export_found_revenue_amount || 0), 0),
+      foundRevenueCount: docs.reduce((s, d) => s + (d.export_found_revenue_count || 0), 0),
     }))
   })()
 
@@ -226,7 +233,12 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
           </td>
         )}
         <td className="px-6 py-4 text-sm font-medium text-gray-900 max-w-xs truncate">
-          {doc.file_name || doc.id.substring(0, 8)}
+          <span>{doc.file_name || doc.id.substring(0, 8)}</span>
+          {doc.has_found_revenue && (
+            <span className="ml-2 inline-flex items-center rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-green-600/20 ring-inset">
+              Found Revenue
+            </span>
+          )}
         </td>
         <td className="px-6 py-4">
           <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${
@@ -449,6 +461,13 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
                         <span className="text-xs text-gray-500 uppercase tracking-wide">Claims</span>
                         <p className="font-semibold text-gray-900">{batch.claimCount}</p>
                       </div>
+                      {batch.foundRevenueAmount > 0 && (
+                        <div className="text-right">
+                          <span className="text-xs text-green-600 uppercase tracking-wide font-medium">Found Revenue</span>
+                          <p className="font-semibold text-green-700">{formatCurrency(batch.foundRevenueAmount)}</p>
+                          <p className="text-xs text-green-500">{batch.foundRevenueCount} item{batch.foundRevenueCount !== 1 ? 's' : ''}</p>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </button>

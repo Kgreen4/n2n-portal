@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
+import { logAuditEvent } from '@/lib/audit'
 
 export default function LoginPage() {
   const router = useRouter()
@@ -27,6 +28,7 @@ export default function LoginPage() {
       setError(error.message)
       setIsLoading(false)
     } else {
+      logAuditEvent(supabase, { action: 'user.login', metadata: { email: email.trim() } })
       router.push('/dashboard')
       router.refresh() // Crucial for Next.js Server Components to read the new cookie
     }

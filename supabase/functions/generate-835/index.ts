@@ -406,7 +406,7 @@ Deno.serve(async (req) => {
     let firstPayerIdClean = '999999999';
 
     // Per-document summary stats for Export History dashboard
-    const docStats = new Map<string, { total_paid: number; patient_resp: number; claim_count: number }>();
+    const docStats = new Map<string, { total_paid: number; patient_resp: number; claim_count: number; found_revenue_amount: number; found_revenue_count: number }>();
 
     for (const docId of docIds) {
       const bqRows = itemsByDoc.get(docId) || [];
@@ -433,7 +433,9 @@ Deno.serve(async (req) => {
       const docTotalPaid = bqRows.reduce((s: number, r: any) => s + (parseFloat(r.paid_amount) || 0), 0);
       const docPatientResp = bqRows.reduce((s: number, r: any) => s + (parseFloat(r.patient_responsibility) || 0), 0);
       const claimKeys = new Set(bqRows.map((r: any) => r.claim_number || `${r.patient_name}_${r.member_id}`));
-      docStats.set(docId, { total_paid: docTotalPaid, patient_resp: docPatientResp, claim_count: claimKeys.size });
+      const incentiveRows = bqRows.filter((r: any) => r.line_type === 'incentive_bonus');
+      const foundRevenueAmount = incentiveRows.reduce((s: number, r: any) => s + (parseFloat(r.paid_amount) || 0), 0);
+      docStats.set(docId, { total_paid: docTotalPaid, patient_resp: docPatientResp, claim_count: claimKeys.size, found_revenue_amount: foundRevenueAmount, found_revenue_count: incentiveRows.length });
 
       // Capture first payer ID for ISA/GS envelope
       if (transactionCount === 0) {
@@ -522,6 +524,8 @@ Deno.serve(async (req) => {
             export_total_paid: stats.total_paid,
             export_total_patient_resp: stats.patient_resp,
             export_claim_count: stats.claim_count,
+            export_found_revenue_amount: stats.found_revenue_amount,
+            export_found_revenue_count: stats.found_revenue_count,
           })
           .eq('id', docId);
       })
