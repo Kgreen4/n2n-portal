@@ -442,6 +442,13 @@ export default function DocumentDetailPage() {
   const needsReview = doc.review_status === 'needs_review'
   const isExported = !!doc.last_exported_at
 
+  // Reconciliation badge (computed from lineItems once loaded)
+  const sumPaid = lineItems.reduce((sum, it) => sum + (it.paid_amount ? parseFloat(it.paid_amount) : 0), 0)
+  const checkTotal = lineItems.length > 0 && lineItems[0]?.check_total_amount
+    ? parseFloat(lineItems[0].check_total_amount) : null
+  const reconDelta = checkTotal !== null ? Math.abs(checkTotal - sumPaid) : null
+  const isBalanced = reconDelta !== null && reconDelta < 0.01
+
   // Unique pages in line items for page navigation
   const lineItemPages = [...new Set(lineItems.map(i => parseInt(i.page_number)))].sort((a, b) => a - b)
 
@@ -470,6 +477,20 @@ export default function DocumentDetailPage() {
             {doc.has_found_revenue && (
               <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-1 text-xs font-semibold text-green-800 ring-1 ring-green-600/20 ring-inset">
                 Found Revenue
+              </span>
+            )}
+            {lineItems.length > 0 && reconDelta !== null && (
+              <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${
+                isBalanced
+                  ? 'bg-green-100 text-green-800 ring-green-600/20'
+                  : 'bg-red-100 text-red-800 ring-red-600/20'
+              }`}>
+                {isBalanced ? 'Balanced' : `Off by $${reconDelta.toFixed(2)}`}
+              </span>
+            )}
+            {lineItems.length > 0 && reconDelta === null && (
+              <span className="inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-1 text-xs font-semibold text-yellow-800 ring-1 ring-yellow-600/20 ring-inset">
+                No Check Total
               </span>
             )}
           </div>
@@ -1061,6 +1082,48 @@ export default function DocumentDetailPage() {
                   </tbody>
                 </table>
               </div>
+
+              {/* ─── Reconciliation Footer ─── */}
+              {lineItems.length > 0 && (() => {
+                const sumPaid = lineItems.reduce((sum, it) => sum + (it.paid_amount ? parseFloat(it.paid_amount) : 0), 0)
+                const checkTotal = lineItems[0]?.check_total_amount ? parseFloat(lineItems[0].check_total_amount) : null
+                const checkNum = lineItems[0]?.check_number || null
+                const delta = checkTotal !== null ? Math.abs(checkTotal - sumPaid) : null
+                const isBalanced = delta !== null && delta < 0.01
+                return (
+                  <div className="border-t border-gray-200 bg-gray-50 px-4 py-3">
+                    <div className="flex flex-wrap items-center justify-between gap-4 text-sm">
+                      {checkNum && (
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-gray-500">Check / EFT #:</span>
+                          <span className="font-semibold text-gray-900">{checkNum}</span>
+                        </div>
+                      )}
+                      {checkTotal !== null && (
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-gray-500">Check Total:</span>
+                          <span className="font-semibold text-gray-900">${checkTotal.toFixed(2)}</span>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-gray-500">Sum of Paid:</span>
+                        <span className="font-semibold text-gray-900">${sumPaid.toFixed(2)}</span>
+                      </div>
+                      {delta !== null && (
+                        <div className="flex items-center gap-2">
+                          <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                            isBalanced
+                              ? 'bg-green-100 text-green-800'
+                              : 'bg-red-100 text-red-800'
+                          }`}>
+                            {isBalanced ? '✓ Balanced' : `⚠ Off by $${delta.toFixed(2)}`}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })()}
             </div>
           )}
 

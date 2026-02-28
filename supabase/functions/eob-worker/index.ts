@@ -78,6 +78,80 @@ function formatBQDate(val: any): string | null {
 }
 
 // ──────────────────────────────────────────────────────────────
+// Deduplication: merge rows extracted twice (summary + detail)
+// ──────────────────────────────────────────────────────────────
+function deduplicateItems(items: any[]): any[] {
+  if (items.length <= 1) return items;
+
+  // Build composite key for each item
+  const keyOf = (it: any) => [
+    (it.claim_number || '').trim(),
+    (it.patient_name || '').trim().toUpperCase(),
+    (it.cpt_code || '').trim().toUpperCase(),
+    (it.date_of_service || '').trim(),
+    String(parseCurrency(it.paid_amount) ?? ''),
+  ].join('|');
+
+  // Count non-null fields as a quality score
+  const quality = (it: any) => {
+    let score = 0;
+    const fields = [
+      'billed_amount', 'allowed_amount', 'paid_amount', 'contractual_adjustment',
+      'deductible_amount', 'coinsurance_amount', 'copay_amount', 'non_covered_amount',
+      'patient_responsibility', 'adjustment_amount', 'remark_code', 'remark_description',
+      'claim_number', 'member_id', 'cpt_description', 'rendering_provider_npi',
+      'payer_name', 'payment_date',
+    ];
+    for (const f of fields) {
+      if (it[f] !== null && it[f] !== undefined && it[f] !== '') score++;
+    }
+    // Bonus for higher confidence
+    score += (parseInt(it.confidence_score) || 0) / 100;
+    return score;
+  };
+
+  // Group by composite key, keep the highest-quality row per group
+  const groups = new Map<string, any>();
+  for (const item of items) {
+    // Skip summary_total rows — they're kept as-is, never merged with detail lines
+    if (item.line_type === 'summary_total') {
+      // Use a unique key so summary rows never collide
+      groups.set(`__summary_${crypto.randomUUID()}`, item);
+      continue;
+    }
+
+    const k = keyOf(item);
+    if (!k || k === '||||') {
+      // No meaningful key — keep as-is
+      groups.set(`__nokey_${crypto.randomUUID()}`, item);
+      continue;
+    }
+
+    const existing = groups.get(k);
+    if (!existing) {
+      groups.set(k, item);
+    } else {
+      // Merge: start with the higher-quality row, fill in blanks from the other
+      const [winner, donor] = quality(item) >= quality(existing) ? [item, existing] : [existing, item];
+      const merged = { ...winner };
+      for (const [field, val] of Object.entries(donor)) {
+        if ((merged[field] === null || merged[field] === undefined || merged[field] === '') &&
+            val !== null && val !== undefined && val !== '') {
+          merged[field] = val;
+        }
+      }
+      // Take the higher confidence score
+      const winnerConf = parseInt(winner.confidence_score) || 0;
+      const donorConf = parseInt(donor.confidence_score) || 0;
+      merged.confidence_score = Math.max(winnerConf, donorConf);
+      groups.set(k, merged);
+    }
+  }
+
+  return Array.from(groups.values());
+}
+
+// ──────────────────────────────────────────────────────────────
 // GCP Authentication (JWT → Access Token)
 // ──────────────────────────────────────────────────────────────
 async function getGoogleAccessToken(sa: any) {
@@ -184,6 +258,12 @@ IMPORTANT — Summary/Check Pages:
 - Set payment_date to the check/EFT issue date if visible.
 - If the page lists both individual claim lines AND a total, extract BOTH: the individual lines as "medical_service" and the total as "summary_total".
 - Do NOT double-count: the summary_total represents the check total, not an additional payment.
+
+IMPORTANT — Subtotal / Per-Claim Totals (DO NOT extract):
+- Many EOBs print a subtotal box below individual claim lines showing "Benefits Paid", "Total Paid", "Claim Total", or a bare dollar amount. These subtotal boxes merely restate the paid_amount from the detail line above. Do NOT extract these as separate items.
+- If a row has the SAME paid_amount as a detail line already extracted AND lacks its own unique CPT/HCPCS code or unique date_of_service, it is a subtotal — skip it entirely.
+- The summary_total line_type is ONLY for the overall check or EFT payment total (the amount of the entire check), NOT for per-claim subtotals.
+- When in doubt: if a box says "Benefits Paid" or "Total Paid" directly beneath a single claim's detail lines, and the amount matches, do NOT create a new item for it.
 
 IMPORTANT — Financial Breakdown:
 - patient_responsibility should equal deductible_amount + coinsurance_amount + copay_amount (when all three are present).
@@ -293,8 +373,16 @@ Deno.serve(async (req) => {
 
     const rawText = aiData.candidates[0].content.parts[0].text;
     const parsed = JSON.parse(rawText);
-    const extracted = parsed.items || parsed.line_items || [];
-    console.info(`[eob-worker] Gemini extracted ${extracted.length} line items from page ${job.page_number}`);
+    const rawExtracted = parsed.items || parsed.line_items || [];
+    console.info(`[eob-worker] Gemini extracted ${rawExtracted.length} raw line items from page ${job.page_number}`);
+
+    // STEP 3B: DEDUPLICATE — merge rows with same composite key
+    // Gemini sometimes extracts the same service line twice (once from summary, once from detail).
+    // We merge duplicates by keeping the most-populated row (highest confidence, most non-null fields).
+    const extracted = deduplicateItems(rawExtracted);
+    if (extracted.length < rawExtracted.length) {
+      console.info(`[eob-worker] Dedup: merged ${rawExtracted.length} → ${extracted.length} items on page ${job.page_number}`);
+    }
 
     // STEP 4: PERSIST TO BIGQUERY
     if (extracted.length > 0) {
