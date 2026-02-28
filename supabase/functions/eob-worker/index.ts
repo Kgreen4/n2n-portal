@@ -78,6 +78,50 @@ function formatBQDate(val: any): string | null {
 }
 
 // ──────────────────────────────────────────────────────────────
+// Post-processing enrichment: deterministic fallbacks for fields
+// Gemini may miss or inconsistently populate.
+// ──────────────────────────────────────────────────────────────
+const REMARK_CODE_DESCRIPTIONS: Record<string, string> = {
+  '935': 'Payment adjusted based on patient payment option/election',
+  'CO-4': 'The procedure code is inconsistent with the modifier used',
+  'CO-45': 'Charge exceeds fee schedule/maximum allowable',
+  'CO-97': 'Benefit included in payment for another service',
+  'PR-1': 'Deductible amount',
+  'PR-2': 'Coinsurance amount',
+  'PR-3': 'Copay amount',
+  'OA-23': 'Impact of prior payer adjudication',
+  'B19-PR': 'Non-covered charge(s)',
+  'PXN-PR': 'Payment adjusted based on plan provisions',
+};
+
+function enrichExtractedItems(items: any[]): any[] {
+  return items.map(item => {
+    // Fill remark_description from lookup if code exists but description is missing/"-"
+    if (item.remark_code && (!item.remark_description || item.remark_description === '-' || item.remark_description === null)) {
+      const code = (item.remark_code || '').trim();
+      if (REMARK_CODE_DESCRIPTIONS[code]) {
+        item.remark_description = REMARK_CODE_DESCRIPTIONS[code];
+      }
+    }
+
+    // Infer claim_status if missing on non-summary lines
+    if (item.line_type !== 'summary_total' && (!item.claim_status || item.claim_status === '-' || item.claim_status === null)) {
+      const paid = parseFloat(item.paid_amount) || 0;
+      const allowed = parseFloat(item.allowed_amount) || 0;
+      if (paid <= 0) {
+        item.claim_status = 'Denied';
+      } else if (allowed > 0 && paid < allowed) {
+        item.claim_status = 'Partially Paid';
+      } else if (paid > 0) {
+        item.claim_status = 'Paid';
+      }
+    }
+
+    return item;
+  });
+}
+
+// ──────────────────────────────────────────────────────────────
 // Deduplication: merge rows extracted twice (summary + detail)
 // ──────────────────────────────────────────────────────────────
 function deduplicateItems(items: any[]): any[] {
@@ -226,7 +270,7 @@ Return a JSON object with an 'items' array. Each item must include these fields 
 - rendering_provider_npi: NPI number of the rendering provider
 - remark_code: CARC/RARC remark/reason code (e.g., "CO-45", "PR-1", "OA-23") if the claim was adjusted or denied. For summary totals, use the check number or EFT trace number if available
 - remark_reason: Text explanation for the remark, adjustment, or denial. For MIPS bonuses, include the Claim ID here if available. For summary totals, include the payer name or payment method
-- claim_status: Status of the claim (e.g., "Paid", "Denied", "Adjusted", "Partially Paid"). For MIPS bonuses, use "Incentive Paid". For summary totals, use "Summary"
+- claim_status: Status of the claim. Look for explicit labels like "Paid", "Denied", "Adjusted", "Partially Paid", "Processed", or similar text. If no explicit status text is printed on the EOB, INFER the status from the financial fields: if paid_amount > 0 and paid_amount >= allowed_amount use "Paid"; if paid_amount > 0 but paid_amount < allowed_amount use "Partially Paid"; if paid_amount = 0 or null use "Denied"; if adjustment_amount > 0 and paid_amount > 0 use "Adjusted". For MIPS bonuses, use "Incentive Paid". For summary totals, use "Summary". NEVER return null for claim_status on medical_service lines — always infer if not explicitly shown.
 - claim_number: The payer's claim control number / ICN (Internal Claim Number). This is the reference number assigned by the insurance company to this specific claim. Often printed as "Claim #", "ICN", "DCN", "Claim Reference", or "Reference #" on the EOB. Use null if not visible.
 - payment_date: Date the check or EFT was issued (format: YYYY-MM-DD). Usually printed on the check stub, payment summary, or in the page header as "Payment Date", "Check Date", or "Date Issued". Apply the same date to all items on the page if it appears only in the header. Use null if not visible on this page.
 - payer_name: Name of the insurance company / payer issuing this payment. Look in page headers, footers, letterhead, or the "From" / "Payer" section. Apply to all items on the page. Use null if not visible.
@@ -379,10 +423,13 @@ Deno.serve(async (req) => {
     // STEP 3B: DEDUPLICATE — merge rows with same composite key
     // Gemini sometimes extracts the same service line twice (once from summary, once from detail).
     // We merge duplicates by keeping the most-populated row (highest confidence, most non-null fields).
-    const extracted = deduplicateItems(rawExtracted);
-    if (extracted.length < rawExtracted.length) {
-      console.info(`[eob-worker] Dedup: merged ${rawExtracted.length} → ${extracted.length} items on page ${job.page_number}`);
+    const deduped = deduplicateItems(rawExtracted);
+    if (deduped.length < rawExtracted.length) {
+      console.info(`[eob-worker] Dedup: merged ${rawExtracted.length} → ${deduped.length} items on page ${job.page_number}`);
     }
+
+    // STEP 3C: ENRICH — fill deterministic fallbacks (claim_status inference, remark descriptions)
+    const extracted = enrichExtractedItems(deduped);
 
     // STEP 4: PERSIST TO BIGQUERY
     if (extracted.length > 0) {
