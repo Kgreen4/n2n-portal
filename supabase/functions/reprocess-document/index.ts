@@ -92,7 +92,7 @@ Deno.serve(async (req) => {
     // 1. VERIFY DOCUMENT EXISTS AND GET DETAILS
     const { data: doc, error: docErr } = await supabase
       .from('eob_documents')
-      .select('id, practice_id, file_name, status')
+      .select('id, practice_id, file_name, file_path, status')
       .eq('id', eob_document_id)
       .single();
 
@@ -163,8 +163,8 @@ Deno.serve(async (req) => {
     console.info(`[reprocess] Reset document ${eob_document_id} to pending`);
 
     // 5. RE-TRIGGER EXTRACTION
-    // The original PDF is in eob-uploads bucket at: {practice_id}/{file_name}
-    const storagePath = `${doc.practice_id}/${doc.file_name}`;
+    // Use file_path from the document record (contains the actual storage path with timestamp prefix)
+    const storagePath = doc.file_path;
 
     const enqueueResp = await fetch(`${SUPABASE_URL}/functions/v1/eob-enqueue`, {
       method: 'POST',
