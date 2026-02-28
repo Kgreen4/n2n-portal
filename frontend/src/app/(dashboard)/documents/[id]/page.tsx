@@ -799,7 +799,7 @@ export default function DocumentDetailPage() {
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Billed</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Allowed</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Paid</th>
-                        <th className="px-3 py-2 text-right font-medium text-gray-500">Adj</th>
+                        <th className="px-3 py-2 text-right font-medium text-gray-500">Adjustment</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Deduct</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">CoIns</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Copay</th>
@@ -934,7 +934,7 @@ export default function DocumentDetailPage() {
                                 type="text"
                                 value={getEditValue(key, 'remark_description', item.remark_description)}
                                 onChange={e => handleFieldChange(key, 'remark_description', e.target.value)}
-                                className="w-32 rounded border border-blue-300 bg-blue-50/50 px-1.5 py-1 text-xs font-medium text-gray-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:bg-white"
+                                className="w-48 rounded border border-blue-300 bg-blue-50/50 px-1.5 py-1 text-xs font-medium text-gray-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:bg-white"
                               />
                             </td>
                             <td className="px-3 py-2 text-center">
@@ -978,7 +978,7 @@ export default function DocumentDetailPage() {
                       <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase">CPT</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Billed</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Allowed</th>
-                      <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Adj</th>
+                      <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Adjustment</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Deduct</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">CoIns</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Copay</th>
@@ -988,7 +988,7 @@ export default function DocumentDetailPage() {
                       <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase">Claim #</th>
                       <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase">Status</th>
                       <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase">Remark</th>
-                      <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase">Remark Desc</th>
+                      <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase min-w-[200px]">Remark Desc</th>
                       <th className="px-4 py-3 text-center font-medium text-gray-500 uppercase">Conf</th>
                     </tr>
                   </thead>
@@ -1041,8 +1041,8 @@ export default function DocumentDetailPage() {
                           <td className="px-4 py-2 text-gray-500 max-w-[100px] truncate" title={item.remark_reason || ''}>
                             {item.remark_code || '-'}
                           </td>
-                          <td className="px-4 py-2 text-gray-500 max-w-[160px] truncate" title={item.remark_description || ''}>
-                            {item.remark_description || '-'}
+                          <td className="px-4 py-2 text-gray-500 min-w-[200px] max-w-[300px]">
+                            <span className="block text-xs leading-snug whitespace-normal">{item.remark_description || '-'}</span>
                           </td>
                           <td className="px-4 py-2 text-center">
                             {conf !== null ? (
