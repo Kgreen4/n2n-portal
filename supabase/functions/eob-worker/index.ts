@@ -82,6 +82,7 @@ function formatBQDate(val: any): string | null {
 // Gemini may miss or inconsistently populate.
 // ──────────────────────────────────────────────────────────────
 const REMARK_CODE_DESCRIPTIONS: Record<string, string> = {
+  // Common CARC/RARC codes
   '935': 'Payment adjusted based on patient payment option/election',
   'CO-4': 'The procedure code is inconsistent with the modifier used',
   'CO-45': 'Charge exceeds fee schedule/maximum allowable',
@@ -90,21 +91,46 @@ const REMARK_CODE_DESCRIPTIONS: Record<string, string> = {
   'PR-2': 'Coinsurance amount',
   'PR-3': 'Copay amount',
   'OA-23': 'Impact of prior payer adjudication',
-  'B19-PR': 'Non-covered charge(s)',
+  // BCBS-style group codes (with and without suffix)
+  'B19-PR': 'Non-covered charge(s) — patient responsibility',
+  'B19': 'Non-covered charge(s)',
   'PXN-PR': 'Payment adjusted based on plan provisions',
+  'PXN': 'Payment adjusted based on plan provisions',
+  'OCR-OA': 'Other carrier coinsurance adjustment',
+  'OCR': 'Other carrier coinsurance adjustment',
+  // Additional common codes
+  'CO-16': 'Claim/service lacks information needed for adjudication',
+  'CO-18': 'Exact duplicate claim/service',
+  'CO-50': 'Non-covered service — not deemed a medical necessity',
+  'PR-96': 'Non-covered charge(s)',
+  'OA-18': 'Exact duplicate claim/service',
+  'CO-253': 'Sequestration — reduction in federal spending',
 };
 
 function enrichExtractedItems(items: any[]): any[] {
   return items.map(item => {
-    // Fill remark_description from lookup if code exists but description is missing/"-"
+    // ── Multi-code remark description enrichment ──
+    // Handles single codes ("B19-PR") and multi-codes ("B19-PR, PXN-PR")
     if (item.remark_code && (!item.remark_description || item.remark_description === '-' || item.remark_description === null)) {
-      const code = (item.remark_code || '').trim();
-      if (REMARK_CODE_DESCRIPTIONS[code]) {
-        item.remark_description = REMARK_CODE_DESCRIPTIONS[code];
+      const rawCodes = (item.remark_code || '').trim();
+      // Split on comma, slash, or semicolon separators
+      const codes = rawCodes.split(/[,;\/]+/).map((c: string) => c.trim()).filter(Boolean);
+      const descriptions: string[] = [];
+
+      for (const code of codes) {
+        // Try exact match first, then try without suffix (-PR, -OA, -CO)
+        const desc = REMARK_CODE_DESCRIPTIONS[code]
+          || REMARK_CODE_DESCRIPTIONS[code.replace(/-(PR|OA|CO)$/i, '')]
+          || null;
+        if (desc) descriptions.push(desc);
+      }
+
+      if (descriptions.length > 0) {
+        item.remark_description = descriptions.join(' | ');
       }
     }
 
-    // Infer claim_status if missing on non-summary lines
+    // ── Infer claim_status if missing on non-summary lines ──
     if (item.line_type !== 'summary_total' && (!item.claim_status || item.claim_status === '-' || item.claim_status === null)) {
       const paid = parseFloat(item.paid_amount) || 0;
       const allowed = parseFloat(item.allowed_amount) || 0;
@@ -268,7 +294,7 @@ Return a JSON object with an 'items' array. Each item must include these fields 
 - paid_amount: Amount paid by the insurance company (numeric, no $ sign). For MIPS bonuses, this is the bonus/incentive amount. For summary totals, this is the check/EFT total amount
 - patient_responsibility: Amount the patient owes (numeric, no $ sign)
 - rendering_provider_npi: NPI number of the rendering provider
-- remark_code: CARC/RARC remark/reason code (e.g., "CO-45", "PR-1", "OA-23") if the claim was adjusted or denied. For summary totals, use the check number or EFT trace number if available
+- remark_code: ALL CARC/RARC remark/reason codes for this line, comma-separated if multiple (e.g., "CO-45", "PR-1, OA-23", "B19-PR, PXN-PR"). Extract EVERY code shown for the line, not just the first one. Common code prefixes: CO = Contractual Obligation, PR = Patient Responsibility, OA = Other Adjustment. If a code appears with a group prefix (e.g., "B19-PR" means group B19 with PR responsibility), keep the full code as printed. For summary totals, use the check number or EFT trace number if available
 - remark_reason: Text explanation for the remark, adjustment, or denial. For MIPS bonuses, include the Claim ID here if available. For summary totals, include the payer name or payment method
 - claim_status: Status of the claim. Look for explicit labels like "Paid", "Denied", "Adjusted", "Partially Paid", "Processed", or similar text. If no explicit status text is printed on the EOB, INFER the status from the financial fields: if paid_amount > 0 and paid_amount >= allowed_amount use "Paid"; if paid_amount > 0 but paid_amount < allowed_amount use "Partially Paid"; if paid_amount = 0 or null use "Denied"; if adjustment_amount > 0 and paid_amount > 0 use "Adjusted". For MIPS bonuses, use "Incentive Paid". For summary totals, use "Summary". NEVER return null for claim_status on medical_service lines — always infer if not explicitly shown.
 - claim_number: The payer's claim control number / ICN (Internal Claim Number). This is the reference number assigned by the insurance company to this specific claim. Often printed as "Claim #", "ICN", "DCN", "Claim Reference", or "Reference #" on the EOB. Use null if not visible.
@@ -281,7 +307,7 @@ Return a JSON object with an 'items' array. Each item must include these fields 
 - copay_amount: The portion of patient responsibility attributed to the copay (numeric, no $ sign). Often shown as "Copay" or "Co-Pay" column. Use null if not broken out separately.
 - contractual_adjustment: The contractual write-off amount — typically billed_amount minus allowed_amount, representing the amount the provider agreed to waive per their payer contract (numeric, no $ sign). Usually labeled "Above Allowed Amount", "Contractual", or the CO-45 amount on the EOB. If not explicitly shown but billed_amount and allowed_amount are both present, calculate as billed_amount minus allowed_amount. Use null if neither value is present.
 - non_covered_amount: Amount not covered by the plan (numeric, no $ sign). Often shown as "Non-Cvrd Amount", "Non-Covered", "NCov", or "Not Covered Amount" on the EOB. This is DISTINCT from the contractual adjustment — it represents the portion of the charge that the plan does not cover beyond the contractual write-off. Use null if not shown.
-- remark_description: Human-readable description of the remark/reason code. If the EOB explicitly prints a text description next to the code, use that verbatim. If only a numeric code is shown (e.g., "935", "CO-45"), provide the standard CARC/RARC description. Common codes: CO-4 = "The procedure code is inconsistent with the modifier used", CO-45 = "Charge exceeds fee schedule/maximum allowable", CO-97 = "The benefit for this service is included in the payment/allowance for another service", PR-1 = "Deductible amount", PR-2 = "Coinsurance amount", PR-3 = "Copay amount", OA-23 = "The impact of prior payer(s) adjudication", 935 = "Payment adjusted based on patient payment option/election". Use null if no remark code is present.
+- remark_description: Human-readable description(s) of ALL remark/reason codes for this line. If the EOB prints a legend, footnote, or code explanation section (often at the bottom of the page), use those descriptions verbatim. If the line has multiple codes, provide all descriptions separated by " | " (e.g., "Non-covered charge(s) | Payment adjusted based on plan provisions"). If the EOB does not print descriptions but shows codes, provide the standard CARC/RARC description. Common codes: CO-4 = "The procedure code is inconsistent with the modifier used", CO-45 = "Charge exceeds fee schedule/maximum allowable", CO-97 = "The benefit for this service is included in the payment/allowance for another service", PR-1 = "Deductible amount", PR-2 = "Coinsurance amount", PR-3 = "Copay amount", OA-23 = "The impact of prior payer(s) adjudication", 935 = "Payment adjusted based on patient payment option/election", B19-PR = "Non-covered charge(s) — patient responsibility", PXN-PR = "Payment adjusted based on plan provisions", OCR-OA = "Other carrier coinsurance adjustment". Use null if no remark code is present.
 - confidence_score: Your confidence (0-100) that this line item was extracted correctly. 100 = all fields clearly printed and unambiguous. 80-99 = most fields clear, minor ambiguity on one field. 50-79 = some fields guessed or partially visible. Below 50 = significant uncertainty, OCR artifacts, or fields inferred from context. Consider: text clarity, field alignment on the page, whether amounts are clearly tied to the correct patient/CPT line.
 
 IMPORTANT — Header Memory:
@@ -314,6 +340,15 @@ IMPORTANT — Financial Breakdown:
 - contractual_adjustment is ONLY the contractual/write-off portion (CO-45), NOT total adjustments. adjustment_amount is the TOTAL of all adjustments combined.
 - If the EOB only shows a lump "patient responsibility" without breaking it into deductible/coinsurance/copay, set patient_responsibility to that amount and leave deductible_amount, coinsurance_amount, and copay_amount as null.
 - For BCBS-style EOBs: "Above Allow Amt" maps to contractual_adjustment, "Not Covered Ded-Coin-Inst" is the sum of deductible + coinsurance amounts, "Patient Resp" maps to patient_responsibility.
+
+IMPORTANT — Legend / Footnote Code Explanations:
+- Many EOBs print a legend, footnote, or "Code Explanation" section at the bottom of the page that defines the remark codes used on that page (e.g., "B19-PR: Non-covered charge(s)", "PXN-PR: Payment adjusted based on plan provisions").
+- ALWAYS check the bottom of the page for these explanations and use them to fill remark_description for EVERY line item that references those codes.
+- If a code like "B19-PR" has a suffix indicating responsibility type (PR = Patient Responsibility, OA = Other Adjustment, CO = Contractual Obligation), this tells you which financial column the associated amount belongs to:
+  • PR suffix → the amount relates to patient_responsibility
+  • OA suffix → the amount relates to coinsurance_amount or adjustment_amount
+  • CO suffix → the amount relates to contractual_adjustment
+- When you see a "Patient Resp" or "Patient Responsibility" column on the EOB, map that value to the patient_responsibility field.
 
 Other instructions:
 - Extract EVERY line item on the page, do not skip any

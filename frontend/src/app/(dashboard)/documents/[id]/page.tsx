@@ -825,6 +825,7 @@ export default function DocumentDetailPage() {
                         <th className="px-3 py-2 text-right font-medium text-gray-500">CoIns</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Copay</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Non-Cvrd</th>
+                        <th className="px-3 py-2 text-right font-medium text-gray-500">Pat Resp</th>
                         <th className="px-3 py-2 text-left font-medium text-gray-500">Claim #</th>
                         <th className="px-3 py-2 text-left font-medium text-gray-500">Remark</th>
                         <th className="px-3 py-2 text-left font-medium text-gray-500">Remark Desc</th>
@@ -936,6 +937,14 @@ export default function DocumentDetailPage() {
                                 type="text"
                                 value={getEditValue(key, 'non_covered_amount', item.non_covered_amount)}
                                 onChange={e => handleFieldChange(key, 'non_covered_amount', e.target.value)}
+                                className="w-16 rounded border border-blue-300 bg-blue-50/50 px-1.5 py-1 text-xs font-medium text-gray-900 text-right focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:bg-white"
+                              />
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <input
+                                type="text"
+                                value={getEditValue(key, 'patient_responsibility', item.patient_responsibility)}
+                                onChange={e => handleFieldChange(key, 'patient_responsibility', e.target.value)}
                                 className="w-16 rounded border border-blue-300 bg-blue-50/50 px-1.5 py-1 text-xs font-medium text-gray-900 text-right focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:bg-white"
                               />
                             </td>
