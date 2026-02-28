@@ -162,6 +162,8 @@ Return a JSON object with an 'items' array. Each item must include these fields 
 - coinsurance_amount: The portion of patient responsibility attributed to coinsurance (numeric, no $ sign). Often shown as "Coinsurance", "Coins", "Co-Ins" column, or within the combined "Not Covered Ded-Coin-Inst" breakdown. Use null if not broken out separately.
 - copay_amount: The portion of patient responsibility attributed to the copay (numeric, no $ sign). Often shown as "Copay" or "Co-Pay" column. Use null if not broken out separately.
 - contractual_adjustment: The contractual write-off amount — typically billed_amount minus allowed_amount, representing the amount the provider agreed to waive per their payer contract (numeric, no $ sign). Usually labeled "Above Allowed Amount", "Contractual", or the CO-45 amount on the EOB. If not explicitly shown but billed_amount and allowed_amount are both present, calculate as billed_amount minus allowed_amount. Use null if neither value is present.
+- non_covered_amount: Amount not covered by the plan (numeric, no $ sign). Often shown as "Non-Cvrd Amount", "Non-Covered", "NCov", or "Not Covered Amount" on the EOB. This is DISTINCT from the contractual adjustment — it represents the portion of the charge that the plan does not cover beyond the contractual write-off. Use null if not shown.
+- remark_description: Human-readable description of the remark/reason code. If the EOB explicitly prints a text description next to the code, use that verbatim. If only a numeric code is shown (e.g., "935", "CO-45"), provide the standard CARC/RARC description. Common codes: CO-4 = "The procedure code is inconsistent with the modifier used", CO-45 = "Charge exceeds fee schedule/maximum allowable", CO-97 = "The benefit for this service is included in the payment/allowance for another service", PR-1 = "Deductible amount", PR-2 = "Coinsurance amount", PR-3 = "Copay amount", OA-23 = "The impact of prior payer(s) adjudication", 935 = "Payment adjusted based on patient payment option/election". Use null if no remark code is present.
 - confidence_score: Your confidence (0-100) that this line item was extracted correctly. 100 = all fields clearly printed and unambiguous. 80-99 = most fields clear, minor ambiguity on one field. 50-79 = some fields guessed or partially visible. Below 50 = significant uncertainty, OCR artifacts, or fields inferred from context. Consider: text clarity, field alignment on the page, whether amounts are clearly tied to the correct patient/CPT line.
 
 IMPORTANT — Header Memory:
@@ -351,6 +353,9 @@ Deno.serve(async (req) => {
           coinsurance_amount: parseCurrency(it.coinsurance_amount),
           copay_amount: parseCurrency(it.copay_amount),
           contractual_adjustment: parseCurrency(it.contractual_adjustment),
+          // Phase 10: RCM Intelligence — non-covered amount + remark descriptions
+          non_covered_amount: parseCurrency(it.non_covered_amount),
+          remark_description: it.remark_description || null,
           // Confidence scoring (Error Inbox Phase 0)
           confidence_score: parseInt(it.confidence_score) || null,
           created_at: now,

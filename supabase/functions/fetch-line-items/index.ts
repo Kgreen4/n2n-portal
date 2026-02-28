@@ -133,6 +133,8 @@ Deno.serve(async (req) => {
         payer_name,
         payer_id,
         confidence_score,
+        non_covered_amount,
+        remark_description,
         check_number,
         check_total_amount
       FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_payment_items\`

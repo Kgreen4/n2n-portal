@@ -56,6 +56,8 @@ interface LineItem {
   payer_name: string | null
   payer_id: string | null
   confidence_score: string | null
+  non_covered_amount: string | null
+  remark_description: string | null
   check_number: string | null
   check_total_amount: string | null
 }
@@ -94,6 +96,10 @@ export default function DocumentDetailPage() {
   // Download 835
   const [downloading, setDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<string | null>(null)
+
+  // Re-process
+  const [reprocessing, setReprocessing] = useState(false)
+  const [showReprocessConfirm, setShowReprocessConfirm] = useState(false)
 
   // Line items
   const [lineItems, setLineItems] = useState<LineItem[]>([])
@@ -243,6 +249,41 @@ export default function DocumentDetailPage() {
       setDownloadError(err.message || 'Unexpected error')
     } finally {
       setDownloading(false)
+    }
+  }
+
+  // ─── Re-process Handler ──────────────────────────────────────
+
+  async function handleReprocess() {
+    if (!doc) return
+    setReprocessing(true)
+    setShowReprocessConfirm(false)
+
+    try {
+      const { data, error } = await supabase.functions.invoke('reprocess-document', {
+        body: { eob_document_id: doc.id },
+      })
+
+      if (error) {
+        const msg = typeof data === 'object' && data?.message ? data.message : error.message
+        alert(`Re-process failed: ${msg}`)
+        setReprocessing(false)
+        return
+      }
+
+      // Audit log
+      logAuditEvent(supabase, {
+        action: 'document.reprocess',
+        resourceType: 'eob_document',
+        resourceId: doc.id,
+        metadata: { file_name: doc.file_name },
+      })
+
+      // Redirect back to documents list — document will show as 'pending'
+      router.push('/documents')
+    } catch (err: any) {
+      alert(`Re-process failed: ${err.message}`)
+      setReprocessing(false)
     }
   }
 
@@ -438,6 +479,31 @@ export default function DocumentDetailPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Re-process Button — available for terminal states */}
+          {isTerminal && (
+            <button
+              onClick={() => setShowReprocessConfirm(true)}
+              disabled={reprocessing}
+              className="inline-flex items-center rounded-md bg-amber-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {reprocessing ? (
+                <>
+                  <svg className="mr-2 h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Re-processing...
+                </>
+              ) : (
+                <>
+                  <svg className="mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
+                  </svg>
+                  Re-process
+                </>
+              )}
+            </button>
+          )}
           {needsReview && (
             <button
               onClick={handleMarkResolved}
@@ -473,6 +539,38 @@ export default function DocumentDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Re-process Confirmation Dialog */}
+      {showReprocessConfirm && (
+        <div className="mt-4 rounded-md bg-amber-50 border border-amber-200 p-4">
+          <div className="flex items-start gap-3">
+            <svg className="h-5 w-5 text-amber-600 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+            </svg>
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold text-amber-800">Re-process this document?</h3>
+              <p className="mt-1 text-sm text-amber-700">
+                This will delete all extracted data and re-run extraction with the latest prompt settings.
+                Any manual edits will be lost. Export history will be cleared.
+              </p>
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={handleReprocess}
+                  className="inline-flex items-center rounded-md bg-amber-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-amber-500"
+                >
+                  Yes, Re-process
+                </button>
+                <button
+                  onClick={() => setShowReprocessConfirm(false)}
+                  className="inline-flex items-center rounded-md bg-white px-3 py-1.5 text-sm font-semibold text-gray-700 shadow-sm ring-1 ring-gray-300 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {downloadError && (
         <div className="mt-4 rounded-md bg-red-50 border border-red-200 p-4">
@@ -705,8 +803,10 @@ export default function DocumentDetailPage() {
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Deduct</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">CoIns</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Copay</th>
+                        <th className="px-3 py-2 text-right font-medium text-gray-500">Non-Cvrd</th>
                         <th className="px-3 py-2 text-left font-medium text-gray-500">Claim #</th>
                         <th className="px-3 py-2 text-left font-medium text-gray-500">Remark</th>
+                        <th className="px-3 py-2 text-left font-medium text-gray-500">Remark Desc</th>
                         <th className="px-3 py-2 text-center font-medium text-gray-500">Conf</th>
                       </tr>
                     </thead>
@@ -810,6 +910,14 @@ export default function DocumentDetailPage() {
                                 className="w-16 rounded border border-blue-300 bg-blue-50/50 px-1.5 py-1 text-xs font-medium text-gray-900 text-right focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:bg-white"
                               />
                             </td>
+                            <td className="px-3 py-2 text-right">
+                              <input
+                                type="text"
+                                value={getEditValue(key, 'non_covered_amount', item.non_covered_amount)}
+                                onChange={e => handleFieldChange(key, 'non_covered_amount', e.target.value)}
+                                className="w-16 rounded border border-blue-300 bg-blue-50/50 px-1.5 py-1 text-xs font-medium text-gray-900 text-right focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:bg-white"
+                              />
+                            </td>
                             <td className="px-3 py-2">
                               <input
                                 type="text"
@@ -820,6 +928,14 @@ export default function DocumentDetailPage() {
                             </td>
                             <td className="px-3 py-2 max-w-[80px] truncate text-gray-500">
                               {item.remark_code || '-'}
+                            </td>
+                            <td className="px-3 py-2">
+                              <input
+                                type="text"
+                                value={getEditValue(key, 'remark_description', item.remark_description)}
+                                onChange={e => handleFieldChange(key, 'remark_description', e.target.value)}
+                                className="w-32 rounded border border-blue-300 bg-blue-50/50 px-1.5 py-1 text-xs font-medium text-gray-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:bg-white"
+                              />
                             </td>
                             <td className="px-3 py-2 text-center">
                               {conf !== null ? (
@@ -837,7 +953,7 @@ export default function DocumentDetailPage() {
                       })}
                       {visibleItems.length === 0 && (
                         <tr>
-                          <td colSpan={13} className="px-3 py-6 text-center text-gray-400">
+                          <td colSpan={15} className="px-3 py-6 text-center text-gray-400">
                             No items on this page.
                           </td>
                         </tr>
@@ -866,11 +982,13 @@ export default function DocumentDetailPage() {
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Deduct</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">CoIns</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Copay</th>
+                      <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Non-Cvrd</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Pat Resp</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Paid</th>
                       <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase">Claim #</th>
                       <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase">Status</th>
                       <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase">Remark</th>
+                      <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase">Remark Desc</th>
                       <th className="px-4 py-3 text-center font-medium text-gray-500 uppercase">Conf</th>
                     </tr>
                   </thead>
@@ -895,6 +1013,7 @@ export default function DocumentDetailPage() {
                           <td className="px-4 py-2 text-right text-gray-500">{item.deductible_amount ? `$${parseFloat(item.deductible_amount).toFixed(2)}` : '-'}</td>
                           <td className="px-4 py-2 text-right text-gray-500">{item.coinsurance_amount ? `$${parseFloat(item.coinsurance_amount).toFixed(2)}` : '-'}</td>
                           <td className="px-4 py-2 text-right text-gray-500">{item.copay_amount ? `$${parseFloat(item.copay_amount).toFixed(2)}` : '-'}</td>
+                          <td className="px-4 py-2 text-right text-gray-500">{item.non_covered_amount ? `$${parseFloat(item.non_covered_amount).toFixed(2)}` : '-'}</td>
                           <td className="px-4 py-2 text-right text-gray-500">{item.patient_responsibility ? `$${parseFloat(item.patient_responsibility).toFixed(2)}` : '-'}</td>
                           <td className="px-4 py-2 text-right">
                             <div className="flex items-center justify-end gap-1">
@@ -921,6 +1040,9 @@ export default function DocumentDetailPage() {
                           </td>
                           <td className="px-4 py-2 text-gray-500 max-w-[100px] truncate" title={item.remark_reason || ''}>
                             {item.remark_code || '-'}
+                          </td>
+                          <td className="px-4 py-2 text-gray-500 max-w-[160px] truncate" title={item.remark_description || ''}>
+                            {item.remark_description || '-'}
                           </td>
                           <td className="px-4 py-2 text-center">
                             {conf !== null ? (

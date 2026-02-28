@@ -25,6 +25,8 @@ const EDITABLE_FIELDS: Record<string, 'STRING' | 'FLOAT64' | 'INT64' | 'DATE'> =
   coinsurance_amount: 'FLOAT64',
   copay_amount: 'FLOAT64',
   contractual_adjustment: 'FLOAT64',
+  non_covered_amount: 'FLOAT64',
+  remark_description: 'STRING',
   claim_number: 'STRING',
   claim_status: 'STRING',
   remark_code: 'STRING',
