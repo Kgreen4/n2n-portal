@@ -799,7 +799,7 @@ export default function DocumentDetailPage() {
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Billed</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Allowed</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Paid</th>
-                        <th className="px-3 py-2 text-right font-medium text-gray-500">Contract</th>
+                        <th className="px-3 py-2 text-right font-medium text-gray-500">Adj</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Deduct</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">CoIns</th>
                         <th className="px-3 py-2 text-right font-medium text-gray-500">Copay</th>
@@ -978,7 +978,7 @@ export default function DocumentDetailPage() {
                       <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase">CPT</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Billed</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Allowed</th>
-                      <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Contract</th>
+                      <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Adj</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Deduct</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">CoIns</th>
                       <th className="px-4 py-3 text-right font-medium text-gray-500 uppercase">Copay</th>
