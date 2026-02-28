@@ -83,9 +83,9 @@ function formatBQDate(val: any): string | null {
 function deduplicateItems(items: any[]): any[] {
   if (items.length <= 1) return items;
 
-  // Build composite key for each item
+  // Build composite key for each item (excludes claim_number since subtotal
+  // rows lack it, causing false key mismatches with their detail counterparts)
   const keyOf = (it: any) => [
-    (it.claim_number || '').trim(),
     (it.patient_name || '').trim().toUpperCase(),
     (it.cpt_code || '').trim().toUpperCase(),
     (it.date_of_service || '').trim(),

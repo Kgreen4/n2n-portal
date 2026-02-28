@@ -104,41 +104,75 @@ Deno.serve(async (req) => {
     const sa = JSON.parse(GCP_SA_JSON_STR.trim());
     const gToken = await getGoogleAccessToken(sa);
 
-    // Query eob_payment_items view — excludes summary_total rows, enriched with check info
+    // Query eob_payment_items view with two-pass ROW_NUMBER dedup.
+    // Pass 1: Dedup by (patient, cpt, dos, paid_amount) — catches same-line subtotals
+    // Pass 2: Dedup by (claim_number, dos, paid_amount) — catches skeleton rows where
+    //   Gemini extracted the same claim with a wrong CPT code (e.g., IPPHY detail + MISC phantom)
+    // Both passes keep the highest-confidence, most-complete row.
     const items = await bqQuery(gToken, `
-      SELECT
-        eob_document_id,
-        page_number,
-        patient_name,
-        member_id,
-        date_of_service,
-        cpt_code,
-        cpt_description,
-        billed_amount,
-        allowed_amount,
-        paid_amount,
-        adjustment_amount,
-        patient_responsibility,
-        deductible_amount,
-        coinsurance_amount,
-        copay_amount,
-        contractual_adjustment,
-        claim_status,
-        remark_code,
-        remark_reason,
-        rendering_provider_npi,
-        line_type,
-        claim_number,
-        payment_date,
-        payer_name,
-        payer_id,
-        confidence_score,
-        non_covered_amount,
-        remark_description,
-        check_number,
-        check_total_amount
-      FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_payment_items\`
-      WHERE eob_document_id = '${eob_document_id}'
+      SELECT * EXCEPT(dedup_rn2) FROM (
+        SELECT *,
+          ROW_NUMBER() OVER (
+            PARTITION BY
+              UPPER(COALESCE(claim_number, '')),
+              COALESCE(CAST(date_of_service AS STRING), ''),
+              CAST(COALESCE(paid_amount, 0) AS STRING)
+            ORDER BY
+              confidence_score DESC NULLS LAST,
+              contractual_adjustment DESC NULLS LAST,
+              billed_amount DESC NULLS LAST
+          ) AS dedup_rn2
+        FROM (
+          SELECT * EXCEPT(dedup_rn) FROM (
+            SELECT
+              eob_document_id,
+              page_number,
+              patient_name,
+              member_id,
+              date_of_service,
+              cpt_code,
+              cpt_description,
+              billed_amount,
+              allowed_amount,
+              paid_amount,
+              adjustment_amount,
+              patient_responsibility,
+              deductible_amount,
+              coinsurance_amount,
+              copay_amount,
+              contractual_adjustment,
+              claim_status,
+              remark_code,
+              remark_reason,
+              rendering_provider_npi,
+              line_type,
+              claim_number,
+              payment_date,
+              payer_name,
+              payer_id,
+              confidence_score,
+              non_covered_amount,
+              remark_description,
+              check_number,
+              check_total_amount,
+              ROW_NUMBER() OVER (
+                PARTITION BY
+                  UPPER(COALESCE(patient_name, '')),
+                  UPPER(COALESCE(cpt_code, '')),
+                  COALESCE(CAST(date_of_service AS STRING), ''),
+                  CAST(COALESCE(paid_amount, 0) AS STRING)
+                ORDER BY
+                  confidence_score DESC NULLS LAST,
+                  contractual_adjustment DESC NULLS LAST,
+                  claim_number DESC NULLS LAST
+              ) AS dedup_rn
+            FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_payment_items\`
+            WHERE eob_document_id = '${eob_document_id}'
+          )
+          WHERE dedup_rn = 1
+        )
+      )
+      WHERE dedup_rn2 = 1
       ORDER BY page_number, patient_name, date_of_service, cpt_code
     `);
 
