@@ -54,9 +54,11 @@ BEGIN
   FROM public.eob_page_jobs
   WHERE eob_document_id = v_doc_id AND status = 'succeeded';
 
-  -- Step 5: Update document items_extracted count
+  -- Step 5: Update document items_extracted count AND pages_completed
   UPDATE public.eob_documents
-  SET items_extracted = v_total_items, updated_at = now()
+  SET items_extracted = v_total_items,
+      pages_completed = v_succeeded_count,
+      updated_at = now()
   WHERE id = v_doc_id;
 
   -- Step 6: When all pages are terminal, determine final document status
