@@ -80,15 +80,15 @@ function parseCsvRows(csvText: string): Array<{ date: string; check_number: stri
   const lines = csvText.trim().split(/\r?\n/);
   if (lines.length < 2) throw new Error('CSV must have a header row and at least one data row');
 
-  // Parse header to find column indices
+  // Parse header — use includes() for flexible matching (handles "Transaction Date", etc.)
   const header = lines[0].toLowerCase().split(',').map(h => h.trim().replace(/^"|"$/g, ''));
-  const dateIdx = header.findIndex(h => h === 'date' || h === 'deposit_date' || h === 'post_date');
+  const dateIdx = header.findIndex(h => h.includes('date') && !h.includes('balance'));
   const checkIdx = header.findIndex(h => h === 'check_number' || h === 'check_no' || h === 'check#' || h === 'check' || h === 'reference');
-  const amountIdx = header.findIndex(h => h === 'amount' || h === 'deposit_amount' || h === 'credit');
-  const descIdx = header.findIndex(h => h === 'description' || h === 'memo' || h === 'details' || h === 'payee');
+  const amountIdx = header.findIndex(h => h === 'amount' || h.includes('amount') || h === 'credit');
+  const descIdx = header.findIndex(h => h.includes('description') || h === 'memo' || h === 'details' || h === 'payee');
 
-  if (dateIdx === -1) throw new Error('CSV missing required "date" column');
-  if (amountIdx === -1) throw new Error('CSV missing required "amount" column');
+  if (dateIdx === -1) throw new Error('CSV missing required "date" column. Found headers: ' + header.join(', '));
+  if (amountIdx === -1) throw new Error('CSV missing required "amount" column. Found headers: ' + header.join(', '));
 
   const rows: Array<{ date: string; check_number: string; amount: number; description: string }> = [];
 
@@ -96,11 +96,23 @@ function parseCsvRows(csvText: string): Array<{ date: string; check_number: stri
     const line = lines[i].trim();
     if (!line) continue;
 
-    // Simple CSV split (handles quoted fields)
-    const cols = line.match(/("([^"]*)"|[^,]*)/g)?.map(c => c.replace(/^"|"$/g, '').trim()) || [];
+    // CSV split: handle quoted fields with commas inside (e.g., "$1,386.79")
+    const cols: string[] = [];
+    let inQuotes = false;
+    let current = '';
+    for (const ch of line) {
+      if (ch === '"') { inQuotes = !inQuotes; continue; }
+      if (ch === ',' && !inQuotes) { cols.push(current.trim()); current = ''; continue; }
+      current += ch;
+    }
+    cols.push(current.trim());
 
     const rawDate = cols[dateIdx] || '';
     const rawAmount = cols[amountIdx] || '';
+    const rawDesc = descIdx >= 0 ? (cols[descIdx] || '') : '';
+
+    // Skip PENDING rows
+    if (rawDate.toUpperCase().includes('PENDING')) continue;
 
     // Parse date: accept YYYY-MM-DD, MM/DD/YYYY, M/D/YYYY
     let parsedDate = rawDate;
@@ -109,16 +121,33 @@ function parseCsvRows(csvText: string): Array<{ date: string; check_number: stri
       parsedDate = `${mdyMatch[3]}-${mdyMatch[1].padStart(2, '0')}-${mdyMatch[2].padStart(2, '0')}`;
     }
 
-    // Parse amount: strip $, commas, parens for negatives
+    // Parse amount: strip $, commas, spaces. Parens = negative: ($25) → -25
     const cleanAmount = rawAmount.replace(/[$,\s]/g, '').replace(/^\((.+)\)$/, '-$1');
     const amount = parseFloat(cleanAmount);
-    if (isNaN(amount) || amount <= 0) continue; // Skip negative/zero (withdrawals)
+    if (isNaN(amount) || amount <= 0) continue; // Skip negative/zero (withdrawals, checks written)
+
+    // Extract check/reference number from description if no dedicated column
+    let checkNumber = '';
+    if (checkIdx >= 0) {
+      checkNumber = cols[checkIdx] || '';
+    } else {
+      // PNC-style: "DEPOSIT xxxxx0077" → extract trailing digits after xxxxx
+      const depositRef = rawDesc.match(/DEPOSIT\s+x+(\d+)/i);
+      // "CHECK 5277 xxxxx5405" → extract check number
+      const checkRef = rawDesc.match(/CHECK\s+(\d+)/i);
+      // Generic: any trailing number after last space
+      const trailingRef = rawDesc.match(/\b(\d{4,})\s*$/);
+
+      if (depositRef) checkNumber = depositRef[1];
+      else if (checkRef) checkNumber = checkRef[1];
+      else if (trailingRef) checkNumber = trailingRef[1];
+    }
 
     rows.push({
       date: parsedDate,
-      check_number: checkIdx >= 0 ? (cols[checkIdx] || '') : '',
+      check_number: checkNumber,
       amount,
-      description: descIdx >= 0 ? (cols[descIdx] || '') : '',
+      description: rawDesc,
     });
   }
 
