@@ -30,6 +30,7 @@ export default async function DashboardLayout({
   // but handle the edge case here too
   let practiceName = 'My Practice'
   let inboxCount = 0
+  let dashboardAlertCount = 0
   if (practiceLink) {
     const { data: practice } = await supabase
       .from('practices')
@@ -45,6 +46,16 @@ export default async function DashboardLayout({
       .eq('practice_id', practiceLink.practice_id)
       .eq('review_status', 'needs_review')
     inboxCount = count ?? 0
+
+    // Dashboard alert badge — duplicates + errors in last 24 hours
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    const { count: alertCount } = await supabase
+      .from('pipeline_events')
+      .select('*', { count: 'exact', head: true })
+      .eq('practice_id', practiceLink.practice_id)
+      .in('event_type', ['duplicate_skipped', 'processing_error'])
+      .gte('created_at', oneDayAgo)
+    dashboardAlertCount = alertCount ?? 0
   }
 
   return (
@@ -63,6 +74,11 @@ export default async function DashboardLayout({
               <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25" />
             </svg>
             Dashboard
+            {dashboardAlertCount > 0 && (
+              <span className="ml-auto inline-flex items-center justify-center rounded-full bg-amber-500 px-2 py-0.5 text-xs font-bold text-white">
+                {dashboardAlertCount}
+              </span>
+            )}
           </Link>
           <Link
             href="/upload"

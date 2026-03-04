@@ -137,6 +137,20 @@ Deno.serve(async (req) => {
 
     if (existing) {
       console.warn("[trigger-eob-parser] duplicate upload blocked:", { file_name, existing_id: existing.id, status: existing.status });
+
+      // Log duplicate event for dashboard activity feed
+      await supabase.from("pipeline_events").insert({
+        practice_id,
+        event_type: "duplicate_skipped",
+        file_name,
+        details: {
+          existing_document_id: existing.id,
+          existing_status: existing.status,
+          uploaded_at: existing.created_at,
+        },
+        source: has_gdrive ? "folder_watcher" : "manual_upload",
+      });
+
       return json({
         error: "duplicate_upload",
         message: `This file has already been uploaded${existing.status === "completed" ? " and processed" : " and is currently " + existing.status}.`,
@@ -269,6 +283,18 @@ Deno.serve(async (req) => {
         })
         .eq("eob_document_id", eob_document_id);
 
+      // Log error event for dashboard activity feed
+      await supabase.from("pipeline_events").insert({
+        practice_id,
+        event_type: "processing_error",
+        file_name,
+        details: {
+          eob_document_id,
+          error_message: failMessage,
+        },
+        source: has_gdrive ? "folder_watcher" : "manual_upload",
+      });
+
       return json({ error: "eob-enqueue call failed", details: failMessage }, 500);
     } else {
       enqueueResult = await enqueueResponse.json();
@@ -297,7 +323,21 @@ Deno.serve(async (req) => {
       .single();
 
     // ──────────────────────────────────────────────────────────────
-    // 7) Return success
+    // 7) Log pipeline event for dashboard activity feed
+    // ──────────────────────────────────────────────────────────────
+    await supabase.from("pipeline_events").insert({
+      practice_id,
+      event_type: "document_processed",
+      file_name,
+      details: {
+        eob_document_id,
+        total_pages: enqueueResult?.total_pages || null,
+      },
+      source: has_gdrive ? "folder_watcher" : "manual_upload",
+    });
+
+    // ──────────────────────────────────────────────────────────────
+    // 8) Return success
     // ──────────────────────────────────────────────────────────────
     return json({
       success: true,
