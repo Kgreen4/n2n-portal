@@ -156,7 +156,7 @@ export default function SettingsPage() {
               value={folderId}
               onChange={e => setFolderId(e.target.value)}
               placeholder="e.g. 1A2B3C4D5E6F7G8H9I0J"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
             />
             <p className="mt-1 text-xs text-gray-400">
               Find this in your Google Drive folder URL after /folders/
@@ -172,7 +172,7 @@ export default function SettingsPage() {
               value={folderName}
               onChange={e => setFolderName(e.target.value)}
               placeholder="e.g. EOB Inbox"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
             />
           </div>
 
@@ -184,7 +184,7 @@ export default function SettingsPage() {
               <select
                 value={interval}
                 onChange={e => setInterval(Number(e.target.value))}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base text-gray-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
               >
                 <option value={2}>2 minutes</option>
                 <option value={5}>5 minutes</option>
@@ -266,7 +266,7 @@ export default function SettingsPage() {
             type="file"
             accept=".csv,text/csv"
             onChange={e => { setCsvFile(e.target.files?.[0] || null); setCsvResult(null) }}
-            className="block w-full text-sm text-gray-500 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-green-50 file:text-green-700 hover:file:bg-green-100 file:cursor-pointer"
+            className="block w-full text-base text-gray-700 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-base file:font-medium file:bg-green-50 file:text-green-700 hover:file:bg-green-100 file:cursor-pointer"
           />
           <button
             onClick={handleCsvUpload}
