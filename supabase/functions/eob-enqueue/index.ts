@@ -45,7 +45,7 @@ async function getGoogleAccessToken(sa: any) {
   const header = { alg: "RS256", typ: "JWT" };
   const payload = {
     iss: sa.client_email,
-    scope: "https://www.googleapis.com/auth/cloud-platform",
+    scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/drive.readonly",
     aud: "https://oauth2.googleapis.com/token",
     exp: now + 3600,
     iat: now - 30
@@ -116,13 +116,15 @@ Deno.serve(async (req) => {
   // Supabase Storage source (frontend uploads)
   const storage_bucket = body?.storage_bucket;
   const storage_path = body?.storage_path;
+  // Google Drive source (n8n folder watcher)
+  const gdrive_file_id = body?.gdrive_file_id;
 
-  // Require practice_id + eob_document_id + one of three source modes
+  // Require practice_id + eob_document_id + one of four source modes
   if (!practice_id || !eob_document_id) {
     return json({ error: "Missing practice_id or eob_document_id" }, 400);
   }
-  if (!signed_pdf_url && !(gcs_bucket && gcs_object_name) && !(storage_bucket && storage_path)) {
-    return json({ error: "Missing PDF source: provide signed_pdf_url, (gcs_bucket + gcs_object_name), or (storage_bucket + storage_path)" }, 400);
+  if (!signed_pdf_url && !(gcs_bucket && gcs_object_name) && !(storage_bucket && storage_path) && !gdrive_file_id) {
+    return json({ error: "Missing PDF source: provide signed_pdf_url, (gcs_bucket + gcs_object_name), (storage_bucket + storage_path), or gdrive_file_id" }, 400);
   }
 
   console.info("[eob-enqueue] start", { practice_id, eob_document_id });
@@ -157,7 +159,28 @@ Deno.serve(async (req) => {
   // ──────────────────────────────────────────────────────────────
   let pdfBytes: Uint8Array;
   try {
-    if (storage_bucket && storage_path) {
+    if (gdrive_file_id) {
+      // Source mode 4: Google Drive (n8n folder watcher)
+      console.info("[eob-enqueue] downloading from Google Drive:", gdrive_file_id);
+      const GCP_SA_JSON_STR = Deno.env.get("GCP_SA_JSON");
+      if (!GCP_SA_JSON_STR) {
+        return json({ error: "Google Drive download requested but GCP_SA_JSON not configured" }, 500);
+      }
+      const sa = JSON.parse(GCP_SA_JSON_STR.trim());
+      const gToken = await getGoogleAccessToken(sa);
+      const driveUrl = `https://www.googleapis.com/drive/v3/files/${gdrive_file_id}?alt=media`;
+      const driveResp = await fetch(driveUrl, {
+        method: "GET",
+        headers: { "Authorization": `Bearer ${gToken}` },
+      });
+      if (!driveResp.ok) {
+        const errText = await driveResp.text();
+        console.error("[eob-enqueue] Google Drive download failed:", driveResp.status, errText);
+        return json({ error: "Failed to download from Google Drive", status: driveResp.status, details: errText }, 400);
+      }
+      pdfBytes = new Uint8Array(await driveResp.arrayBuffer());
+      console.info("[eob-enqueue] Google Drive download complete:", pdfBytes.length, "bytes");
+    } else if (storage_bucket && storage_path) {
       // Source mode 3: Supabase Storage (frontend uploads)
       console.info("[eob-enqueue] downloading from Supabase Storage:", storage_bucket, storage_path);
       const { data: fileBlob, error: storageErr } = await supabase.storage

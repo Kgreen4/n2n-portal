@@ -7,9 +7,10 @@
 //   - Enqueueing page jobs
 //   - Firing eob-worker for each page
 //
-// Supports two PDF source modes:
+// Supports three PDF source modes:
 //   1. GCS:              { gcs_bucket, gcs_object_name }     — Google Cloud Storage
 //   2. Supabase Storage: { storage_bucket, storage_path }    — Supabase Storage (frontend uploads)
+//   3. Google Drive:     { gdrive_file_id }                  — Google Drive (n8n folder watcher)
 //
 // This function does NOT charge credits — eob-enqueue does, because only
 // it knows the actual page count after loading the PDF.
@@ -91,28 +92,34 @@ Deno.serve(async (req) => {
     const storage_bucket = body?.storage_bucket || null;
     const storage_path = body?.storage_path || null;
 
-    // Original file name (from frontend) — preserves spaces, #, etc.
+    // Source mode 3: Google Drive (n8n folder watcher)
+    const gdrive_file_id = body?.gdrive_file_id || null;
+
+    // Original file name (from frontend or n8n) — preserves spaces, #, etc.
     const original_file_name = body?.original_file_name || null;
 
     const has_gcs = !!gcs_object_name;
     const has_storage = !!storage_bucket && !!storage_path;
+    const has_gdrive = !!gdrive_file_id;
 
     if (!practice_id) {
       return json({ error: "Missing practice_id" }, 400);
     }
-    if (!has_gcs && !has_storage) {
-      return json({ error: "Must provide either gcs_object_name or (storage_bucket + storage_path)" }, 400);
+    if (!has_gcs && !has_storage && !has_gdrive) {
+      return json({ error: "Must provide gcs_object_name, (storage_bucket + storage_path), or gdrive_file_id" }, 400);
     }
 
     // Derive file_name and file_path from whichever source is provided
-    const file_path = has_storage ? storage_path : gcs_object_name;
-    // Prefer original_file_name (from frontend) to preserve human-readable name
-    // with spaces, #, etc. Fall back to deriving from storage path (GCS/n8n callers)
+    const file_path = has_storage ? storage_path
+      : has_gdrive ? `gdrive://${gdrive_file_id}`
+      : gcs_object_name;
+    // Prefer original_file_name (from frontend/n8n) to preserve human-readable name
+    // with spaces, #, etc. Fall back to deriving from storage path (GCS callers)
     const file_name = original_file_name || file_path!.split("/").pop();
 
     console.info("[trigger-eob-parser] start", {
       practice_id,
-      source: has_storage ? "supabase_storage" : "gcs",
+      source: has_storage ? "supabase_storage" : has_gdrive ? "google_drive" : "gcs",
       file_path,
     });
 
@@ -198,7 +205,10 @@ Deno.serve(async (req) => {
       eob_document_id,
     };
 
-    if (has_storage) {
+    if (has_gdrive) {
+      // Google Drive source (n8n folder watcher)
+      enqueuePayload.gdrive_file_id = gdrive_file_id;
+    } else if (has_storage) {
       // Supabase Storage source (frontend uploads)
       enqueuePayload.storage_bucket = storage_bucket;
       enqueuePayload.storage_path = storage_path;
