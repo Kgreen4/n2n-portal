@@ -163,8 +163,29 @@ Deno.serve(async (req) => {
     console.info(`[reprocess] Reset document ${eob_document_id} to pending`);
 
     // 5. RE-TRIGGER EXTRACTION
-    // Use file_path from the document record (contains the actual storage path with timestamp prefix)
+    // Determine source based on file_path format:
+    //   - "gdrive://FILE_ID" → re-download from Google Drive (legacy records before archival)
+    //   - anything else → Supabase Storage eob-uploads bucket
     const storagePath = doc.file_path;
+    let enqueueBody: any;
+
+    if (storagePath && storagePath.startsWith('gdrive://')) {
+      // Legacy Google Drive record — file wasn't archived to eob-uploads yet
+      const gdriveFileId = storagePath.replace('gdrive://', '');
+      console.info(`[reprocess] file_path is Google Drive ref: ${gdriveFileId}`);
+      enqueueBody = {
+        eob_document_id,
+        practice_id: doc.practice_id,
+        gdrive_file_id: gdriveFileId,
+      };
+    } else {
+      enqueueBody = {
+        eob_document_id,
+        practice_id: doc.practice_id,
+        storage_bucket: 'eob-uploads',
+        storage_path: storagePath,
+      };
+    }
 
     const enqueueResp = await fetch(`${SUPABASE_URL}/functions/v1/eob-enqueue`, {
       method: 'POST',
@@ -172,12 +193,7 @@ Deno.serve(async (req) => {
         'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        eob_document_id,
-        practice_id: doc.practice_id,
-        storage_bucket: 'eob-uploads',
-        storage_path: storagePath,
-      }),
+      body: JSON.stringify(enqueueBody),
     });
 
     const enqueueResult = await enqueueResp.json();

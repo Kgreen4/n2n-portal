@@ -222,6 +222,42 @@ Deno.serve(async (req) => {
     return json({ error: "Failed to download PDF", error_code: "storage_error" }, 400);
   }
 
+  // ──────────────────────────────────────────────────────────────
+  // 1b) Archive original to eob-uploads for non-storage sources
+  //     Ensures reprocess-document can always find the original PDF.
+  // ──────────────────────────────────────────────────────────────
+  const isFromEobUploads = storage_bucket === "eob-uploads";
+  if (!isFromEobUploads && pdfBytes.length > 0) {
+    try {
+      const timestamp = Date.now();
+      const safeName = (file_name || "document.pdf").replace(/[^a-zA-Z0-9._-]/g, "_");
+      const archivePath = `${practice_id}/${timestamp}_${safeName}`;
+
+      const { error: archiveErr } = await supabase.storage
+        .from("eob-uploads")
+        .upload(archivePath, pdfBytes, { contentType: "application/pdf", upsert: false });
+
+      if (archiveErr) {
+        console.warn("[eob-enqueue] archive to eob-uploads failed (non-fatal):", archiveErr.message);
+      } else {
+        console.info("[eob-enqueue] archived original to eob-uploads:", archivePath);
+        // Update file_path so reprocess-document can find the original
+        const { error: fpErr } = await supabase
+          .from("eob_documents")
+          .update({ file_path: archivePath })
+          .eq("id", eob_document_id);
+
+        if (fpErr) {
+          console.warn("[eob-enqueue] file_path update failed (non-fatal):", fpErr.message);
+        } else {
+          console.info("[eob-enqueue] updated file_path to:", archivePath);
+        }
+      }
+    } catch (e) {
+      console.warn("[eob-enqueue] archive failed (non-fatal):", e);
+    }
+  }
+
   // 2) Load PDF, count pages, validate
   let pdfDoc: PDFDocument;
   let totalPages: number;
