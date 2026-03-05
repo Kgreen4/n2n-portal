@@ -45,7 +45,7 @@ async function getGoogleAccessToken(sa: any) {
   const header = { alg: "RS256", typ: "JWT" };
   const payload = {
     iss: sa.client_email,
-    scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/drive.readonly",
+    scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/drive",
     aud: "https://oauth2.googleapis.com/token",
     exp: now + 3600,
     iat: now - 30
@@ -522,7 +522,118 @@ Deno.serve(async (req) => {
     console.warn("[eob-enqueue] final eob_documents status check failed", e);
   }
 
-  // 9) Return success summary
+  // ──────────────────────────────────────────────────────────────
+  // 9) POST-PROCESSING: Move Google Drive file to "Processed" folder
+  //    Only runs when source was Google Drive AND document completed.
+  //    Non-fatal: if the move fails, processing results are preserved.
+  // ──────────────────────────────────────────────────────────────
+  if (gdrive_file_id) {
+    try {
+      // Re-read definitive document status (succeed_eob_page_job may have updated it)
+      const { data: finalDoc } = await supabase
+        .from("eob_documents")
+        .select("status")
+        .eq("id", eob_document_id)
+        .single();
+
+      if (finalDoc?.status === "completed") {
+        // Check practice settings for auto_move_processed
+        const { data: ps } = await supabase
+          .from("practice_settings")
+          .select("auto_move_processed, gdrive_folder_id, gdrive_processed_folder_id")
+          .eq("practice_id", practice_id)
+          .single();
+
+        if (ps?.auto_move_processed && ps?.gdrive_folder_id) {
+          const GCP_SA_JSON_STR = Deno.env.get("GCP_SA_JSON");
+          if (GCP_SA_JSON_STR) {
+            const sa = JSON.parse(GCP_SA_JSON_STR.trim());
+            const gToken = await getGoogleAccessToken(sa);
+            const sourceFolderId = ps.gdrive_folder_id;
+            let processedFolderId = ps.gdrive_processed_folder_id;
+
+            // Auto-discover or create the "Processed" subfolder
+            if (!processedFolderId) {
+              const searchQ = encodeURIComponent(
+                `name='Processed' and '${sourceFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`
+              );
+              const searchResp = await fetch(
+                `https://www.googleapis.com/drive/v3/files?q=${searchQ}&fields=files(id,name)&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+                { headers: { "Authorization": `Bearer ${gToken}` } }
+              );
+              const searchData = await searchResp.json();
+
+              if (searchData.files?.length > 0) {
+                processedFolderId = searchData.files[0].id;
+                console.info("[eob-enqueue] found existing Processed folder:", processedFolderId);
+              } else {
+                // Create the "Processed" subfolder
+                const createResp = await fetch(
+                  "https://www.googleapis.com/drive/v3/files?supportsAllDrives=true",
+                  {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${gToken}`, "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      name: "Processed",
+                      mimeType: "application/vnd.google-apps.folder",
+                      parents: [sourceFolderId],
+                    }),
+                  }
+                );
+                const createData = await createResp.json();
+                if (createResp.ok && createData.id) {
+                  processedFolderId = createData.id;
+                  console.info("[eob-enqueue] created Processed folder:", processedFolderId);
+                } else {
+                  console.warn("[eob-enqueue] failed to create Processed folder:", createData);
+                }
+              }
+
+              // Cache the discovered/created folder ID
+              if (processedFolderId) {
+                await supabase
+                  .from("practice_settings")
+                  .update({ gdrive_processed_folder_id: processedFolderId })
+                  .eq("practice_id", practice_id);
+              }
+            }
+
+            // Move the file: remove from source parent, add to Processed parent
+            if (processedFolderId) {
+              const fileMetaResp = await fetch(
+                `https://www.googleapis.com/drive/v3/files/${gdrive_file_id}?fields=parents&supportsAllDrives=true`,
+                { headers: { "Authorization": `Bearer ${gToken}` } }
+              );
+              const fileMeta = await fileMetaResp.json();
+              const currentParents = (fileMeta.parents || []).join(",");
+
+              const moveResp = await fetch(
+                `https://www.googleapis.com/drive/v3/files/${gdrive_file_id}?addParents=${processedFolderId}&removeParents=${currentParents}&supportsAllDrives=true`,
+                {
+                  method: "PATCH",
+                  headers: { "Authorization": `Bearer ${gToken}`, "Content-Type": "application/json" },
+                  body: JSON.stringify({}),
+                }
+              );
+
+              if (moveResp.ok) {
+                console.info(`[eob-enqueue] moved file ${gdrive_file_id} to Processed folder`);
+              } else {
+                const moveErr = await moveResp.text();
+                console.warn(`[eob-enqueue] move to Processed failed (non-fatal): ${moveResp.status} ${moveErr}`);
+              }
+            }
+          }
+        }
+      } else {
+        console.info(`[eob-enqueue] skipping move — document status is ${finalDoc?.status}, not completed`);
+      }
+    } catch (e) {
+      console.warn("[eob-enqueue] post-processing move failed (non-fatal):", e);
+    }
+  }
+
+  // 10) Return success summary
   console.info(`[eob-enqueue] complete: ${totalPages} pages, ${succeededCount}/${workerResults.length} workers succeeded, ${totalItems} items`);
   return json({
     success: true,

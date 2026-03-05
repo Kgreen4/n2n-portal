@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "n8n": {
+      "type": "http",
+      "url": "https://cardio-metrics-n8n.onrender.com/mcp-server/http",
+      "headers": {
+        "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlZTgxYWZmZC1jNjM0LTRiY2QtYTUyMC1jYWE3ZDc2YmU1NzEiLCJpc3MiOiJuOG4iLCJhdWQiOiJtY3Atc2VydmVyLWFwaSIsImp0aSI6IjA1ZDJkMjhiLWYxNDMtNDY2Ny05ZjQ4LTg2ODYwM2JiZTM0YyIsImlhdCI6MTc3MjY4NTI1M30.Tm3rlw3_70Mt6F3zqudMhEdXpnlo__nL5tkZi34Hp_k"
+      }
+    }
+  }
+}
