@@ -10,6 +10,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { PDFDocument } from "npm:pdf-lib@1.17.1";
 import { getCorsHeaders, corsResponse } from "../_shared/cors.ts";
+import { getGoogleAccessToken, moveToProcessedFolder } from "../_shared/gcp-auth.ts";
 
 const MAX_PAGES_PER_DOC = 500;
 const STORAGE_BUCKET = "eob-pages";
@@ -21,58 +22,6 @@ function json(data: unknown, status = 200, extraHeaders: Record<string, string> 
     status,
     headers: { "Content-Type": "application/json", ...extraHeaders },
   });
-}
-
-// ──────────────────────────────────────────────────────────────
-// GCP Authentication (for GCS download when using bucket/object path)
-// ──────────────────────────────────────────────────────────────
-function uint8ToBase64(bytes: Uint8Array): string {
-  const CHUNK = 0x8000;
-  const parts: string[] = [];
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    parts.push(String.fromCharCode(...bytes.subarray(i, i + CHUNK)));
-  }
-  return btoa(parts.join(''));
-}
-
-const base64url = (buf: Uint8Array | string) => {
-  const base64 = typeof buf === 'string' ? btoa(buf) : uint8ToBase64(buf);
-  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-};
-
-async function getGoogleAccessToken(sa: any) {
-  const now = Math.floor(Date.now() / 1000);
-  const header = { alg: "RS256", typ: "JWT" };
-  const payload = {
-    iss: sa.client_email,
-    scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/drive",
-    aud: "https://oauth2.googleapis.com/token",
-    exp: now + 3600,
-    iat: now - 30
-  };
-  const encodedHeader = base64url(JSON.stringify(header));
-  const encodedPayload = base64url(JSON.stringify(payload));
-  const dataToSign = new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`);
-  const pem = sa.private_key.replace(/\\n/g, '\n');
-  const binaryKey = atob(pem.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\n/g, ''));
-  const keyBuffer = new Uint8Array(binaryKey.length);
-  for (let i = 0; i < binaryKey.length; i++) {
-    keyBuffer[i] = binaryKey.charCodeAt(i);
-  }
-  const cryptoKey = await crypto.subtle.importKey(
-    'pkcs8', keyBuffer.buffer,
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']
-  );
-  const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', cryptoKey, dataToSign);
-  const jwt = `${encodedHeader}.${encodedPayload}.${base64url(new Uint8Array(signature))}`;
-  const resp = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: jwt })
-  });
-  const data = await resp.json();
-  if (!resp.ok) throw new Error(`GCP Auth Failed: ${JSON.stringify(data)}`);
-  return data.access_token;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -537,7 +486,6 @@ Deno.serve(async (req) => {
         .single();
 
       if (finalDoc?.status === "completed") {
-        // Check practice settings for auto_move_processed
         const { data: ps } = await supabase
           .from("practice_settings")
           .select("auto_move_processed, gdrive_folder_id, gdrive_processed_folder_id")
@@ -549,80 +497,18 @@ Deno.serve(async (req) => {
           if (GCP_SA_JSON_STR) {
             const sa = JSON.parse(GCP_SA_JSON_STR.trim());
             const gToken = await getGoogleAccessToken(sa);
-            const sourceFolderId = ps.gdrive_folder_id;
-            let processedFolderId = ps.gdrive_processed_folder_id;
+            const newProcessedId = await moveToProcessedFolder(
+              gToken, gdrive_file_id, ps.gdrive_folder_id, ps.gdrive_processed_folder_id
+            );
 
-            // Auto-discover or create the "Processed" subfolder
-            if (!processedFolderId) {
-              const searchQ = encodeURIComponent(
-                `name='Processed' and '${sourceFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`
-              );
-              const searchResp = await fetch(
-                `https://www.googleapis.com/drive/v3/files?q=${searchQ}&fields=files(id,name)&supportsAllDrives=true&includeItemsFromAllDrives=true`,
-                { headers: { "Authorization": `Bearer ${gToken}` } }
-              );
-              const searchData = await searchResp.json();
-
-              if (searchData.files?.length > 0) {
-                processedFolderId = searchData.files[0].id;
-                console.info("[eob-enqueue] found existing Processed folder:", processedFolderId);
-              } else {
-                // Create the "Processed" subfolder
-                const createResp = await fetch(
-                  "https://www.googleapis.com/drive/v3/files?supportsAllDrives=true",
-                  {
-                    method: "POST",
-                    headers: { "Authorization": `Bearer ${gToken}`, "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      name: "Processed",
-                      mimeType: "application/vnd.google-apps.folder",
-                      parents: [sourceFolderId],
-                    }),
-                  }
-                );
-                const createData = await createResp.json();
-                if (createResp.ok && createData.id) {
-                  processedFolderId = createData.id;
-                  console.info("[eob-enqueue] created Processed folder:", processedFolderId);
-                } else {
-                  console.warn("[eob-enqueue] failed to create Processed folder:", createData);
-                }
-              }
-
-              // Cache the discovered/created folder ID
-              if (processedFolderId) {
-                await supabase
-                  .from("practice_settings")
-                  .update({ gdrive_processed_folder_id: processedFolderId })
-                  .eq("practice_id", practice_id);
-              }
+            // Cache the processed folder ID if newly discovered
+            if (newProcessedId && newProcessedId !== ps.gdrive_processed_folder_id) {
+              await supabase
+                .from("practice_settings")
+                .update({ gdrive_processed_folder_id: newProcessedId })
+                .eq("practice_id", practice_id);
             }
-
-            // Move the file: remove from source parent, add to Processed parent
-            if (processedFolderId) {
-              const fileMetaResp = await fetch(
-                `https://www.googleapis.com/drive/v3/files/${gdrive_file_id}?fields=parents&supportsAllDrives=true`,
-                { headers: { "Authorization": `Bearer ${gToken}` } }
-              );
-              const fileMeta = await fileMetaResp.json();
-              const currentParents = (fileMeta.parents || []).join(",");
-
-              const moveResp = await fetch(
-                `https://www.googleapis.com/drive/v3/files/${gdrive_file_id}?addParents=${processedFolderId}&removeParents=${currentParents}&supportsAllDrives=true`,
-                {
-                  method: "PATCH",
-                  headers: { "Authorization": `Bearer ${gToken}`, "Content-Type": "application/json" },
-                  body: JSON.stringify({}),
-                }
-              );
-
-              if (moveResp.ok) {
-                console.info(`[eob-enqueue] moved file ${gdrive_file_id} to Processed folder`);
-              } else {
-                const moveErr = await moveResp.text();
-                console.warn(`[eob-enqueue] move to Processed failed (non-fatal): ${moveResp.status} ${moveErr}`);
-              }
-            }
+            console.info(`[eob-enqueue] moved file ${gdrive_file_id} to Processed folder`);
           }
         }
       } else {

@@ -18,6 +18,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { getCorsHeaders, corsResponse } from "../_shared/cors.ts";
+import { getGoogleAccessToken, moveToProcessedFolder } from "../_shared/gcp-auth.ts";
 
 const DEFAULT_GCS_BUCKET = "cardio-metrics-eob-uploads";
 
@@ -150,6 +151,39 @@ Deno.serve(async (req) => {
         },
         source: has_gdrive ? "folder_watcher" : "manual_upload",
       });
+
+      // Move duplicate Drive file to Processed so watcher stops picking it up
+      if (has_gdrive) {
+        try {
+          const GCP_SA_JSON_STR = Deno.env.get("GCP_SA_JSON");
+          if (GCP_SA_JSON_STR) {
+            const { data: ps } = await supabase
+              .from("practice_settings")
+              .select("auto_move_processed, gdrive_folder_id, gdrive_processed_folder_id")
+              .eq("practice_id", practice_id)
+              .single();
+
+            if (ps?.gdrive_folder_id) {
+              const sa = JSON.parse(GCP_SA_JSON_STR.trim());
+              const gToken = await getGoogleAccessToken(sa);
+              const newProcessedId = await moveToProcessedFolder(
+                gToken, gdrive_file_id!, ps.gdrive_folder_id, ps.gdrive_processed_folder_id
+              );
+
+              // Cache the processed folder ID if newly discovered
+              if (newProcessedId && newProcessedId !== ps.gdrive_processed_folder_id) {
+                await supabase
+                  .from("practice_settings")
+                  .update({ gdrive_processed_folder_id: newProcessedId })
+                  .eq("practice_id", practice_id);
+              }
+              console.info("[trigger-eob-parser] moved duplicate Drive file to Processed");
+            }
+          }
+        } catch (moveErr) {
+          console.warn("[trigger-eob-parser] failed to move duplicate to Processed (non-fatal):", moveErr);
+        }
+      }
 
       return json({
         error: "duplicate_upload",
