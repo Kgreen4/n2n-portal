@@ -74,10 +74,11 @@ Deno.serve(async (req) => {
       return json({ error: "You already belong to a practice" }, 409);
     }
 
-    // 4B. Create the practice
+    // 4B. Create the practice (trial_ends_at = now + 7 days)
+    const trialEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
     const { data: practice, error: practiceError } = await adminClient
       .from("practices")
-      .insert({ name: trimmedName, slug })
+      .insert({ name: trimmedName, slug, trial_ends_at: trialEndsAt })
       .select("id")
       .single();
 
@@ -116,6 +117,7 @@ Deno.serve(async (req) => {
       practiceId: practice.id,
       slug,
       creditsGranted: STARTER_CREDITS,
+      trialEndsAt,
     });
   } catch (error: any) {
     console.error("[create-practice] unhandled error:", error);

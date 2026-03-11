@@ -347,7 +347,7 @@ Deno.serve(async (req) => {
     // 1. Fetch practice metadata from Postgres
     const { data: practice, error: practiceErr } = await supabase
       .from('practices')
-      .select('name, tax_id, npi, address_line1, address_line2, city, state, zip')
+      .select('name, tax_id, npi, address_line1, address_line2, city, state, zip, plan_tier')
       .eq('id', practice_id)
       .single();
 
@@ -355,6 +355,17 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: 'Practice not found', details: practiceErr?.message }), {
         status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
+    }
+
+    // Gate 835 export to Professional+ tier
+    const tier = practice.plan_tier ?? 'trial';
+    if (tier === 'trial' || tier === 'starter') {
+      return new Response(JSON.stringify({
+        error: 'Plan upgrade required',
+        message: '835 EDI export is available on the Professional plan and above. Upgrade your plan to unlock this feature.',
+        upgrade_required: true,
+        current_tier: tier,
+      }), { status: 403, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
     if (!practice.tax_id || !practice.npi) {

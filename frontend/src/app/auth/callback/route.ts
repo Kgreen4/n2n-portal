@@ -5,7 +5,9 @@ export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url)
   const code = searchParams.get('code')
   // if "next" is in param, use it as the redirect URL
-  const next = searchParams.get('next') ?? '/dashboard'
+  // Default to /onboarding so new signups go through the wizard.
+  // The onboarding page redirects existing users to /dashboard automatically.
+  const next = searchParams.get('next') ?? '/onboarding'
 
   if (code) {
     const supabase = await createClient()

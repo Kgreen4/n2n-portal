@@ -36,3 +36,5 @@ Sample Docs/
 
 # Windows artifacts
 nul
+.vercel
+.env*.local

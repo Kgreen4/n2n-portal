@@ -20,6 +20,8 @@ interface Document {
   has_found_revenue: boolean
   last_exported_at: string | null
   export_batch_id: string | null
+  pages_capped: boolean | null
+  pages_actual: number | null
 }
 
 interface PageJob {
@@ -96,6 +98,7 @@ export default function DocumentDetailPage() {
   // Download 835
   const [downloading, setDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [planTier, setPlanTier] = useState<string>('trial')
 
   // Re-process
   const [reprocessing, setReprocessing] = useState(false)
@@ -130,7 +133,7 @@ export default function DocumentDetailPage() {
       const [docResult, jobsResult] = await Promise.all([
         supabase
           .from('eob_documents')
-          .select('id, file_name, status, total_pages, items_extracted, created_at, practice_id, review_status, review_reasons, has_found_revenue, last_exported_at, export_batch_id')
+          .select('id, file_name, status, total_pages, items_extracted, created_at, practice_id, review_status, review_reasons, has_found_revenue, last_exported_at, export_batch_id, pages_capped, pages_actual')
           .eq('id', docId)
           .single(),
         supabase
@@ -142,6 +145,12 @@ export default function DocumentDetailPage() {
 
       if (docResult.data) {
         setDoc(docResult.data as Document)
+        // Fetch plan tier for this practice
+        const practiceId = docResult.data.practice_id
+        if (practiceId) {
+          supabase.from('practices').select('plan_tier').eq('id', practiceId).single()
+            .then(({ data: p }) => { if (p?.plan_tier) setPlanTier(p.plan_tier) })
+        }
         // Audit log — track document view
         logAuditEvent(supabase, {
           action: 'document.view',
@@ -500,6 +509,15 @@ export default function DocumentDetailPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Pages capped upsell banner */}
+          {doc.pages_capped && doc.pages_actual && (
+            <a href="/billing" className="inline-flex items-center gap-1.5 rounded-md bg-amber-50 border border-amber-300 px-3 py-2 text-xs font-medium text-amber-800 hover:bg-amber-100">
+              <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+              </svg>
+              First {doc.total_pages} of {doc.pages_actual} pages processed — Upgrade to see full document
+            </a>
+          )}
           {/* Re-process Button — available for terminal states */}
           {isTerminal && (
             <button
@@ -535,28 +553,41 @@ export default function DocumentDetailPage() {
             </button>
           )}
           {isTerminal && (
-            <button
-              onClick={handleDownload835}
-              disabled={downloading}
-              className="inline-flex items-center rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {downloading ? (
-                <>
-                  <svg className="mr-2 h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
-                  Generating...
-                </>
-              ) : (
-                <>
-                  <svg className="mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                  </svg>
-                  Download 835
-                </>
-              )}
-            </button>
+            planTier === 'professional' || planTier === 'enterprise' ? (
+              <button
+                onClick={handleDownload835}
+                disabled={downloading}
+                className="inline-flex items-center rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {downloading ? (
+                  <>
+                    <svg className="mr-2 h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <svg className="mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                    </svg>
+                    Download 835
+                  </>
+                )}
+              </button>
+            ) : (
+              <a
+                href="/billing"
+                className="inline-flex items-center rounded-md bg-gray-200 px-4 py-2 text-sm font-semibold text-gray-500 shadow-sm hover:bg-amber-100 hover:text-amber-700 cursor-pointer"
+                title="Upgrade to Professional to unlock 835 EDI export"
+              >
+                <svg className="mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+                </svg>
+                835 Export — Upgrade to Pro
+              </a>
+            )
           )}
         </div>
       </div>

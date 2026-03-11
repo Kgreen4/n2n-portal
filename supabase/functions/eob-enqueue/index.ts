@@ -172,7 +172,30 @@ Deno.serve(async (req) => {
   }
 
   // ──────────────────────────────────────────────────────────────
-  // 1b) Archive original to eob-uploads for non-storage sources
+  // 1b) File size guard — reject files > 25MB before any processing
+  // ──────────────────────────────────────────────────────────────
+  const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25MB
+  if (pdfBytes.length > MAX_FILE_SIZE_BYTES) {
+    const sizeMb = (pdfBytes.length / 1024 / 1024).toFixed(1);
+    console.warn(`[eob-enqueue] file too large: ${sizeMb}MB exceeds 25MB limit`);
+    await supabase.from("eob_documents")
+      .update({ status: "failed", error_message: `File is ${sizeMb}MB, exceeds the 25MB maximum` })
+      .eq("id", eob_document_id);
+    try {
+      await supabase.from("pipeline_events").insert({
+        practice_id,
+        event_type: "processing_error",
+        file_name,
+        details: { error_code: "FILE_TOO_LARGE", file_size_mb: sizeMb },
+        source: gdrive_file_id ? "folder_watcher" : (storage_bucket ? "manual_upload" : "gcs"),
+      });
+    } catch (e) { console.warn("[eob-enqueue] pipeline_events insert failed:", e); }
+    return json({ error: `File exceeds 25MB size limit (${sizeMb}MB)`, error_code: "FILE_TOO_LARGE" }, 413);
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // ──────────────────────────────────────────────────────────────
+  // 1d) Archive original to eob-uploads for non-storage sources
   //     Ensures reprocess-document can always find the original PDF.
   // ──────────────────────────────────────────────────────────────
   const isFromEobUploads = storage_bucket === "eob-uploads";
@@ -228,6 +251,27 @@ Deno.serve(async (req) => {
 
   console.info("[eob-enqueue] pdf pages", { eob_document_id, totalPages });
 
+  // 2b) Soft page cap — enforce plan_max_pages_per_doc
+  //     Process only the first N pages; user sees data + an upsell banner instead of an error.
+  const pagesActual = totalPages; // original count before any cap
+  let pagesCapped = false;
+  try {
+    const { data: practiceRow } = await supabase
+      .from("practices")
+      .select("plan_max_pages_per_doc")
+      .eq("id", practice_id)
+      .single();
+
+    const maxPages: number = practiceRow?.plan_max_pages_per_doc ?? 10;
+    if (totalPages > maxPages) {
+      console.info(`[eob-enqueue] soft page cap: capping ${totalPages} pages to ${maxPages} (plan limit)`);
+      totalPages = maxPages;
+      pagesCapped = true;
+    }
+  } catch (e) {
+    console.warn("[eob-enqueue] plan tier lookup failed (non-fatal), using full page count:", e);
+  }
+
   // 3) Attempt to reserve/charge credits atomically for totalPages
   try {
     const { data: creditOk, error: creditErr } = await supabase.rpc("use_parsing_credit", {
@@ -254,7 +298,13 @@ Deno.serve(async (req) => {
   try {
     const { error: docErr } = await supabase
       .from("eob_documents")
-      .update({ status: "queued", updated_at: nowIso, error_message: null, total_pages: totalPages })
+      .update({
+        status: "queued",
+        updated_at: nowIso,
+        error_message: null,
+        total_pages: totalPages,
+        ...(pagesCapped ? { pages_capped: true, pages_actual: pagesActual } : {}),
+      })
       .eq("id", eob_document_id);
 
     if (docErr) {
