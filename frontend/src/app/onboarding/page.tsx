@@ -15,6 +15,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 
 const SUPABASE_FUNCTIONS_URL = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1`
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
 const GOOGLE_OAUTH_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_OAUTH_CLIENT_ID ?? ''
 
 /** Extract the folder ID from a Google Drive URL */
@@ -135,8 +136,8 @@ function OnboardingWizard() {
     setLoading(true)
     setError(null)
 
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) {
+    const { data: { session }, error: refreshError } = await supabase.auth.refreshSession()
+    if (refreshError || !session) {
       setError('Your session has expired. Please log in again.')
       setLoading(false)
       return
@@ -147,12 +148,16 @@ function OnboardingWizard() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON_KEY,
           'Authorization': `Bearer ${session.access_token}`,
         },
         body: JSON.stringify({ practiceName: practiceName.trim() }),
       })
       const data = await resp.json()
-      if (!resp.ok) throw new Error(data.error || 'Failed to create practice')
+      if (!resp.ok) {
+        const parts = [data.error, data.message, data.details, data.code, data.hint].filter(Boolean)
+        throw new Error(parts.join(' | ') || 'Failed to create practice')
+      }
 
       setPracticeId(data.practiceId)
       setStep(2)
@@ -265,7 +270,7 @@ function OnboardingWizard() {
                   onChange={(e) => setPracticeName(e.target.value)}
                   placeholder="e.g. Arizona Heart Specialists"
                   disabled={loading}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-50"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-50"
                 />
               </div>
 
@@ -308,7 +313,7 @@ function OnboardingWizard() {
                   value={driveUrl}
                   onChange={(e) => { setDriveUrl(e.target.value); setError(null) }}
                   placeholder="https://drive.google.com/drive/folders/…"
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 />
                 {folderId && (
                   <p className="mt-1.5 text-xs font-medium text-green-600 flex items-center gap-1">

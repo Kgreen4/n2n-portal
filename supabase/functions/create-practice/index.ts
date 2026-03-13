@@ -64,11 +64,15 @@ Deno.serve(async (req) => {
     const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
     // 4A. Check if user already has a practice (prevent duplicates)
-    const { data: existingLink } = await adminClient
+    const { data: existingLink, error: linkCheckError } = await adminClient
       .from("practice_users")
       .select("practice_id")
       .eq("user_id", user.id)
       .limit(1);
+
+    if (linkCheckError) {
+      console.error("[create-practice] practice_users query error:", linkCheckError);
+    }
 
     if (existingLink && existingLink.length > 0) {
       return json({ error: "You already belong to a practice" }, 409);
@@ -83,8 +87,13 @@ Deno.serve(async (req) => {
       .single();
 
     if (practiceError) {
-      console.error("[create-practice] insert practice error:", practiceError);
-      return json({ error: "Failed to create practice", details: practiceError.message }, 500);
+      console.error("[create-practice] insert practice error:", JSON.stringify(practiceError));
+      return json({
+        error: "Failed to create practice",
+        details: practiceError.message || JSON.stringify(practiceError),
+        code: (practiceError as any).code,
+        hint: (practiceError as any).hint,
+      }, 500);
     }
 
     // 4C. Link the user as owner

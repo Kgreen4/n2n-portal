@@ -15,6 +15,7 @@ import { createClient } from '@/lib/supabase/client'
 import { Suspense } from 'react'
 
 const SUPABASE_FUNCTIONS_URL = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1`
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
 
 function CallbackHandler() {
   const router = useRouter()
@@ -68,10 +69,10 @@ function CallbackHandler() {
       return
     }
 
-    // Get the user's Supabase session (persists through the redirect)
+    // Get a fresh session (refreshSession avoids stale/corrupt cached tokens)
     const supabase = createClient()
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) {
+    const { data: { session }, error: refreshError } = await supabase.auth.refreshSession()
+    if (refreshError || !session) {
       router.push('/login')
       return
     }
@@ -82,6 +83,7 @@ function CallbackHandler() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON_KEY,
           'Authorization': `Bearer ${session.access_token}`,
         },
         body: JSON.stringify({ code, folder_id: folderId, practice_id: practiceId }),
