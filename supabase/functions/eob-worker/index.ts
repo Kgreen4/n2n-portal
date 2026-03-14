@@ -61,8 +61,14 @@ function parseCurrency(val: any): number | null {
 function formatBQDate(val: any): string | null {
   if (!val || val === 'null' || val === '') return null;
   const str = String(val).trim();
-  // Already in YYYY-MM-DD format
-  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+  // Already in YYYY-MM-DD format — validate components before passing through
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    const [year, month, day] = str.split('-').map(Number);
+    if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1900 || year > 2100) {
+      return null; // Malformed date (e.g., month=25) — don't pass garbage to BigQuery
+    }
+    return str;
+  }
   // Try MM/DD/YYYY format
   const match = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (match) {
@@ -403,7 +409,7 @@ Deno.serve(async (req) => {
         { "text": GEMINI_PROMPT },
         { "inlineData": { "mimeType": "application/pdf", "data": base64PDF } }
       ]}],
-      generationConfig: { "responseMimeType": "application/json", "maxOutputTokens": 4096 }
+      generationConfig: { "responseMimeType": "application/json", "maxOutputTokens": 8192 }
     });
 
     let aiResp!: Response;
@@ -451,7 +457,44 @@ Deno.serve(async (req) => {
     }
 
     const rawText = aiData.candidates[0].content.parts[0].text;
-    const parsed = JSON.parse(rawText);
+    const finishReason = aiData.candidates[0]?.finishReason;
+
+    // Warn if Gemini truncated its output
+    if (finishReason === 'MAX_TOKENS') {
+      console.warn(`[eob-worker] Gemini truncated response (MAX_TOKENS) on page ${job.page_number} — attempting partial JSON recovery`);
+    }
+
+    // Parse JSON with repair fallback for truncated/malformed Gemini responses
+    let parsed: any;
+    try {
+      // Strip markdown code fences (safety net — shouldn't appear with responseMimeType=json)
+      const cleaned = rawText.trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/m, '');
+      parsed = JSON.parse(cleaned);
+    } catch (parseErr: any) {
+      console.warn(`[eob-worker] JSON parse failed on page ${job.page_number} (len=${rawText.length}, finishReason=${finishReason}): ${parseErr.message}`);
+      console.warn(`[eob-worker] rawText first 400 chars: ${rawText.substring(0, 400)}`);
+
+      // Truncation repair: find the last complete JSON object and close the array/root object
+      let repaired: any = null;
+      const cleaned = rawText.trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/m, '');
+      const lastClose = cleaned.lastIndexOf('}');
+      if (lastClose > 0) {
+        // Try closing the items array + root object after the last complete item
+        for (const suffix of [']}', ']\n}']) {
+          try {
+            repaired = JSON.parse(cleaned.substring(0, lastClose + 1) + suffix);
+            console.warn(`[eob-worker] Partial recovery: ${repaired.items?.length ?? 0} items from page ${job.page_number}`);
+            break;
+          } catch { /* try next */ }
+        }
+      }
+
+      if (!repaired) {
+        throw new Error(`Gemini response unparseable (len=${rawText.length}, finishReason=${finishReason}): ${parseErr.message}`);
+      }
+      parsed = repaired;
+    }
+
     const rawExtracted = parsed.items || parsed.line_items || [];
     console.info(`[eob-worker] Gemini extracted ${rawExtracted.length} raw line items from page ${job.page_number}`);
 

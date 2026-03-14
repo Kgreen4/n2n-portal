@@ -4,15 +4,16 @@
 //   2. "retryable" jobs — worker failed but has retries remaining
 //   3. Orphaned documents — all page jobs terminal but doc still "processing"
 //
-// Fires workers ONE at a time with delays to avoid Gemini 429.
-// Designed to be called by n8n scheduled workflow every 5 minutes,
-// or manually via curl for testing.
+// Workers are fired FIRE-AND-FORGET with staggered dispatch (2s apart) so
+// the sweeper returns quickly (< 30s) without timing out waiting for Gemini.
+// Workers handle their own job state (succeed/fail) independently.
+// Designed to be called by n8n scheduled workflow every 5 minutes.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { getCorsHeaders, corsResponse } from "../_shared/cors.ts";
 
-const WORKER_DELAY_MS = 5000; // 5s between individual worker calls (conservative)
+const DISPATCH_DELAY_MS = 2000; // 2s between fire-and-forget dispatches (rate limiting)
 
 function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(data), {
@@ -62,13 +63,13 @@ Deno.serve(async (req) => {
       console.info(`[eob-sweeper] found ${stuckJobs.length} stuck queued jobs`);
 
       for (const job of stuckJobs) {
-        const result = await fireWorker(
-          SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-          job.id, job.eob_document_id, job.page_number, job.practice_id, job.file_name
+        // Fire-and-forget: stagger dispatches 2s apart but don't await completion
+        EdgeRuntime.waitUntil(
+          fireWorker(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
+            job.id, job.eob_document_id, job.page_number, job.practice_id, job.file_name)
         );
         summary.stuck_queued.fired++;
-        if (result === 'succeeded') summary.stuck_queued.succeeded++;
-        await sleep(WORKER_DELAY_MS);
+        await sleep(DISPATCH_DELAY_MS);
       }
     }
 
@@ -97,13 +98,13 @@ Deno.serve(async (req) => {
           .update({ status: "queued", updated_at: new Date().toISOString() })
           .eq("id", job.id);
 
-        const result = await fireWorker(
-          SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-          job.id, job.eob_document_id, job.page_number, job.practice_id, job.file_name
+        // Fire-and-forget: stagger dispatches 2s apart
+        EdgeRuntime.waitUntil(
+          fireWorker(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
+            job.id, job.eob_document_id, job.page_number, job.practice_id, job.file_name)
         );
         summary.retryable.fired++;
-        if (result === 'succeeded') summary.retryable.succeeded++;
-        await sleep(WORKER_DELAY_MS);
+        await sleep(DISPATCH_DELAY_MS);
       }
     }
 
@@ -231,7 +232,8 @@ Deno.serve(async (req) => {
 });
 
 // ──────────────────────────────────────────────────────────────
-// Helper: Fire a single worker and await the result
+// Helper: Dispatch a single worker (fire-and-forget)
+// The worker handles its own job state — we just kick it off.
 // ──────────────────────────────────────────────────────────────
 async function fireWorker(
   supabaseUrl: string,
@@ -241,7 +243,7 @@ async function fireWorker(
   pageNumber: number,
   practiceId: string,
   fileName: string | null = null,
-): Promise<'succeeded' | 'worker_error' | 'fetch_error'> {
+): Promise<void> {
   const workerPayload = {
     job: {
       id: jobId,
@@ -263,14 +265,11 @@ async function fireWorker(
     });
     const result = await response.json();
     if (response.ok) {
-      console.info(`[eob-sweeper] worker succeeded for page ${pageNumber} (job ${jobId}): ${result.count} items`);
-      return 'succeeded';
+      console.info(`[eob-sweeper] ✓ page ${pageNumber} (job ${jobId}): ${result.count ?? 0} items`);
     } else {
-      console.warn(`[eob-sweeper] worker error for page ${pageNumber}: ${result.details || result.error}`);
-      return 'worker_error';
+      console.warn(`[eob-sweeper] ✗ page ${pageNumber}: ${result.details || result.error}`);
     }
   } catch (e: any) {
-    console.warn(`[eob-sweeper] worker fetch failed for page ${pageNumber}: ${e.message}`);
-    return 'fetch_error';
+    console.warn(`[eob-sweeper] fetch failed for page ${pageNumber}: ${e.message}`);
   }
 }
