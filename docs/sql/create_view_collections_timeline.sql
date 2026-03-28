@@ -17,6 +17,11 @@
 --
 -- Run in BigQuery console:
 --   https://console.cloud.google.com/bigquery?project=cardio-metrics-dev
+--
+-- PREREQUISITE: If charge_report was created before 2026-03-28, run this first:
+--   ALTER TABLE `cardio-metrics-dev.billing_audit_practice_test.charge_report`
+--     ADD COLUMN IF NOT EXISTS date_secondary_billed DATE,
+--     ADD COLUMN IF NOT EXISTS secondary_payer STRING;
 
 CREATE OR REPLACE VIEW `cardio-metrics-dev.billing_audit_practice_test.view_collections_timeline` AS
 

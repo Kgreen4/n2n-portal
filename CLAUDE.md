@@ -68,7 +68,7 @@ No investigation needed. Write-offs surface on Looker Page 7.
 | `view_eob_line_items` | ✅ Live | Deduplicated view of `eob_line_items` — use this in all queries |
 | `view_charge_report` | ✅ Live | Deduplicated view of `charge_report` — use this in all queries |
 | `view_revenue_leakage` | ✅ Live | Black Hole Detector — queries dedup views. Tested ✅ |
-| `view_collections_timeline` | 🔲 Not yet created | DOS-to-payment lag metrics |
+| `view_collections_timeline` | ✅ Live | DOS-to-payment lag metrics. Looker Page 9. |
 
 **DEDUP RULE:** Always query `view_eob_line_items` and `view_charge_report` (not raw tables).
 Raw tables may contain streaming buffer duplicates within 90-minute window.
@@ -82,7 +82,7 @@ Raw tables may contain streaming buffer duplicates within 90-minute window.
 | `ingest-charges` | GCW Analytics | ✅ Deployed + tested · pipeline_events schema fixed |
 | `ingest-ledger` | GCW Analytics | ✅ Deployed |
 | `ingest-uploads` | GCW Analytics | ✅ Deployed |
-| `get-practice-summary` | N2N Portal | 🔲 To build |
+| `get-practice-summary` | N2N Portal | ✅ Deployed + tested · all 8 KPIs verified |
 
 All functions: `--no-verify-jwt` · env var is `GCP_SA_JSON` (not
 `GCP_SERVICE_ACCOUNT_JSON` — that was a fixed bug, never revert it).
@@ -203,8 +203,9 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
 - [x] Fix `pipeline_events` schema mismatch in `ingest-era-data` + `ingest-charges`
 - [x] Full end-to-end pipeline test — all assertions pass
 - [ ] Configure n8n workflow in UI (credential ID + SUPABASE_SERVICE_ROLE_KEY)
-- [ ] Create `view_collections_timeline` in BigQuery
-- [ ] Build and deploy `get-practice-summary` edge function
+- [x] Create `view_collections_timeline` in BigQuery
+- [x] Build and deploy `get-practice-summary` edge function
+- [ ] Wire `get-practice-summary` into `GCW_Financial_Dashboard.html` (replace hardcoded KPIs)
 - [ ] Create `reporting/looker/REPORT_STRUCTURE.md`
 - [ ] Upgrade Supabase to Pro — required for HIPAA BAA ⚠️ URGENT — PHI on free plan
 - [ ] Sign BAA with Supabase
