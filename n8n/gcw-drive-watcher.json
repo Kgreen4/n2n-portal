@@ -17,11 +17,11 @@
           ]
         }
       },
-      "notes": "Polls every 5 minutes. n8n tracks last execution time internally — no manual dedup needed."
+      "notes": "Polls every 5 minutes. Files that succeed get moved to Processed/ subfolder by ingest-era-file, so no time-filter or dedup needed here."
     },
     {
       "id": "node_search",
-      "name": "Find New ERA Files",
+      "name": "Find Unprocessed ERA Files",
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
       "position": [420, 300],
@@ -29,7 +29,7 @@
         "resource": "fileFolder",
         "operation": "search",
         "searchMethod": "advanced",
-        "queryString": "='REPLACE_WITH_ERA_FOLDER_ID' in parents and createdTime > '{{ $now.minus({ minutes: 10 }).toISO() }}' and trashed = false",
+        "queryString": "='REPLACE_WITH_ERA_FOLDER_ID' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false",
         "returnAll": false,
         "limit": 50,
         "options": {}
@@ -40,51 +40,17 @@
           "name": "GCP-Master-Account"
         }
       },
-      "notes": "Uses same GCP-Master-Account service account as EOB watcher. Finds files added in the last 10 minutes (safe overlap window). ERA folder must be shared with n8n-backend@cardio-metrics-dev.iam.gserviceaccount.com."
-    },
-    {
-      "id": "node_download",
-      "name": "Download ERA File",
-      "type": "n8n-nodes-base.googleDrive",
-      "typeVersion": 3,
-      "position": [640, 300],
-      "parameters": {
-        "resource": "file",
-        "operation": "download",
-        "fileId": {
-          "__rl": true,
-          "value": "={{ $json.id }}",
-          "mode": "id"
-        }
-      },
-      "credentials": {
-        "googleApi": {
-          "id": "REPLACE_WITH_CREDENTIAL_ID",
-          "name": "GCP-Master-Account"
-        }
-      },
-      "notes": "Downloads the ERA file binary using file id from search results. Runs once per file found."
-    },
-    {
-      "id": "node_parse",
-      "name": "Parse ERA CSV → Line Items",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [860, 300],
-      "parameters": {
-        "jsCode": "// ── GCW ERA CSV Parser → ingest-era-data payload ────────────────────────────\n// Reads ERA CSV exported from Trizetto portal and maps to EraLineItem[] shape\n// expected by the ingest-era-data Supabase edge function.\n//\n// SETUP REQUIRED:\n//   - PRACTICE_ID is hardcoded for GCW below (df52d2fd-...)\n//   - GCW_NPI is hardcoded below (1831993245)\n//   - Column mappings in Section 4 handle common Trizetto header variations.\n//     If columns don't resolve, add the actual header name to the candidates list.\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst PRACTICE_ID = 'df52d2fd-5e88-48de-9c45-13d0ae7847b0'; // GCW practice UUID\nconst GCW_NPI     = '1831993245';                              // Dr. Greatwood / GCW NPI\n\n// ── 1. Read binary data from Google Drive download ───────────────────────────\nconst item     = $input.first();\nconst fileName = item.json?.name || 'era_unknown.csv';\n\n// Find the binary key (Google Drive download node uses 'data' by default)\nconst binaryKey = Object.keys(item.binary || {})[0];\nif (!binaryKey) {\n  throw new Error(`[gcw-era-watcher] No binary data found for file: ${fileName}`);\n}\nconst b64 = item.binary[binaryKey].data;\nconst fileText = Buffer.from(b64, 'base64').toString('utf8');\n\n// ── 2. Detect file format ─────────────────────────────────────────────────────\n// 835 EDI files begin with 'ISA' segment. CSV files begin with a header row.\nif (fileText.trimStart().startsWith('ISA')) {\n  console.warn(`[gcw-era-watcher] 835 EDI format detected in ${fileName} — not yet supported. Ask biller to export CSV instead.`);\n  return [{\n    json: {\n      practice_id: PRACTICE_ID,\n      items: [],\n      batch_id: `gcw-era-skipped-${fileName}`,\n      skipped: true,\n      reason: '835_EDI_not_yet_supported'\n    }\n  }];\n}\n\n// ── 3. CSV parser (RFC 4180 compliant, handles quoted fields) ─────────────────\nfunction parseCSV(text) {\n  const lines = text.split(/\\r?\\n/).filter(l => l.trim().length > 0);\n  if (lines.length < 2) throw new Error('[gcw-era-watcher] CSV has fewer than 2 lines (no data rows)');\n\n  function parseRow(line) {\n    const fields = [];\n    let field = '', inQuote = false;\n    for (let i = 0; i < line.length; i++) {\n      const ch = line[i];\n      if (ch === '\"') {\n        if (inQuote && line[i + 1] === '\"') { field += '\"'; i++; }\n        else inQuote = !inQuote;\n      } else if (ch === ',' && !inQuote) {\n        fields.push(field.trim());\n        field = '';\n      } else {\n        field += ch;\n      }\n    }\n    fields.push(field.trim());\n    return fields;\n  }\n\n  const rawHeaders = parseRow(lines[0]);\n  // Normalize headers: lowercase, spaces→underscores, strip non-alphanumeric\n  const headers = rawHeaders.map(h =>\n    h.toLowerCase().replace(/\\s+/g, '_').replace(/[^a-z0-9_]/g, '')\n  );\n\n  const rows = lines.slice(1).map(line => {\n    const values = parseRow(line);\n    return Object.fromEntries(headers.map((h, i) => [h, values[i] ?? '']));\n  });\n\n  return { headers, rows };\n}\n\nconst { headers, rows } = parseCSV(fileText);\nconsole.info(`[gcw-era-watcher] Parsed ${rows.length} data rows from ${fileName}. Headers: ${headers.join(', ')}`);\n\n// ── 4. Column resolver ────────────────────────────────────────────────────────\n// Tries multiple normalized header variations for each logical field.\n// If a column is missing, the value will be '' (empty string).\n// Add Trizetto-specific header names as additional candidates if needed.\nfunction col(row, ...candidates) {\n  for (const c of candidates) {\n    const key = c.toLowerCase().replace(/\\s+/g, '_').replace(/[^a-z0-9_]/g, '');\n    if (row[key] !== undefined && row[key] !== '') return row[key];\n  }\n  return '';\n}\n\nfunction money(val) {\n  if (val === '' || val === null || val === undefined) return 0;\n  return parseFloat(String(val).replace(/[$,()]/g, '')) || 0;\n}\n\nfunction deriveStatus(paid, allowed) {\n  if (!allowed || allowed === 0) return 'denied';\n  if (paid >= allowed * 0.99) return 'paid';\n  if (paid > 0) return 'partial';\n  return 'denied';\n}\n\n// ── 5. Map rows to EraLineItem[] ──────────────────────────────────────────────\nconst batchDate = new Date().toISOString().slice(0, 10);\nconst items = [];\nlet skippedRows = 0;\n\nfor (const row of rows) {\n  // Required dedup fields — rows missing any of these are skipped\n  const payerId     = col(row, 'payer_id', 'payer id', 'payerid', 'payer_code', 'insurance_id');\n  const claimNumber = col(row, 'claim_number', 'claim number', 'claimnumber', 'patient_control_number', 'pcn', 'claim_ref');\n  const cptCode     = col(row, 'cpt_code', 'cpt', 'procedure_code', 'service_code', 'proc_code', 'hcpcs');\n  const dos         = col(row, 'date_of_service', 'dos', 'service_date', 'from_date', 'service_from');\n\n  if (!payerId || !claimNumber || !cptCode || !dos) {\n    skippedRows++;\n    if (skippedRows <= 3) {\n      console.warn(`[gcw-era-watcher] Skipping row — missing dedup field(s): payer_id='${payerId}' claim='${claimNumber}' cpt='${cptCode}' dos='${dos}'`);\n    }\n    continue;\n  }\n\n  const billed   = money(col(row, 'billed_amount', 'charge_amount', 'submitted_amount', 'billed', 'charges'));\n  const allowed  = money(col(row, 'allowed_amount', 'approved_amount', 'allowed', 'contract_amount'));\n  const paid     = money(col(row, 'paid_amount', 'payment_amount', 'paid', 'check_amount', 'net_payment'));\n  const patResp  = money(col(row, 'patient_responsibility', 'patient_resp', 'patient_amount', 'copay', 'deductible'));\n  const adj      = parseFloat((billed - allowed).toFixed(2));\n\n  const checkDate   = col(row, 'check_date', 'payment_date', 'eft_date', 'settlement_date', 'check_issue_date');\n  const checkNumber = col(row, 'check_number', 'check_num', 'eft_number', 'trace_number', 'payment_ref');\n  const remarkCode  = col(row, 'remark_code', 'adjustment_reason_code', 'carc', 'reason_code', 'denial_code');\n  const remarkDesc  = col(row, 'remark_description', 'adjustment_reason', 'denial_reason', 'reason_description');\n  const payerName   = col(row, 'payer_name', 'payer', 'insurance_company', 'insurance_name');\n  const patientName = col(row, 'patient_name', 'patient', 'member_name', 'beneficiary');\n  const memberId    = col(row, 'member_id', 'member_number', 'subscriber_id', 'insurance_id', 'member');\n\n  items.push({\n    // Required dedup key fields\n    payer_id:               payerId,\n    claim_number:           claimNumber,\n    cpt_code:               cptCode,\n    date_of_service:        dos,\n\n    // Financials\n    billed_amount:          billed,\n    allowed_amount:         allowed,\n    paid_amount:            paid,\n    adjustment_amount:      adj,\n    patient_responsibility: patResp,\n\n    // Claim metadata\n    payer_name:             payerName,\n    patient_name:           patientName,\n    patient_account:        memberId,\n    npi:                    GCW_NPI,\n    claim_status:           deriveStatus(paid, allowed),\n    remark_code:            remarkCode,\n    adjustment_reason:      remarkDesc,\n    check_number:           checkNumber,\n    check_date:             checkDate || batchDate,\n    era_transaction_date:   checkDate || batchDate,\n\n    // Pipeline metadata\n    practice_id: PRACTICE_ID,\n    source_type: 'trizetto_era'\n  });\n}\n\nif (skippedRows > 3) {\n  console.warn(`[gcw-era-watcher] ...and ${skippedRows - 3} more rows skipped (missing dedup fields). Check column mappings.`);\n}\n\nconsole.info(`[gcw-era-watcher] Mapped ${items.length} line items from ${rows.length} rows. Skipped: ${skippedRows}. File: ${fileName}`);\n\nconst batchId = `gcw-era-${fileName.replace(/[^a-z0-9.\\-_]/gi, '_')}-${batchDate}`;\nreturn [{ json: { practice_id: PRACTICE_ID, items, batch_id: batchId } }];\n"
-      },
-      "notes": "Parses Trizetto ERA CSV export into EraLineItem[] for ingest-era-data. Handles 835 EDI gracefully (skip + warn). Column resolver handles common header name variations."
+      "notes": "Finds all files in the ERA folder that have NOT yet been moved to Processed/. The ingest-era-file edge function moves each file after a clean insert, so this query naturally skips already-processed files. ERA folder must be shared with n8n-backend@cardio-metrics-dev.iam.gserviceaccount.com."
     },
     {
       "id": "node_ingest",
-      "name": "POST to ingest-era-data",
+      "name": "Ingest ERA File",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1080, 300],
+      "position": [640, 300],
       "parameters": {
         "method": "POST",
-        "url": "https://jdmyjdvricpyrsfchakk.supabase.co/functions/v1/ingest-era-data",
+        "url": "https://jdmyjdvricpyrsfchakk.supabase.co/functions/v1/ingest-era-file",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -100,7 +66,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json) }}",
+        "jsonBody": "={{ JSON.stringify({ practice_id: 'df52d2fd-5e88-48de-9c45-13d0ae7847b0', gdrive_file_id: $json.id, era_folder_id: 'REPLACE_WITH_ERA_FOLDER_ID', batch_id: 'gcw-era-' + $now.toFormat('yyyy-MM-dd') }) }}",
         "options": {
           "response": {
             "response": {
@@ -109,14 +75,14 @@
           }
         }
       },
-      "notes": "Calls Supabase edge function (deployed --no-verify-jwt). Set SUPABASE_SERVICE_ROLE_KEY in n8n Environment Variables. Returns: { success, records_processed, records_inserted, bq_errors }."
+      "notes": "Passes file ID to ingest-era-file edge function. Supabase downloads, parses (CSV or XLSX), inserts to BigQuery, and moves file to Processed/ subfolder. Replace REPLACE_WITH_ERA_FOLDER_ID with the same folder ID used in the search node above."
     },
     {
       "id": "node_check",
       "name": "Check Success",
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
-      "position": [1300, 300],
+      "position": [860, 300],
       "parameters": {
         "conditions": {
           "boolean": [
@@ -129,30 +95,19 @@
       }
     },
     {
-      "id": "node_success",
-      "name": "Log Success",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1500, 200],
-      "parameters": {
-        "jsCode": "const r = $input.first().json;\nconsole.info(`[gcw-era-watcher] SUCCESS — processed: ${r.records_processed}, inserted: ${r.records_inserted}, skipped: ${r.records_skipped}, bq_errors: ${r.bq_errors}`);\nreturn [{ json: { status: 'ok', ...r } }];\n"
-      },
-      "notes": "Clean success: BQ rows inserted, pipeline_events logged in Supabase."
-    },
-    {
       "id": "node_error_email",
       "name": "Send Error Alert",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
-      "position": [1500, 400],
+      "position": [1080, 400],
       "parameters": {
         "fromEmail": "alerts@n2n-portal.com",
         "toEmail": "keith@n2nanalytics.com",
-        "subject": "=⚠️ GCW ERA sync error — {{ $now.toISO() }}",
+        "subject": "=⚠️ GCW ERA ingest error — {{ $now.toISO() }}",
         "emailType": "text",
-        "message": "=GCW ERA Google Drive sync encountered an error.\n\nResponse: {{ JSON.stringify($json, null, 2) }}\n\nCheck pipeline_events table in Supabase for details.\nFunction: ingest-era-data | Project: jdmyjdvricpyrsfchakk"
+        "message": "=GCW ERA file ingest failed.\n\nFile ID: {{ $('Find Unprocessed ERA Files').item.json.id }}\nFile name: {{ $('Find Unprocessed ERA Files').item.json.name }}\n\nResponse: {{ JSON.stringify($json, null, 2) }}\n\nCheck pipeline_events in Supabase for full error details.\nProject: jdmyjdvricpyrsfchakk"
       },
-      "notes": "Configure SMTP credentials in n8n. Update fromEmail/toEmail."
+      "notes": "Only fires on failure. Success path is intentionally empty — pipeline_events in Supabase is the audit log. Configure SMTP credentials in n8n."
     }
   ],
   "connections": {
@@ -160,47 +115,25 @@
       "main": [
         [
           {
-            "node": "Find New ERA Files",
+            "node": "Find Unprocessed ERA Files",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Find New ERA Files": {
+    "Find Unprocessed ERA Files": {
       "main": [
         [
           {
-            "node": "Download ERA File",
+            "node": "Ingest ERA File",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Download ERA File": {
-      "main": [
-        [
-          {
-            "node": "Parse ERA CSV → Line Items",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Parse ERA CSV → Line Items": {
-      "main": [
-        [
-          {
-            "node": "POST to ingest-era-data",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "POST to ingest-era-data": {
+    "Ingest ERA File": {
       "main": [
         [
           {
@@ -213,13 +146,7 @@
     },
     "Check Success": {
       "main": [
-        [
-          {
-            "node": "Log Success",
-            "type": "main",
-            "index": 0
-          }
-        ],
+        [],
         [
           {
             "node": "Send Error Alert",
