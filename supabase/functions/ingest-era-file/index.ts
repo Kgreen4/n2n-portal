@@ -88,10 +88,13 @@ function money(val: string | number | undefined | null): number {
   return parseFloat(String(val).replace(/[$,()]/g, "")) || 0;
 }
 
-function deriveStatus(paid: number, allowed: number): string {
-  if (!allowed || allowed === 0) return "denied";
-  if (paid >= allowed * 0.99)    return "paid";
-  if (paid > 0)                  return "partial";
+// patResp: patient_responsibility (copay + deductible + coinsurance).
+// A claim is "paid" when the payer's portion + patient's portion covers ≥99% of
+// allowed — handles standard 80/20 Medicare splits correctly.
+function deriveStatus(paid: number, allowed: number, patResp: number = 0): string {
+  if (!allowed || allowed === 0)          return "denied";
+  if ((paid + patResp) >= allowed * 0.99) return "paid";
+  if (paid > 0)                           return "partial";
   return "denied";
 }
 
@@ -203,7 +206,7 @@ function rowsToLineItems(
       ...(patientName && { patient_name: patientName }),
       ...(memberId    && { patient_account: memberId }),
       npi,
-      claim_status:           deriveStatus(paid, allowed),
+      claim_status:           deriveStatus(paid, allowed, patResp),
       ...(remarkCode  && { remark_code: remarkCode }),
       ...(remarkDesc  && { adjustment_reason: remarkDesc }),
       ...(checkNumber && { check_number: checkNumber }),
