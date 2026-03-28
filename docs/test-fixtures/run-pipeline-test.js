@@ -12,6 +12,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY || "REDACTED_SUPABASE_DEFAULT_KEY"
 const PRACTICE_ID  = "df52d2fd-5e88-48de-9c45-13d0ae7847b0";
 const BATCH_ID     = "test-synthetic-2026-03-20";
 const NPI          = "1831993245";
+const ERA_FOLDER_ID = "1GOvEj8UJg4inP0WyoZQl3UoXC-u0rsFw"; // RCM Reporting Data > ERA
 
 // ── ERA line items (19 rows from synthetic_trizetto_era_2026-03-20.csv) ───────
 // claim_status manually derived:

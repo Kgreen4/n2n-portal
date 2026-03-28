@@ -154,22 +154,22 @@ Deno.serve(async (req) => {
   }
 
   // ── Log to pipeline_events ─────────────────────────────────────────────────
+  // Uses the existing pipeline_events schema: event_type, source, file_name, details
   const eventType = bqErrors.length === 0 ? "era_sync_completed" : "era_sync_partial";
   const { error: pgErr } = await supabase
     .from("pipeline_events")
     .insert({
       practice_id,
       event_type: eventType,
-      source_system: "trizetto_era",
-      records_processed: items.length,
-      records_inserted: bqInserted,
-      records_skipped: items.length - dedupedItems.length,
-      error_message: bqErrors.length > 0 ? JSON.stringify(bqErrors[0]).slice(0, 500) : null,
-      metadata: {
-        batch_id: batch_id ?? null,
-        total_items: items.length,
-        deduped_items: dedupedItems.length,
-        bq_errors_count: bqErrors.length,
+      source:    "trizetto_era",
+      file_name: batch_id ?? "era_batch",
+      details: {
+        batch_id:          batch_id ?? null,
+        records_processed: items.length,
+        records_inserted:  bqInserted,
+        records_skipped:   items.length - dedupedItems.length,
+        bq_errors_count:   bqErrors.length,
+        first_error:       bqErrors.length > 0 ? JSON.stringify(bqErrors[0]).slice(0, 500) : null,
       },
     });
 

@@ -29,7 +29,7 @@
         "resource": "fileFolder",
         "operation": "search",
         "searchMethod": "advanced",
-        "queryString": "='REPLACE_WITH_ERA_FOLDER_ID' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false",
+        "queryString": "='1GOvEj8UJg4inP0WyoZQl3UoXC-u0rsFw' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false",
         "returnAll": false,
         "limit": 50,
         "options": {}
@@ -66,7 +66,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ practice_id: 'df52d2fd-5e88-48de-9c45-13d0ae7847b0', gdrive_file_id: $json.id, era_folder_id: 'REPLACE_WITH_ERA_FOLDER_ID', batch_id: 'gcw-era-' + $now.toFormat('yyyy-MM-dd') }) }}",
+        "jsonBody": "={{ JSON.stringify({ practice_id: 'df52d2fd-5e88-48de-9c45-13d0ae7847b0', gdrive_file_id: $json.id, era_folder_id: '1GOvEj8UJg4inP0WyoZQl3UoXC-u0rsFw', batch_id: 'gcw-era-' + $now.toFormat('yyyy-MM-dd') }) }}",
         "options": {
           "response": {
             "response": {
@@ -75,7 +75,7 @@
           }
         }
       },
-      "notes": "Passes file ID to ingest-era-file edge function. Supabase downloads, parses (CSV or XLSX), inserts to BigQuery, and moves file to Processed/ subfolder. Replace REPLACE_WITH_ERA_FOLDER_ID with the same folder ID used in the search node above."
+      "notes": "Passes file ID to ingest-era-file edge function. Supabase downloads, parses (CSV or XLSX), inserts to BigQuery, and moves file to Processed/ subfolder. Replace 1GOvEj8UJg4inP0WyoZQl3UoXC-u0rsFw with the same folder ID used in the search node above."
     },
     {
       "id": "node_check",
