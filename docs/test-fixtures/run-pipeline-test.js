@@ -8,7 +8,7 @@
 // Requires: SUPABASE_KEY env var (service role key), or hard-coded below.
 
 const SUPABASE_URL = "https://jdmyjdvricpyrsfchakk.supabase.co";
-const SUPABASE_KEY = process.env.SUPABASE_KEY || "REDACTED_SUPABASE_DEFAULT_KEY";
+const SUPABASE_KEY = process.env.SUPABASE_KEY || "REDACTED_SUPABASE_KEY";
 const PRACTICE_ID  = "df52d2fd-5e88-48de-9c45-13d0ae7847b0";
 const BATCH_ID     = "test-synthetic-2026-03-20";
 const NPI          = "1831993245";
