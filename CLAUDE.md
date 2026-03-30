@@ -206,7 +206,7 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
 - [x] Create `view_collections_timeline` in BigQuery
 - [x] Build and deploy `get-practice-summary` edge function
 - [x] Wire `get-practice-summary` into `GCW_Financial_Dashboard.html` — live RCM panel on EOB tab
-- [ ] Create `reporting/looker/REPORT_STRUCTURE.md`
+- [x] Create `reporting/looker/REPORT_STRUCTURE.md`
 - [ ] Upgrade Supabase to Pro — required for HIPAA BAA ⚠️ URGENT — PHI on free plan
 - [ ] Sign BAA with Supabase
 - [ ] Sign BAA with Dr. Ravi (Keith's responsibility)
