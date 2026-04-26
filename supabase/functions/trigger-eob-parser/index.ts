@@ -118,6 +118,12 @@ Deno.serve(async (req) => {
     // with spaces, #, etc. Fall back to deriving from storage path (GCS callers)
     const file_name = original_file_name || file_path!.split("/").pop();
 
+    // Skip files already processed externally (e.g. AZHS marks done files with "COMPLETED")
+    if (file_name && file_name.toUpperCase().includes("COMPLETED")) {
+      console.info("[trigger-eob-parser] skipping COMPLETED file:", file_name);
+      return json({ skipped: true, reason: "COMPLETED file", file_name });
+    }
+
     console.info("[trigger-eob-parser] start", {
       practice_id,
       source: has_storage ? "supabase_storage" : has_gdrive ? "google_drive" : "gcs",
