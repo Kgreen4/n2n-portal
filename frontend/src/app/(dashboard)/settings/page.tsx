@@ -27,8 +27,10 @@ export default function SettingsPage() {
 
   // Scan folder state
   const [scanning, setScanning] = useState(false)
+  const [scanDate, setScanDate] = useState<string>(new Date().toISOString().split('T')[0])
   const [scanResult, setScanResult] = useState<{
     folder_name: string | null
+    after_date: string | null
     found: number
     skipped_completed: number
     already_processed: number
@@ -109,9 +111,9 @@ export default function SettingsPage() {
     setScanError(null)
 
     try {
-      const { data, error } = await supabase.functions.invoke('scan-drive-folder', {
-        body: { practice_id: practiceId },
-      })
+      const body: Record<string, unknown> = { practice_id: practiceId }
+      if (scanDate) body.after_date = scanDate
+      const { data, error } = await supabase.functions.invoke('scan-drive-folder', { body })
       if (error) throw new Error(error.message)
       setScanResult(data)
     } catch (err: any) {
@@ -284,35 +286,60 @@ export default function SettingsPage() {
           the name are automatically skipped.
         </p>
 
-        <div className="flex items-center gap-3">
-          <button
-            onClick={handleScanFolder}
-            disabled={scanning || !folderId}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
-          >
-            {scanning ? (
-              <>
-                <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
-                Scanning…
-              </>
-            ) : (
-              <>
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
-                </svg>
-                Scan &amp; Process Folder
-              </>
+        <div className="space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-medium text-gray-600">Only files created on or after</label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={scanDate}
+                  onChange={e => setScanDate(e.target.value)}
+                  className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                />
+                <button
+                  onClick={() => setScanDate('')}
+                  className="text-xs text-gray-400 hover:text-gray-600 underline"
+                >
+                  Clear (scan all)
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleScanFolder}
+              disabled={scanning || !folderId}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              {scanning ? (
+                <>
+                  <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                  Scanning…
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+                  </svg>
+                  Scan &amp; Process Folder
+                </>
+              )}
+            </button>
+            {!folderId && (
+              <p className="text-xs text-gray-400">Save a folder ID above to enable scanning.</p>
             )}
-          </button>
-          {!folderId && (
-            <p className="text-xs text-gray-400">Save a folder ID above to enable scanning.</p>
-          )}
+          </div>
         </div>
 
         {scanResult && (
           <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4 text-sm space-y-1">
             <p className="font-medium text-indigo-900">
               Scan complete{scanResult.folder_name ? ` — ${scanResult.folder_name}` : ''}
+              {scanResult.after_date && (
+                <span className="font-normal text-indigo-600"> · files from {scanResult.after_date} onward</span>
+              )}
             </p>
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-indigo-700">
               <span>{scanResult.found} PDF{scanResult.found !== 1 ? 's' : ''} found</span>

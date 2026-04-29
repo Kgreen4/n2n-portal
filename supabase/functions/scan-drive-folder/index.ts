@@ -37,6 +37,13 @@ Deno.serve(async (req) => {
   const practice_id = body?.practice_id;
   if (!practice_id) return json({ error: "Missing practice_id" }, 400);
 
+  // Optional date filter — only pick up files created on/after this date.
+  // Accepts "YYYY-MM-DD" or full ISO datetime. When omitted, all non-COMPLETED files are scanned.
+  const after_date: string | null = body?.after_date || null;
+  const afterDateTime = after_date
+    ? (after_date.includes("T") ? after_date : `${after_date}T00:00:00Z`)
+    : null;
+
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
   // 1. Look up configured Drive folder for this practice
@@ -68,13 +75,14 @@ Deno.serve(async (req) => {
   let pageToken: string | undefined;
 
   do {
-    const q = encodeURIComponent(
-      `'${folderId}' in parents AND mimeType='application/pdf' AND trashed=false`
-    );
+    let driveQuery = `'${folderId}' in parents AND mimeType='application/pdf' AND trashed=false`;
+    if (afterDateTime) driveQuery += ` AND createdTime > '${afterDateTime}'`;
+    const q = encodeURIComponent(driveQuery);
     const url =
       `https://www.googleapis.com/drive/v3/files` +
       `?q=${q}` +
       `&fields=nextPageToken,files(id,name)` +
+      `&corpora=allDrives` +
       `&supportsAllDrives=true` +
       `&includeItemsFromAllDrives=true` +
       `&pageSize=1000` +
@@ -91,7 +99,7 @@ Deno.serve(async (req) => {
     pageToken = data.nextPageToken;
   } while (pageToken);
 
-  console.info(`[scan-drive-folder] found ${driveFiles.length} PDFs in folder ${folderId}`);
+  console.info(`[scan-drive-folder] found ${driveFiles.length} PDFs in folder ${folderId}${afterDateTime ? ` after ${afterDateTime}` : ""}`);
 
   // 4. Split into COMPLETED (skip) vs candidates
   const completedFiles = driveFiles.filter(f => f.name.toUpperCase().includes("COMPLETED"));
@@ -153,6 +161,7 @@ Deno.serve(async (req) => {
 
   return json({
     folder_name: ps.gdrive_folder_name,
+    after_date: after_date || null,
     found: driveFiles.length,
     skipped_completed: completedFiles.length,
     already_processed: duplicateFiles.length,
