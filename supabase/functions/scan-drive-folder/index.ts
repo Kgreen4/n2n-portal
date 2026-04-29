@@ -38,11 +38,16 @@ Deno.serve(async (req) => {
   if (!practice_id) return json({ error: "Missing practice_id" }, 400);
 
   // Optional date filter — only pick up files created on/after this date.
-  // Accepts "YYYY-MM-DD" or full ISO datetime. When omitted, all non-COMPLETED files are scanned.
+  // Accepts "YYYY-MM-DD" or full ISO datetime. When omitted, all files are scanned.
   const after_date: string | null = body?.after_date || null;
   const afterDateTime = after_date
     ? (after_date.includes("T") ? after_date : `${after_date}T00:00:00Z`)
     : null;
+
+  // When true, bypass the "COMPLETED" filename filter and rely solely on the
+  // duplicate check against eob_documents. Useful for catch-up runs where the
+  // night crew marked files before the pipeline had a chance to process them.
+  const include_completed: boolean = body?.include_completed === true;
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -99,13 +104,17 @@ Deno.serve(async (req) => {
     pageToken = data.nextPageToken;
   } while (pageToken);
 
-  console.info(`[scan-drive-folder] found ${driveFiles.length} PDFs in folder ${folderId}${afterDateTime ? ` after ${afterDateTime}` : ""}`);
+  console.info(`[scan-drive-folder] found ${driveFiles.length} PDFs in folder ${folderId}${afterDateTime ? ` after ${afterDateTime}` : ""}${include_completed ? " (include_completed=true)" : ""}`);
 
-  // 4. Split into COMPLETED (skip) vs candidates
-  const completedFiles = driveFiles.filter(f => f.name.toUpperCase().includes("COMPLETED"));
-  const candidateFiles = driveFiles.filter(f => !f.name.toUpperCase().includes("COMPLETED"));
+  // 4. Split into COMPLETED (skip unless include_completed) vs candidates
+  const completedFiles = include_completed
+    ? []
+    : driveFiles.filter(f => f.name.toUpperCase().includes("COMPLETED"));
+  const candidateFiles = include_completed
+    ? driveFiles
+    : driveFiles.filter(f => !f.name.toUpperCase().includes("COMPLETED"));
 
-  // 5. Check which candidates are already in eob_documents
+  // 5. Check which candidates are already in eob_documents (non-failed)
   let alreadyProcessedNames = new Set<string>();
   if (candidateFiles.length > 0) {
     const { data: existing } = await supabase
@@ -121,7 +130,7 @@ Deno.serve(async (req) => {
   const newFiles = candidateFiles.filter(f => !alreadyProcessedNames.has(f.name));
   const duplicateFiles = candidateFiles.filter(f => alreadyProcessedNames.has(f.name));
 
-  console.info(`[scan-drive-folder] ${completedFiles.length} COMPLETED, ${duplicateFiles.length} duplicate, ${newFiles.length} new`);
+  console.info(`[scan-drive-folder] ${completedFiles.length} COMPLETED skipped, ${duplicateFiles.length} duplicate, ${newFiles.length} new`);
 
   // 6. Trigger processing for each new file (sequential to avoid overloading workers)
   const triggered: string[] = [];

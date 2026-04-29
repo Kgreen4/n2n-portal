@@ -28,6 +28,7 @@ export default function SettingsPage() {
   // Scan folder state
   const [scanning, setScanning] = useState(false)
   const [scanDate, setScanDate] = useState<string>(new Date().toISOString().split('T')[0])
+  const [includeCompleted, setIncludeCompleted] = useState(false)
   const [scanResult, setScanResult] = useState<{
     folder_name: string | null
     after_date: string | null
@@ -113,6 +114,7 @@ export default function SettingsPage() {
     try {
       const body: Record<string, unknown> = { practice_id: practiceId }
       if (scanDate) body.after_date = scanDate
+      if (includeCompleted) body.include_completed = true
       const { data, error } = await supabase.functions.invoke('scan-drive-folder', { body })
       if (error) throw new Error(error.message)
       setScanResult(data)
@@ -282,8 +284,8 @@ export default function SettingsPage() {
         </div>
         <p className="text-sm text-gray-500">
           Scan the configured Drive folder for unprocessed PDFs and trigger extraction.
-          Files with <span className="font-mono text-xs bg-gray-100 px-1 rounded">COMPLETED</span> in
-          the name are automatically skipped.
+          By default, files with <span className="font-mono text-xs bg-gray-100 px-1 rounded">COMPLETED</span> in
+          the name are skipped — use the override below for catch-up runs.
         </p>
 
         <div className="space-y-3">
@@ -306,6 +308,19 @@ export default function SettingsPage() {
               </div>
             </div>
           </div>
+
+          <label className="flex items-center gap-2 cursor-pointer w-fit">
+            <input
+              type="checkbox"
+              checked={includeCompleted}
+              onChange={e => setIncludeCompleted(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+            />
+            <span className="text-sm text-gray-700">
+              Include <span className="font-mono text-xs bg-gray-100 px-1 rounded">COMPLETED</span> files
+              <span className="ml-1 text-gray-400 text-xs">(catch-up run — duplicates are still skipped)</span>
+            </span>
+          </label>
 
           <div className="flex items-center gap-3">
             <button
@@ -344,7 +359,7 @@ export default function SettingsPage() {
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-indigo-700">
               <span>{scanResult.found} PDF{scanResult.found !== 1 ? 's' : ''} found</span>
               {scanResult.skipped_completed > 0 && (
-                <span className="text-gray-500">{scanResult.skipped_completed} COMPLETED skipped</span>
+                <span className="text-amber-600">{scanResult.skipped_completed} COMPLETED skipped</span>
               )}
               {scanResult.already_processed > 0 && (
                 <span className="text-gray-500">{scanResult.already_processed} already processed</span>
