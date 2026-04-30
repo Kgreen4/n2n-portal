@@ -18,9 +18,17 @@ interface LineItem {
   allowed_amount: number | null
   paid_amount: number | null
   patient_responsibility: number | null
+  adjustment_amount: number | null
+  contractual_adjustment: number | null
+  deductible_amount: number | null
+  coinsurance_amount: number | null
+  copay_amount: number | null
+  non_covered_amount: number | null
   claim_status: string | null
+  claim_number: string | null
   payer_name: string | null
   remark_code: string | null
+  remark_reason: string | null
   remark_description: string | null
   payment_date: string | null
   confidence_score: number | null
@@ -33,6 +41,7 @@ interface PayerRow {
   billed: number
   paid: number
   denied: number
+  adjustment: number
 }
 
 interface StatusRow {
@@ -41,11 +50,31 @@ interface StatusRow {
   paid: number
 }
 
+interface DenialRow {
+  code: string
+  description: string
+  count: number
+  billed: number
+}
+
+interface DepositRow {
+  payer: string
+  check_number: string
+  payment_date: string | null
+  amount: number
+}
+
 const fmt = (n: number) =>
   n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
 
 const pct = (num: number, den: number) =>
   den === 0 ? '—' : `${((num / den) * 100).toFixed(1)}%`
+
+const fmtDate = (d: string | null) => {
+  if (!d) return null
+  // Handle both "YYYY-MM-DD" and ISO timestamps
+  return d.length > 10 ? d.slice(0, 10) : d
+}
 
 export default function ReportsPage() {
   const supabase = createClient()
@@ -80,7 +109,6 @@ export default function ReportsPage() {
         .from('eob_line_items')
         .select('*')
         .eq('practice_id', link.practice_id)
-        .neq('line_type', 'summary_total')
         .order('created_at', { ascending: false })
         .limit(2000)
 
@@ -104,10 +132,12 @@ export default function ReportsPage() {
   // ── Aggregations ──────────────────────────────────────────────
   const medicalItems = items.filter(i => i.line_type === 'medical_service' || i.line_type === null)
 
-  const totalBilled = medicalItems.reduce((s, i) => s + (i.billed_amount ?? 0), 0)
-  const totalPaid   = medicalItems.reduce((s, i) => s + (i.paid_amount   ?? 0), 0)
-  const totalClaims = medicalItems.length
-  const deniedCount = medicalItems.filter(i =>
+  const totalBilled      = medicalItems.reduce((s, i) => s + (i.billed_amount ?? 0), 0)
+  const totalPaid        = medicalItems.reduce((s, i) => s + (i.paid_amount   ?? 0), 0)
+  const totalAdjustment  = medicalItems.reduce((s, i) =>
+    s + (i.contractual_adjustment ?? i.adjustment_amount ?? 0), 0)
+  const totalClaims      = medicalItems.length
+  const deniedCount      = medicalItems.filter(i =>
     (i.claim_status ?? '').toLowerCase().includes('denied') ||
     (i.claim_status ?? '').toLowerCase().includes('rejected')
   ).length
@@ -116,10 +146,11 @@ export default function ReportsPage() {
   const payerMap = new Map<string, PayerRow>()
   for (const i of medicalItems) {
     const payer = i.payer_name || '(Unknown Payer)'
-    const row = payerMap.get(payer) ?? { payer, claims: 0, billed: 0, paid: 0, denied: 0 }
+    const row = payerMap.get(payer) ?? { payer, claims: 0, billed: 0, paid: 0, denied: 0, adjustment: 0 }
     row.claims++
-    row.billed += i.billed_amount ?? 0
-    row.paid   += i.paid_amount   ?? 0
+    row.billed     += i.billed_amount ?? 0
+    row.paid       += i.paid_amount   ?? 0
+    row.adjustment += i.contractual_adjustment ?? i.adjustment_amount ?? 0
     const isDenied = (i.claim_status ?? '').toLowerCase().includes('denied') ||
                      (i.claim_status ?? '').toLowerCase().includes('rejected')
     if (isDenied) row.denied++
@@ -138,16 +169,58 @@ export default function ReportsPage() {
   }
   const statusRows = Array.from(statusMap.values()).sort((a, b) => b.count - a.count)
 
-  // Filtered + paginated items for the table
-  const filtered = items.filter(i => {
+  // Denial management — group denied items by remark code
+  const deniedItems = medicalItems.filter(i =>
+    (i.claim_status ?? '').toLowerCase().includes('denied') ||
+    (i.claim_status ?? '').toLowerCase().includes('rejected')
+  )
+  const denialMap = new Map<string, DenialRow>()
+  for (const i of deniedItems) {
+    const code = i.remark_code || '(No Code)'
+    const description = i.remark_description || i.remark_reason || '—'
+    const key = code
+    const row = denialMap.get(key) ?? { code, description, count: 0, billed: 0 }
+    row.count++
+    row.billed += i.billed_amount ?? 0
+    // Update description if we have a better one
+    if (description !== '—' && row.description === '—') row.description = description
+    denialMap.set(key, row)
+  }
+  const denialRows = Array.from(denialMap.values()).sort((a, b) => b.count - a.count)
+
+  // Deposit summary — from summary_total rows (check/EFT cover pages captured by eob-worker)
+  const depositItems = items.filter(i => i.line_type === 'summary_total' && (i.paid_amount ?? 0) > 0)
+  const depositMap = new Map<string, DepositRow>()
+  for (const i of depositItems) {
+    const checkNum = i.remark_code || '(Unknown)'
+    const payer = i.payer_name || '(Unknown Payer)'
+    const key = `${payer}||${checkNum}`
+    const row = depositMap.get(key)
+    if (!row) {
+      depositMap.set(key, { payer, check_number: checkNum, payment_date: i.payment_date, amount: i.paid_amount ?? 0 })
+    } else {
+      row.amount += i.paid_amount ?? 0
+    }
+  }
+  const depositRows = Array.from(depositMap.values()).sort((a, b) => {
+    if (a.payment_date && b.payment_date) return b.payment_date.localeCompare(a.payment_date)
+    return a.payer.localeCompare(b.payer)
+  })
+  const depositTotal = depositRows.reduce((s, r) => s + r.amount, 0)
+
+  // Filtered + paginated items for the table (exclude summary_total rows — those appear in Deposit Summary)
+  const serviceItems = items.filter(i => i.line_type !== 'summary_total')
+  const filtered = serviceItems.filter(i => {
     if (!search) return true
     const q = search.toLowerCase()
     return (
-      (i.patient_name ?? '').toLowerCase().includes(q) ||
-      (i.payer_name ?? '').toLowerCase().includes(q) ||
-      (i.cpt_code ?? '').toLowerCase().includes(q) ||
-      (i.file_name ?? '').toLowerCase().includes(q) ||
-      (i.claim_status ?? '').toLowerCase().includes(q)
+      (i.patient_name    ?? '').toLowerCase().includes(q) ||
+      (i.payer_name      ?? '').toLowerCase().includes(q) ||
+      (i.cpt_code        ?? '').toLowerCase().includes(q) ||
+      (i.file_name       ?? '').toLowerCase().includes(q) ||
+      (i.claim_status    ?? '').toLowerCase().includes(q) ||
+      (i.remark_code     ?? '').toLowerCase().includes(q) ||
+      (i.claim_number    ?? '').toLowerCase().includes(q)
     )
   })
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE)
@@ -236,13 +309,70 @@ export default function ReportsPage() {
               <p className="mt-1 text-xs text-gray-400">{deniedCount} denied of {totalClaims}</p>
             </div>
             <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Avg Per Claim</p>
-              <p className="mt-1 text-2xl font-bold text-gray-900">
-                {totalClaims > 0 ? fmt(totalPaid / totalClaims) : '—'}
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Contractual Adj.</p>
+              <p className="mt-1 text-2xl font-bold text-orange-600">
+                {totalAdjustment > 0 ? fmt(totalAdjustment) : '—'}
               </p>
-              <p className="mt-1 text-xs text-gray-400">paid per line item</p>
+              <p className="mt-1 text-xs text-gray-400">write-downs where captured</p>
             </div>
           </div>
+
+          {/* Deposit Summary */}
+          {depositRows.length > 0 && (
+            <div className="mt-6 rounded-xl border border-blue-100 bg-white shadow-sm overflow-hidden">
+              <div className="border-b border-blue-100 px-5 py-4 bg-blue-50 flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-blue-900">Deposit Summary</h2>
+                  <p className="mt-0.5 text-xs text-blue-600">
+                    {depositRows.length} check{depositRows.length !== 1 ? 's' : ''} / EFT{depositRows.length !== 1 ? 's' : ''} · Total expected deposit: {fmt(depositTotal)}
+                  </p>
+                </div>
+                <svg className="h-5 w-5 text-blue-400" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18.75a60.07 60.07 0 0115.797 2.101c.727.198 1.453-.342 1.453-1.096V18.75M3.75 4.5v.75A.75.75 0 013 6h-.75m0 0v-.375c0-.621.504-1.125 1.125-1.125H20.25M2.25 6v9m18-10.5v.75c0 .414.336.75.75.75h.75m-1.5-1.5h.375c.621 0 1.125.504 1.125 1.125v9.75c0 .621-.504 1.125-1.125 1.125h-.375m1.5-1.5H21a.75.75 0 00-.75.75v.75m0 0H3.75m0 0h-.375a1.125 1.125 0 01-1.125-1.125V15m1.5 1.5v-.75A.75.75 0 003 15h-.75M15 10.5a3 3 0 11-6 0 3 3 0 016 0zm3 0h.008v.008H18V10.5zm-12 0h.008v.008H6V10.5z" />
+                </svg>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 text-left border-b border-gray-100">
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Payer</th>
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Check / EFT #</th>
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Payment Date</th>
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {depositRows.map((row, idx) => (
+                      <tr key={idx} className="hover:bg-gray-50">
+                        <td className="px-4 py-2.5 text-gray-800 max-w-[180px] truncate" title={row.payer}>
+                          {row.payer}
+                        </td>
+                        <td className="px-4 py-2.5 font-mono text-xs text-blue-700">
+                          {row.check_number}
+                        </td>
+                        <td className="px-4 py-2.5 text-gray-500 text-xs whitespace-nowrap">
+                          {fmtDate(row.payment_date) || <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-semibold text-gray-900 whitespace-nowrap">
+                          {fmt(row.amount)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-blue-50 border-t border-blue-100">
+                      <td className="px-4 py-2.5 text-xs font-semibold text-blue-900" colSpan={3}>
+                        Total Expected Deposit
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-sm font-bold text-blue-900 whitespace-nowrap">
+                        {fmt(depositTotal)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* Payer Breakdown + Status Distribution */}
           <div className="mt-6 grid gap-6 lg:grid-cols-2">
@@ -250,6 +380,7 @@ export default function ReportsPage() {
             <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
               <div className="border-b border-gray-100 px-5 py-4">
                 <h2 className="text-sm font-semibold text-gray-900">Payer Breakdown</h2>
+                <p className="mt-0.5 text-xs text-gray-400">Adj. = contractual write-down where captured by EOB</p>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -259,25 +390,36 @@ export default function ReportsPage() {
                       <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Claims</th>
                       <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Billed</th>
                       <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Paid</th>
-                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Coll%</th>
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Adj.</th>
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Denied</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
                     {payerRows.map(row => (
                       <tr key={row.payer} className="hover:bg-gray-50">
-                        <td className="px-4 py-2.5 text-gray-800 max-w-[160px] truncate" title={row.payer}>
+                        <td className="px-4 py-2.5 text-gray-800 max-w-[140px] truncate" title={row.payer}>
                           {row.payer}
                         </td>
                         <td className="px-4 py-2.5 text-gray-600 text-right">{row.claims}</td>
                         <td className="px-4 py-2.5 text-gray-600 text-right">{fmt(row.billed)}</td>
                         <td className="px-4 py-2.5 text-gray-800 font-medium text-right">{fmt(row.paid)}</td>
-                        <td className={`px-4 py-2.5 text-right font-medium ${row.billed > 0 && row.paid / row.billed < 0.6 ? 'text-red-600' : 'text-green-700'}`}>
-                          {pct(row.paid, row.billed)}
+                        <td className="px-4 py-2.5 text-orange-600 text-right">
+                          {row.adjustment > 0 ? fmt(row.adjustment) : <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 text-right">
+                          {row.denied > 0 ? (
+                            <span className="text-red-600 font-medium">{row.denied}</span>
+                          ) : (
+                            <span className="text-gray-300">0</span>
+                          )}
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+              </div>
+              <div className="border-t border-gray-50 px-4 py-2.5 bg-gray-50 text-xs text-gray-400">
+                Note: check/EFT numbers are not captured from paper EOBs — they appear only on the remittance cover page, not individual claim lines.
               </div>
             </div>
 
@@ -315,21 +457,66 @@ export default function ReportsPage() {
             </div>
           </div>
 
+          {/* Denial Management */}
+          {denialRows.length > 0 && (
+            <div className="mt-6 rounded-xl border border-red-100 bg-white shadow-sm overflow-hidden">
+              <div className="border-b border-red-100 px-5 py-4 bg-red-50">
+                <h2 className="text-sm font-semibold text-red-900">Denial Management</h2>
+                <p className="mt-0.5 text-xs text-red-600">
+                  {deniedCount} denied claim lines · {pct(deniedCount, totalClaims)} denial rate ·{' '}
+                  {fmt(deniedItems.reduce((s, i) => s + (i.billed_amount ?? 0), 0))} at risk
+                </p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 text-left border-b border-gray-100">
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Remark / Reason Code</th>
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Description</th>
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Occurrences</th>
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Share of Denials</th>
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Billed at Risk</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {denialRows.map(row => (
+                      <tr key={row.code} className="hover:bg-gray-50">
+                        <td className="px-4 py-2.5 font-mono text-xs text-gray-700 whitespace-nowrap">
+                          {row.code}
+                        </td>
+                        <td className="px-4 py-2.5 text-gray-600 max-w-[320px]" title={row.description}>
+                          {row.description}
+                        </td>
+                        <td className="px-4 py-2.5 text-right">
+                          <span className="inline-flex items-center justify-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-bold text-red-700">
+                            {row.count}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5 text-gray-500 text-right">{pct(row.count, deniedCount)}</td>
+                        <td className="px-4 py-2.5 text-red-600 font-medium text-right">{fmt(row.billed)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           {/* Line Items Table */}
           <div className="mt-6 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
             <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4">
               <h2 className="text-sm font-semibold text-gray-900">
                 Line Items
                 <span className="ml-2 text-xs font-normal text-gray-400">
-                  {filtered.length.toLocaleString()} of {items.length.toLocaleString()}
+                  {filtered.length.toLocaleString()} of {serviceItems.length.toLocaleString()}
                 </span>
               </h2>
               <input
                 type="search"
-                placeholder="Search patient, payer, CPT…"
+                placeholder="Search patient, payer, CPT, file…"
                 value={search}
                 onChange={e => { setSearch(e.target.value); setPage(0) }}
-                className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 w-56"
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 w-64"
               />
             </div>
             <div className="overflow-x-auto">
@@ -339,44 +526,67 @@ export default function ReportsPage() {
                     <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Patient</th>
                     <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Payer</th>
                     <th className="px-4 py-2.5 text-xs font-medium text-gray-500">DOS</th>
+                    <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Paid Date</th>
                     <th className="px-4 py-2.5 text-xs font-medium text-gray-500">CPT</th>
                     <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Status</th>
                     <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Billed</th>
                     <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Paid</th>
                     <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Remark</th>
+                    <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Source File</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {pageItems.map(i => (
-                    <tr key={i.id} className="hover:bg-gray-50">
-                      <td className="px-4 py-2.5 max-w-[140px] truncate text-gray-800" title={i.patient_name ?? ''}>
-                        {i.patient_name || <span className="text-gray-300">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5 max-w-[160px] truncate text-gray-600" title={i.payer_name ?? ''}>
-                        {i.payer_name || <span className="text-gray-300">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">
-                        {i.date_of_service || <span className="text-gray-300">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5 font-mono text-xs text-gray-700">
-                        {i.cpt_code || <span className="text-gray-300">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${statusColor(i.claim_status)}`}>
-                          {i.claim_status || '—'}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2.5 text-right text-gray-600 whitespace-nowrap">
-                        {i.billed_amount != null ? fmt(i.billed_amount) : <span className="text-gray-300">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-medium text-gray-800 whitespace-nowrap">
-                        {i.paid_amount != null ? fmt(i.paid_amount) : <span className="text-gray-300">—</span>}
-                      </td>
-                      <td className="px-4 py-2.5 max-w-[140px] truncate text-xs text-gray-500" title={i.remark_code ?? ''}>
-                        {i.remark_code || <span className="text-gray-300">—</span>}
-                      </td>
-                    </tr>
-                  ))}
+                  {pageItems.map(i => {
+                    const remarkTitle = [i.remark_code, i.remark_description || i.remark_reason]
+                      .filter(Boolean).join(' — ')
+                    return (
+                      <tr key={i.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-2.5 max-w-[120px] truncate text-gray-800" title={i.patient_name ?? ''}>
+                          {i.patient_name || <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 max-w-[130px] truncate text-gray-600" title={i.payer_name ?? ''}>
+                          {i.payer_name || <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap text-xs">
+                          {fmtDate(i.date_of_service) || <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap text-xs">
+                          {fmtDate(i.payment_date) || <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 font-mono text-xs text-gray-700" title={i.cpt_description ?? ''}>
+                          {i.cpt_code || <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${statusColor(i.claim_status)}`}>
+                            {i.claim_status || '—'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-gray-600 whitespace-nowrap text-xs">
+                          {i.billed_amount != null ? fmt(i.billed_amount) : <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-medium text-gray-800 whitespace-nowrap text-xs">
+                          {i.paid_amount != null ? fmt(i.paid_amount) : <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 max-w-[180px] text-xs text-gray-500" title={remarkTitle || undefined}>
+                          {i.remark_code ? (
+                            <span>
+                              <span className="font-mono text-gray-700">{i.remark_code}</span>
+                              {(i.remark_description || i.remark_reason) && (
+                                <span className="ml-1 text-gray-400 truncate block max-w-[160px]">
+                                  {i.remark_description || i.remark_reason}
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-gray-300">—</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2.5 max-w-[140px] text-xs text-gray-400 truncate" title={i.file_name ?? ''}>
+                          {i.file_name || <span className="text-gray-300">—</span>}
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -385,22 +595,25 @@ export default function ReportsPage() {
             {totalPages > 1 && (
               <div className="flex items-center justify-between border-t border-gray-100 px-5 py-3">
                 <p className="text-xs text-gray-500">
-                  Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, filtered.length)} of {filtered.length}
+                  Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, filtered.length)} of {filtered.length.toLocaleString()}
                 </p>
                 <div className="flex gap-2">
                   <button
                     onClick={() => setPage(p => Math.max(0, p - 1))}
                     disabled={page === 0}
-                    className="rounded px-3 py-1 text-xs border border-gray-200 disabled:opacity-40 hover:bg-gray-50"
+                    className="rounded px-3 py-1.5 text-xs font-medium border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
-                    Previous
+                    ← Previous
                   </button>
+                  <span className="flex items-center px-2 text-xs text-gray-500">
+                    {page + 1} / {totalPages}
+                  </span>
                   <button
                     onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
                     disabled={page === totalPages - 1}
-                    className="rounded px-3 py-1 text-xs border border-gray-200 disabled:opacity-40 hover:bg-gray-50"
+                    className="rounded px-3 py-1.5 text-xs font-medium border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
-                    Next
+                    Next →
                   </button>
                 </div>
               </div>
@@ -408,7 +621,7 @@ export default function ReportsPage() {
           </div>
 
           <p className="mt-4 text-xs text-gray-400 text-center">
-            Showing up to 2,000 line items · {PERIOD_LABELS[period]} · medical service lines only
+            Showing up to 2,000 records · {PERIOD_LABELS[period]} · check/EFT totals in Deposit Summary above
           </p>
         </>
       )}
