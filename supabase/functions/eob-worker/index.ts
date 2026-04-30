@@ -575,27 +575,28 @@ Deno.serve(async (req) => {
         }
       }));
 
-      const bqResp = await fetch(BQ_INSERT_URL, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${gToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ rows }),
-      });
+      try {
+        const bqResp = await fetch(BQ_INSERT_URL, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${gToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ rows }),
+        });
 
-      const bqResult = await bqResp.json();
+        const bqResult = await bqResp.json();
 
-      if (!bqResp.ok) {
-        throw new Error(`BigQuery insert failed (HTTP ${bqResp.status}): ${JSON.stringify(bqResult)}`);
+        if (!bqResp.ok) {
+          console.warn(`[eob-worker] BigQuery insert failed (HTTP ${bqResp.status}) — non-fatal, Supabase still receives data: ${JSON.stringify(bqResult)}`);
+        } else if (bqResult.insertErrors && bqResult.insertErrors.length > 0) {
+          console.warn(`[eob-worker] BigQuery partial insert errors (non-fatal, likely schema mismatch): ${JSON.stringify(bqResult.insertErrors[0])}`);
+        } else {
+          console.info(`[eob-worker] Inserted ${rows.length} rows into BigQuery for page ${job.page_number}`);
+        }
+      } catch (bqEx: any) {
+        console.warn(`[eob-worker] BigQuery insert exception (non-fatal): ${bqEx.message}`);
       }
-
-      if (bqResult.insertErrors && bqResult.insertErrors.length > 0) {
-        console.error('[eob-worker] BigQuery partial insert errors:', JSON.stringify(bqResult.insertErrors));
-        throw new Error(`BigQuery insert had ${bqResult.insertErrors.length} row errors: ${JSON.stringify(bqResult.insertErrors[0])}`);
-      }
-
-      console.info(`[eob-worker] Inserted ${rows.length} rows into BigQuery for page ${job.page_number}`);
     }
 
     // STEP 4c: PERSIST TO SUPABASE eob_line_items (for in-app reporting)

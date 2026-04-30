@@ -114,21 +114,39 @@ Deno.serve(async (req) => {
     ? driveFiles
     : driveFiles.filter(f => !f.name.toUpperCase().includes("COMPLETED"));
 
+  // When include_completed is set, strip "COMPLETED" from filenames before dedup so
+  // that "COMPLETED_MERCY CARE_EOB.pdf" matches existing DB record "MERCY CARE_EOB.pdf".
+  function normalizeCompletedName(name: string): string {
+    if (!include_completed || !name.toUpperCase().includes("COMPLETED")) return name;
+    return name
+      .replace(/^COMPLETED[_\s-]*/i, "")  // strip leading COMPLETED
+      .replace(/[_\s-]*COMPLETED[_\s-]*$/i, "")  // strip trailing COMPLETED
+      .replace(/[_\s-]*COMPLETED[_\s-]*/i, " ")  // strip middle COMPLETED
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+
   // 5. Check which candidates are already in eob_documents (non-failed)
+  // Use normalized names so COMPLETED variants match existing clean-name records.
+  const candidateNormalized = candidateFiles.map(f => ({
+    ...f,
+    normalized_name: normalizeCompletedName(f.name),
+  }));
+
   let alreadyProcessedNames = new Set<string>();
-  if (candidateFiles.length > 0) {
+  if (candidateNormalized.length > 0) {
     const { data: existing } = await supabase
       .from("eob_documents")
       .select("file_name")
       .eq("practice_id", practice_id)
-      .in("file_name", candidateFiles.map(f => f.name))
+      .in("file_name", candidateNormalized.map(f => f.normalized_name))
       .neq("status", "failed");
 
     (existing || []).forEach(d => alreadyProcessedNames.add(d.file_name));
   }
 
-  const newFiles = candidateFiles.filter(f => !alreadyProcessedNames.has(f.name));
-  const duplicateFiles = candidateFiles.filter(f => alreadyProcessedNames.has(f.name));
+  const newFiles = candidateNormalized.filter(f => !alreadyProcessedNames.has(f.normalized_name));
+  const duplicateFiles = candidateNormalized.filter(f => alreadyProcessedNames.has(f.normalized_name));
 
   console.info(`[scan-drive-folder] ${completedFiles.length} COMPLETED skipped, ${duplicateFiles.length} duplicate, ${newFiles.length} new`);
 
@@ -149,22 +167,26 @@ Deno.serve(async (req) => {
           body: JSON.stringify({
             practice_id,
             gdrive_file_id: file.id,
-            original_file_name: file.name,
+            // Pass the normalized name so trigger-eob-parser stores and deduplicates
+            // by the clean name (without COMPLETED), matching any prior processing.
+            original_file_name: file.normalized_name,
+            // Tell trigger-eob-parser to skip its own COMPLETED guard for this run.
+            bypass_completed_guard: include_completed,
           }),
         }
       );
       if (resp.ok || resp.status === 409) {
         // 409 = duplicate detected at trigger level (race condition) — still counts as handled
-        triggered.push(file.name);
-        console.info(`[scan-drive-folder] triggered: ${file.name}`);
+        triggered.push(file.normalized_name);
+        console.info(`[scan-drive-folder] triggered: ${file.normalized_name}`);
       } else {
         const errText = await resp.text();
-        console.error(`[scan-drive-folder] trigger failed for "${file.name}":`, resp.status, errText);
-        triggerErrors.push({ name: file.name, error: errText });
+        console.error(`[scan-drive-folder] trigger failed for "${file.normalized_name}":`, resp.status, errText);
+        triggerErrors.push({ name: file.normalized_name, error: errText });
       }
     } catch (err: any) {
-      console.error(`[scan-drive-folder] trigger exception for "${file.name}":`, err);
-      triggerErrors.push({ name: file.name, error: err.message || "Unknown error" });
+      console.error(`[scan-drive-folder] trigger exception for "${file.normalized_name}":`, err);
+      triggerErrors.push({ name: file.normalized_name, error: err.message || "Unknown error" });
     }
   }
 

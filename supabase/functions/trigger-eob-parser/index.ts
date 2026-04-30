@@ -119,7 +119,10 @@ Deno.serve(async (req) => {
     const file_name = original_file_name || file_path!.split("/").pop();
 
     // Skip files already processed externally (e.g. AZHS marks done files with "COMPLETED")
-    if (file_name && file_name.toUpperCase().includes("COMPLETED")) {
+    // bypass_completed_guard=true is set by scan-drive-folder on catch-up runs — the filename
+    // has already been normalized (COMPLETED stripped) before reaching here.
+    const bypass_completed_guard = body?.bypass_completed_guard === true;
+    if (!bypass_completed_guard && file_name && file_name.toUpperCase().includes("COMPLETED")) {
       console.info("[trigger-eob-parser] skipping COMPLETED file:", file_name);
       return json({ skipped: true, reason: "COMPLETED file", file_name });
     }
