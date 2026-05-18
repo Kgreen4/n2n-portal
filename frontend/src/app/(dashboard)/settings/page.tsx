@@ -46,6 +46,8 @@ export default function SettingsPage() {
   const [interval, setInterval] = useState(5)
   const [autoMove, setAutoMove] = useState(true)
   const [watcherEnabled, setWatcherEnabled] = useState(false)
+  const [resolving, setResolving] = useState(false)
+  const [resolveError, setResolveError] = useState<string | null>(null)
 
   // Load practice ID and settings
   useEffect(() => {
@@ -102,6 +104,28 @@ export default function SettingsPage() {
     if (!error) {
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
+    }
+  }
+
+  const handleResolveFolderName = async () => {
+    const id = folderId.trim()
+    if (!id) return
+    setResolving(true)
+    setResolveError(null)
+    try {
+      const { data, error } = await supabase.functions.invoke('resolve-drive-folder', {
+        body: { folder_id: id },
+      })
+      if (error) throw new Error(error.message)
+      if (data?.name) {
+        setFolderName(data.name)
+      } else if (data?.error) {
+        setResolveError(data.error)
+      }
+    } catch (err: any) {
+      setResolveError(err.message || 'Could not resolve folder name')
+    } finally {
+      setResolving(false)
     }
   }
 
@@ -186,16 +210,37 @@ export default function SettingsPage() {
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Google Drive Folder ID
             </label>
-            <input
-              type="text"
-              value={folderId}
-              onChange={e => setFolderId(e.target.value)}
-              placeholder="e.g. 1A2B3C4D5E6F7G8H9I0J"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-            />
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={folderId}
+                onChange={e => { setFolderId(e.target.value); setResolveError(null) }}
+                placeholder="e.g. 1A2B3C4D5E6F7G8H9I0J"
+                className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-base text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
+              <button
+                type="button"
+                onClick={handleResolveFolderName}
+                disabled={resolving || !folderId.trim()}
+                title="Look up folder name from Google Drive"
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+              >
+                {resolving ? (
+                  <span className="h-4 w-4 animate-spin border-2 border-gray-400 border-t-transparent rounded-full inline-block" />
+                ) : (
+                  <svg className="h-4 w-4 text-gray-500" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+                  </svg>
+                )}
+                Lookup
+              </button>
+            </div>
             <p className="mt-1 text-xs text-gray-400">
-              Find this in your Google Drive folder URL after /folders/
+              Paste the ID from the Drive URL (after /folders/) then click <strong>Lookup</strong> to auto-fill the name.
             </p>
+            {resolveError && (
+              <p className="mt-1 text-xs text-red-600">⚠ {resolveError} — check that the service account has access to this folder.</p>
+            )}
           </div>
 
           <div>
@@ -206,7 +251,7 @@ export default function SettingsPage() {
               type="text"
               value={folderName}
               onChange={e => setFolderName(e.target.value)}
-              placeholder="e.g. EOB Inbox"
+              placeholder="Auto-filled by Lookup, or type manually"
               className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
             />
           </div>
