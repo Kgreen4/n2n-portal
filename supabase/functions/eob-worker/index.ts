@@ -189,10 +189,30 @@ function deduplicateItems(items: any[]): any[] {
   // Group by composite key, keep the highest-quality row per group
   const groups = new Map<string, any>();
   for (const item of items) {
-    // Skip summary_total rows — they're kept as-is, never merged with detail lines
+    // Deduplicate summary_total rows by paid_amount — Gemini sometimes creates
+    // multiple rows for the same check (one with the correct insurance payer + check#,
+    // and a spurious duplicate without a check# or using the practice name as payer).
+    // Group by normalized paid_amount; keep the highest-quality row (which will be the
+    // one with a non-null remark_code / check number, scored higher by quality()).
     if (item.line_type === 'summary_total') {
-      // Use a unique key so summary rows never collide
-      groups.set(`__summary_${crypto.randomUUID()}`, item);
+      const summaryKey = `__summary_${String(parseCurrency(item.paid_amount) ?? item.paid_amount ?? '__noamt')}`;
+      const existing = groups.get(summaryKey);
+      if (!existing) {
+        groups.set(summaryKey, item);
+      } else {
+        const [winner, donor] = quality(item) >= quality(existing) ? [item, existing] : [existing, item];
+        const merged = { ...winner };
+        for (const [field, val] of Object.entries(donor)) {
+          if ((merged[field] === null || merged[field] === undefined || merged[field] === '') &&
+              val !== null && val !== undefined && val !== '') {
+            merged[field] = val;
+          }
+        }
+        const winnerConf = parseInt(winner.confidence_score) || 0;
+        const donorConf = parseInt(donor.confidence_score) || 0;
+        merged.confidence_score = Math.max(winnerConf, donorConf);
+        groups.set(summaryKey, merged);
+      }
       continue;
     }
 
@@ -305,7 +325,7 @@ Return a JSON object with an 'items' array. Each item must include these fields 
 - claim_status: Status of the claim. Look for explicit labels like "Paid", "Denied", "Adjusted", "Partially Paid", "Processed", or similar text. If no explicit status text is printed on the EOB, INFER the status from the financial fields: if paid_amount > 0 and paid_amount >= allowed_amount use "Paid"; if paid_amount > 0 but paid_amount < allowed_amount use "Partially Paid"; if paid_amount = 0 or null use "Denied"; if adjustment_amount > 0 and paid_amount > 0 use "Adjusted". For MIPS bonuses, use "Incentive Paid". For summary totals, use "Summary". NEVER return null for claim_status on medical_service lines — always infer if not explicitly shown.
 - claim_number: The payer's claim control number / ICN (Internal Claim Number). This is the reference number assigned by the insurance company to this specific claim. Often printed as "Claim #", "ICN", "DCN", "Claim Reference", or "Reference #" on the EOB. Use null if not visible.
 - payment_date: Date the check or EFT was issued (format: YYYY-MM-DD). Usually printed on the check stub, payment summary, or in the page header as "Payment Date", "Check Date", or "Date Issued". Apply the same date to all items on the page if it appears only in the header. Use null if not visible on this page.
-- payer_name: Name of the insurance company / payer issuing this payment. Look in page headers, footers, letterhead, or the "From" / "Payer" section. Apply to all items on the page. Use null if not visible.
+- payer_name: Name of the insurance company / payer issuing this payment. Look in page headers, footers, letterhead, or the "From" / "Payer" section. Apply to all items on the page. Use null if not visible. CRITICAL: payer_name is ALWAYS the insurance company (e.g., "BlueCross BlueShield of Arizona", "Aetna", "UnitedHealthcare"). It is NEVER the medical practice, physician group, clinic, or hospital that is receiving the payment. If the document shows a "Pay to:", "Payee:", "Remit to:", or "Provider:" field with the practice/clinic name, that is the check RECIPIENT — ignore it for payer_name.
 - payer_id: Payer identifier number (if visible). Sometimes shown as "Payer ID", "Plan ID", or near the payer name. Use null if not visible.
 - adjustment_amount: For adjustment or denial lines, the TOTAL dollar amount of the adjustment (numeric, no $ sign). This is typically billed_amount minus paid_amount, or the specific denied/adjusted/contractual amount shown on the line. Use null for fully paid lines or if no adjustment amount is shown.
 - deductible_amount: The portion of patient responsibility attributed to the deductible (numeric, no $ sign). On many EOBs this appears in a "Deductible" or "Ded" column, or within a combined "Not Covered Ded-Coin-Inst" breakdown. Use null if not broken out separately on the EOB.
@@ -328,9 +348,10 @@ IMPORTANT — MIPS/Bonus Pages:
 - If the page shows a summary of multiple claims with incentive adjustments, extract each claim as a separate line item.
 
 IMPORTANT — Summary/Check Pages:
-- If the page shows a check total, EFT total, or provider payment summary, extract ONE summary_total item per check or EFT payment.
+- If the page shows a check total, EFT total, or provider payment summary, extract EXACTLY ONE summary_total item per check or EFT payment. Do NOT create multiple summary_total rows for the same check.
 - Set paid_amount to the total check/EFT amount.
-- Set remark_code to the check number or EFT trace number (e.g., "CHK-12345" or "EFT-98765").
+- Set remark_code to the check number or EFT trace number (e.g., "CHK-12345" or "EFT-98765"). This is the most important field on the summary page — look carefully for it.
+- Set payer_name to the insurance company name (e.g., "BlueCross BlueShield of Arizona"). NEVER use the medical practice or provider name as payer_name, even if the check is made out to the practice. The "Pay to" / "Payee" / "Remit to" field shows who is RECEIVING the check — do not create a separate summary_total row for the payee.
 - Set payment_date to the check/EFT issue date if visible.
 - If the page lists both individual claim lines AND a total, extract BOTH: the individual lines as "medical_service" and the total as "summary_total".
 - Do NOT double-count: the summary_total represents the check total, not an additional payment.
