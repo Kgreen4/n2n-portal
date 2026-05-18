@@ -22,6 +22,8 @@ interface Document {
   export_found_revenue_amount: number | null
   export_found_revenue_count: number | null
   has_found_revenue: boolean
+  pages_capped: boolean | null
+  pages_actual: number | null
 }
 
 interface BatchGroup {
@@ -232,13 +234,26 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
             )}
           </td>
         )}
-        <td className="px-6 py-4 text-sm font-medium text-gray-900 max-w-xs truncate">
-          <span>{doc.file_name || doc.id.substring(0, 8)}</span>
-          {doc.has_found_revenue && (
-            <span className="ml-2 inline-flex items-center rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-green-600/20 ring-inset">
-              Found Revenue
-            </span>
-          )}
+        <td className="px-6 py-4 text-sm font-medium text-gray-900 max-w-xs">
+          <span className="truncate block">{doc.file_name || doc.id.substring(0, 8)}</span>
+          <span className="flex items-center gap-1.5 flex-wrap mt-0.5">
+            {doc.has_found_revenue && (
+              <span className="inline-flex items-center rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-green-600/20 ring-inset">
+                Found Revenue
+              </span>
+            )}
+            {doc.pages_capped && doc.pages_actual && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-amber-500/20 ring-inset"
+                title={`First ${doc.total_pages} of ${doc.pages_actual} pages processed — upgrade plan to process full document`}
+              >
+                <svg className="h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                </svg>
+                Partial ({doc.total_pages}/{doc.pages_actual} pg)
+              </span>
+            )}
+          </span>
         </td>
         <td className="px-6 py-4">
           <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${

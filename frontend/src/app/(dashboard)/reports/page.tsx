@@ -62,10 +62,20 @@ interface DepositRow {
   check_number: string
   payment_date: string | null
   amount: number
+  source_doc: string
+}
+
+interface DenialByPayerRow {
+  payer: string
+  count: number
+  billed: number
 }
 
 const fmt = (n: number) =>
   n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
+
+const fmtDec = (n: number) =>
+  n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
 const pct = (num: number, den: number) =>
   den === 0 ? '—' : `${((num / den) * 100).toFixed(1)}%`
@@ -75,6 +85,9 @@ const fmtDate = (d: string | null) => {
   // Handle both "YYYY-MM-DD" and ISO timestamps
   return d.length > 10 ? d.slice(0, 10) : d
 }
+
+const normalizePayer = (name: string | null): string =>
+  name ? name.trim().replace(/\s+/g, ' ') : '(Unknown Payer)'
 
 export default function ReportsPage() {
   const supabase = createClient()
@@ -186,24 +199,45 @@ export default function ReportsPage() {
     if (description !== '—' && row.description === '—') row.description = description
     denialMap.set(key, row)
   }
-  const denialRows = Array.from(denialMap.values()).sort((a, b) => b.count - a.count)
+  const denialRows = Array.from(denialMap.values()).sort((a, b) => b.billed - a.billed)
+
+  // Denial by payer — group denied items by payer for Table B
+  const denialByPayerMap = new Map<string, DenialByPayerRow>()
+  for (const i of deniedItems) {
+    const payer = normalizePayer(i.payer_name)
+    const row = denialByPayerMap.get(payer) ?? { payer, count: 0, billed: 0 }
+    row.count++
+    row.billed += i.billed_amount ?? 0
+    denialByPayerMap.set(payer, row)
+  }
+  const denialByPayerRows = Array.from(denialByPayerMap.values()).sort((a, b) => b.billed - a.billed)
 
   // Deposit summary — from summary_total rows (check/EFT cover pages captured by eob-worker)
   const depositItems = items.filter(i => i.line_type === 'summary_total' && (i.paid_amount ?? 0) > 0)
   const depositMap = new Map<string, DepositRow>()
   for (const i of depositItems) {
     const checkNum = i.remark_code || '(Unknown)'
-    const payer = i.payer_name || '(Unknown Payer)'
+    const payer = normalizePayer(i.payer_name)
     const key = `${payer}||${checkNum}`
     const row = depositMap.get(key)
     if (!row) {
-      depositMap.set(key, { payer, check_number: checkNum, payment_date: i.payment_date, amount: i.paid_amount ?? 0 })
+      depositMap.set(key, {
+        payer,
+        check_number: checkNum,
+        payment_date: i.payment_date,
+        amount: i.paid_amount ?? 0,
+        source_doc: i.file_name || '',
+      })
     } else {
       row.amount += i.paid_amount ?? 0
+      if (!row.source_doc && i.file_name) row.source_doc = i.file_name
     }
   }
+  const isUnknownDeposit = (r: DepositRow) =>
+    r.payer === '(Unknown Payer)' || r.check_number === '(Unknown)'
   const depositRows = Array.from(depositMap.values()).sort((a, b) => {
-    if (a.payment_date && b.payment_date) return b.payment_date.localeCompare(a.payment_date)
+    const aU = isUnknownDeposit(a), bU = isUnknownDeposit(b)
+    if (aU !== bU) return aU ? -1 : 1
     return a.payer.localeCompare(b.payer)
   })
   const depositTotal = depositRows.reduce((s, r) => s + r.amount, 0)
@@ -324,48 +358,64 @@ export default function ReportsPage() {
                 <div>
                   <h2 className="text-sm font-semibold text-blue-900">Deposit Summary</h2>
                   <p className="mt-0.5 text-xs text-blue-600">
-                    {depositRows.length} check{depositRows.length !== 1 ? 's' : ''} / EFT{depositRows.length !== 1 ? 's' : ''} · Total expected deposit: {fmt(depositTotal)}
+                    {depositRows.length} check{depositRows.length !== 1 ? 's' : ''} / EFT{depositRows.length !== 1 ? 's' : ''} · Total expected deposit: {fmtDec(depositTotal)}
                   </p>
                 </div>
                 <svg className="h-5 w-5 text-blue-400" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18.75a60.07 60.07 0 0115.797 2.101c.727.198 1.453-.342 1.453-1.096V18.75M3.75 4.5v.75A.75.75 0 013 6h-.75m0 0v-.375c0-.621.504-1.125 1.125-1.125H20.25M2.25 6v9m18-10.5v.75c0 .414.336.75.75.75h.75m-1.5-1.5h.375c.621 0 1.125.504 1.125 1.125v9.75c0 .621-.504 1.125-1.125 1.125h-.375m1.5-1.5H21a.75.75 0 00-.75.75v.75m0 0H3.75m0 0h-.375a1.125 1.125 0 01-1.125-1.125V15m1.5 1.5v-.75A.75.75 0 003 15h-.75M15 10.5a3 3 0 11-6 0 3 3 0 016 0zm3 0h.008v.008H18V10.5zm-12 0h.008v.008H6V10.5z" />
                 </svg>
               </div>
-              <div className="overflow-x-auto">
+              <div className="max-h-[480px] overflow-y-auto overflow-x-auto">
                 <table className="w-full text-sm">
-                  <thead>
+                  <thead className="sticky top-0 z-10">
                     <tr className="bg-gray-50 text-left border-b border-gray-100">
                       <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Payer</th>
                       <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Check / EFT #</th>
-                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Payment Date</th>
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Check/EFT Date</th>
+                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Source Document</th>
                       <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Amount</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
-                    {depositRows.map((row, idx) => (
-                      <tr key={idx} className="hover:bg-gray-50">
-                        <td className="px-4 py-2.5 text-gray-800 max-w-[180px] truncate" title={row.payer}>
-                          {row.payer}
-                        </td>
-                        <td className="px-4 py-2.5 font-mono text-xs text-blue-700">
-                          {row.check_number}
-                        </td>
-                        <td className="px-4 py-2.5 text-gray-500 text-xs whitespace-nowrap">
-                          {fmtDate(row.payment_date) || <span className="text-gray-300">—</span>}
-                        </td>
-                        <td className="px-4 py-2.5 text-right font-semibold text-gray-900 whitespace-nowrap">
-                          {fmt(row.amount)}
-                        </td>
-                      </tr>
-                    ))}
+                    {depositRows.map((row, idx) => {
+                      const isUnknown = isUnknownDeposit(row)
+                      return (
+                        <tr key={idx} className={isUnknown ? 'bg-amber-50 hover:bg-amber-100' : 'hover:bg-gray-50'}>
+                          <td className="px-4 py-2.5 max-w-[180px] truncate" title={row.payer}>
+                            {isUnknown ? (
+                              <span className="flex items-center gap-1.5 text-amber-800 font-medium">
+                                <svg className="h-3.5 w-3.5 text-amber-500 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                                </svg>
+                                {row.payer}
+                              </span>
+                            ) : (
+                              <span className="text-gray-800">{row.payer}</span>
+                            )}
+                          </td>
+                          <td className={`px-4 py-2.5 font-mono text-xs ${isUnknown ? 'text-amber-700' : 'text-blue-700'}`}>
+                            {row.check_number}
+                          </td>
+                          <td className="px-4 py-2.5 text-gray-500 text-xs whitespace-nowrap">
+                            {fmtDate(row.payment_date) || <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-2.5 text-xs text-gray-400 max-w-[200px] truncate" title={row.source_doc}>
+                            {row.source_doc || <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-semibold text-gray-900 whitespace-nowrap">
+                            {fmtDec(row.amount)}
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                   <tfoot>
                     <tr className="bg-blue-50 border-t border-blue-100">
-                      <td className="px-4 py-2.5 text-xs font-semibold text-blue-900" colSpan={3}>
+                      <td className="px-4 py-2.5 text-xs font-semibold text-blue-900" colSpan={4}>
                         Total Expected Deposit
                       </td>
                       <td className="px-4 py-2.5 text-right text-sm font-bold text-blue-900 whitespace-nowrap">
-                        {fmt(depositTotal)}
+                        {fmtDec(depositTotal)}
                       </td>
                     </tr>
                   </tfoot>
@@ -467,37 +517,89 @@ export default function ReportsPage() {
                   {fmt(deniedItems.reduce((s, i) => s + (i.billed_amount ?? 0), 0))} at risk
                 </p>
               </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="bg-gray-50 text-left border-b border-gray-100">
-                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Remark / Reason Code</th>
-                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500">Description</th>
-                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Occurrences</th>
-                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Share of Denials</th>
-                      <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">Billed at Risk</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {denialRows.map(row => (
-                      <tr key={row.code} className="hover:bg-gray-50">
-                        <td className="px-4 py-2.5 font-mono text-xs text-gray-700 whitespace-nowrap">
-                          {row.code}
-                        </td>
-                        <td className="px-4 py-2.5 text-gray-600 max-w-[320px]" title={row.description}>
-                          {row.description}
-                        </td>
-                        <td className="px-4 py-2.5 text-right">
-                          <span className="inline-flex items-center justify-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-bold text-red-700">
-                            {row.count}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2.5 text-gray-500 text-right">{pct(row.count, deniedCount)}</td>
-                        <td className="px-4 py-2.5 text-red-600 font-medium text-right">{fmt(row.billed)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="grid lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-gray-100">
+                {/* Table A — Top Denial Codes (Pareto by $ at risk) */}
+                <div>
+                  <div className="px-4 py-2.5 border-b border-gray-100 bg-gray-50/60">
+                    <p className="text-xs font-semibold text-gray-700">
+                      By Denial Code{' '}
+                      <span className="font-normal text-gray-400">ranked by $ at risk</span>
+                    </p>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-gray-50 text-left border-b border-gray-100">
+                          <th className="px-4 py-2 text-xs font-medium text-gray-500">Code</th>
+                          <th className="px-4 py-2 text-xs font-medium text-gray-500">Description</th>
+                          <th className="px-4 py-2 text-xs font-medium text-gray-500 text-right">Count</th>
+                          <th className="px-4 py-2 text-xs font-medium text-gray-500 text-right">$ at Risk</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {denialRows.map(row => (
+                          <tr key={row.code} className="hover:bg-gray-50">
+                            <td className="px-4 py-2 font-mono text-xs text-gray-700 whitespace-nowrap">
+                              {row.code}
+                            </td>
+                            <td className="px-4 py-2 text-gray-600 text-xs max-w-[200px] truncate" title={row.description}>
+                              {row.description}
+                            </td>
+                            <td className="px-4 py-2 text-right">
+                              <span className="inline-flex items-center justify-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-bold text-red-700">
+                                {row.count}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-red-600 font-medium text-right text-xs whitespace-nowrap">
+                              {fmt(row.billed)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                {/* Table B — Denials by Payer */}
+                <div>
+                  <div className="px-4 py-2.5 border-b border-gray-100 bg-gray-50/60">
+                    <p className="text-xs font-semibold text-gray-700">
+                      By Payer{' '}
+                      <span className="font-normal text-gray-400">ranked by $ at risk</span>
+                    </p>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-gray-50 text-left border-b border-gray-100">
+                          <th className="px-4 py-2 text-xs font-medium text-gray-500">Payer</th>
+                          <th className="px-4 py-2 text-xs font-medium text-gray-500 text-right">Denials</th>
+                          <th className="px-4 py-2 text-xs font-medium text-gray-500 text-right">Share</th>
+                          <th className="px-4 py-2 text-xs font-medium text-gray-500 text-right">$ at Risk</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {denialByPayerRows.map(row => (
+                          <tr key={row.payer} className="hover:bg-gray-50">
+                            <td className="px-4 py-2 text-gray-800 text-xs max-w-[160px] truncate" title={row.payer}>
+                              {row.payer}
+                            </td>
+                            <td className="px-4 py-2 text-right">
+                              <span className="inline-flex items-center justify-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-bold text-red-700">
+                                {row.count}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-gray-500 text-right text-xs">
+                              {pct(row.count, deniedCount)}
+                            </td>
+                            <td className="px-4 py-2 text-red-600 font-medium text-right text-xs whitespace-nowrap">
+                              {fmt(row.billed)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
             </div>
           )}
