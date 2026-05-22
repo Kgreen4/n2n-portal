@@ -254,7 +254,10 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
         let msg = error.message
         try {
           const errorBody = await (error as any).context?.json?.()
-          if (errorBody?.error) msg = errorBody.error
+          if (errorBody?.error) {
+            msg = errorBody.error
+            if (errorBody?.details) msg += `: ${errorBody.details}`
+          }
         } catch { /* ignore */ }
         setReprocessError(msg || 'Failed to reprocess document')
       } else {
