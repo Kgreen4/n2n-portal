@@ -334,6 +334,7 @@ export default function ReportsPage() {
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Paid</p>
               <p className="mt-1 text-2xl font-bold text-green-700">{fmt(totalPaid)}</p>
               <p className="mt-1 text-xs text-gray-400">Collection rate: {pct(totalPaid, totalBilled)}</p>
+              <p className="mt-1 text-xs text-gray-400 italic">Extracted claim lines only — see Deposit Summary for check totals</p>
             </div>
             <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Denial Rate</p>
@@ -360,6 +361,18 @@ export default function ReportsPage() {
                   <p className="mt-0.5 text-xs text-blue-600">
                     {depositRows.length} check{depositRows.length !== 1 ? 's' : ''} / EFT{depositRows.length !== 1 ? 's' : ''} · Total expected deposit: {fmtDec(depositTotal)}
                   </p>
+                  {/* Explain discrepancy between check totals and claim-line totals */}
+                  <p className="mt-1 text-xs text-blue-500">
+                    Check/EFT totals are read from the remittance cover page and represent the full deposit amount.
+                    The <strong>Total Paid</strong> KPI above sums individual extracted claim lines — these differ when
+                    not all EOB pages were processed or some claims weren&apos;t captured as individual lines.
+                  </p>
+                  {Math.abs(depositTotal - totalPaid) > 1 && (
+                    <p className="mt-1 text-xs text-amber-700 font-medium">
+                      ⚠ Gap of {fmtDec(Math.abs(depositTotal - totalPaid))} between deposit total and claim-line total —
+                      likely due to partially processed EOB pages.
+                    </p>
+                  )}
                 </div>
                 <svg className="h-5 w-5 text-blue-400" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18.75a60.07 60.07 0 0115.797 2.101c.727.198 1.453-.342 1.453-1.096V18.75M3.75 4.5v.75A.75.75 0 013 6h-.75m0 0v-.375c0-.621.504-1.125 1.125-1.125H20.25M2.25 6v9m18-10.5v.75c0 .414.336.75.75.75h.75m-1.5-1.5h.375c.621 0 1.125.504 1.125 1.125v9.75c0 .621-.504 1.125-1.125 1.125h-.375m1.5-1.5H21a.75.75 0 00-.75.75v.75m0 0H3.75m0 0h-.375a1.125 1.125 0 01-1.125-1.125V15m1.5 1.5v-.75A.75.75 0 003 15h-.75M15 10.5a3 3 0 11-6 0 3 3 0 016 0zm3 0h.008v.008H18V10.5zm-12 0h.008v.008H6V10.5z" />

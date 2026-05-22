@@ -57,6 +57,9 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
   // Updating a ref in render (outside useEffect) is the standard React "latest value" pattern.
   const routerRef = useRef(router)
   routerRef.current = router
+  // Measure the sticky page-header height so the sticky <thead> knows where to stop.
+  const stickyHeaderRef = useRef<HTMLDivElement>(null)
+  const [theadTop, setTheadTop] = useState(0)
 
   // Auto-poll every 8 s when any doc is actively queued/processing.
   // Also fires a toast-style notification when a doc transitions from
@@ -77,6 +80,18 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
   // router intentionally excluded — accessed via routerRef to avoid dependency churn
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [documents])
+
+  // Sync sticky-header height into theadTop whenever the header resizes
+  // (e.g. processing indicator appears/disappears).
+  useEffect(() => {
+    const el = stickyHeaderRef.current
+    if (!el) return
+    const update = () => setTheadTop(el.offsetHeight)
+    update() // capture initial height after first render
+    const obs = new ResizeObserver(update)
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [])
 
   // Detect status transitions to show completion notifications
   const [notifications, setNotifications] = useState<{ id: string; msg: string; type: 'success' | 'error' }[]>([])
@@ -408,7 +423,7 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
           fully covered. z-10 sits above table rows. pb-2 leaves a small
           gap below the tabs / processing indicator.
       ─────────────────────────────────────────────────────────────── */}
-      <div className="sticky top-0 z-10 -mx-8 px-8 bg-white pb-2">
+      <div ref={stickyHeaderRef} className="sticky top-0 z-10 -mx-8 px-8 bg-white pb-2">
 
       {/* Header */}
       <div className="flex items-center justify-between">
@@ -554,10 +569,12 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
       )}
 
       {/* Ready Tab — flat table with checkboxes */}
+      {/* overflow-x-clip preserves rounded corners without creating a scroll container,
+          which is what overflow-hidden does and what prevents sticky <thead> from working. */}
       {activeTab === 'ready' && (
-        <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="mt-4 overflow-x-clip rounded-xl border border-gray-200 bg-white shadow-sm">
           <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+            <thead className="bg-gray-50 sticky z-[9]" style={{ top: theadTop }}>
               <tr>
                 <th className="px-4 py-3 text-left">
                   <input
