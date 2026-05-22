@@ -167,15 +167,18 @@ Deno.serve(async (req) => {
 
     console.info(`[reprocess] Document ${eob_document_id}: status=${doc.status}, practice=${doc.practice_id}`);
 
-    // 2. DELETE BIGQUERY ROWS
+    // 2. DELETE BIGQUERY ROWS (best-effort — non-fatal)
+    // The BQ eob_line_items table was originally created without an eob_document_id
+    // column; streaming inserts that reference it fail silently in eob-worker.
+    // We attempt the delete so that if/when the schema is fixed we clean up properly,
+    // but we never block a reprocess on a BQ schema mismatch.
     let bqDeleted = 0;
     try {
       const sa = JSON.parse(GCP_SA_JSON_STR.trim());
       const gToken = await getGoogleAccessToken(sa);
       bqDeleted = await bqDeleteDocument(gToken, eob_document_id);
     } catch (bqErr: any) {
-      console.error(`[reprocess] BigQuery delete failed: ${bqErr.message}`);
-      return json({ error: 'Failed to delete BigQuery data', details: bqErr.message }, 500);
+      console.warn(`[reprocess] BigQuery delete failed (non-fatal, continuing): ${bqErr.message}`);
     }
 
     // 3. DELETE PAGE JOBS
