@@ -431,155 +431,157 @@ Deno.serve(async (req) => {
   console.info(`[eob-enqueue] Phase 1 complete: ${enqueuedJobs.length} jobs enqueued for ${totalPages} pages`);
 
   // ──────────────────────────────────────────────────────────────
-  // 7) PHASE 2: Fire workers in batches, AWAIT each batch fully.
-  //    Previously used AbortController fire-and-forget, but the 3s
-  //    abort often fired before the request reached the Supabase
-  //    gateway, leaving pages stuck as "queued" forever.
-  //    Now we await the full worker response. Each worker takes
-  //    5-10s (Gemini), so batches of 3 with delays keeps us well
-  //    within the 150s edge function timeout.
-  //    trigger-eob-parser already returned to the caller, so the
-  //    user isn't waiting for this.
+  // 7) Return HTTP response immediately.
+  //    Workers fire in the background via EdgeRuntime.waitUntil so
+  //    large documents (60-150 pages) don't hit the 150s function
+  //    timeout. The document stays in "queued" state while workers
+  //    run; succeed_eob_page_job() auto-transitions it to
+  //    "completed" / "partial_failure" when all pages finish.
   // ──────────────────────────────────────────────────────────────
-  const BATCH_SIZE = 3;          // fire 3 workers at a time (conservative to avoid Gemini 429)
-  const BATCH_DELAY_MS = 3000;   // wait 3s between batches to respect Gemini rate limits
-  const workerResults: Array<{ page: number; status: string; items?: number }> = [];
+  const BATCH_SIZE = 3;        // workers per concurrent batch (Gemini rate-limit safe)
+  const BATCH_DELAY_MS = 3000; // ms between batches
 
-  try {
-    for (let b = 0; b < enqueuedJobs.length; b += BATCH_SIZE) {
-      const batch = enqueuedJobs.slice(b, b + BATCH_SIZE);
+  // Capture all variables needed by the background closure
+  const _enqueuedJobs   = enqueuedJobs;
+  const _supabaseUrl    = SUPABASE_URL!;
+  const _serviceKey     = SUPABASE_SERVICE_ROLE_KEY!;
+  const _docId          = eob_document_id;
+  const _practiceId     = practice_id;
+  const _fileName       = file_name;
+  const _totalPages     = totalPages;
+  const _gdriveFileId   = gdrive_file_id;
 
-      const batchPromises = batch.map(async ({ jobId, pageNumber }) => {
-        const workerPayload = {
-          job: {
-            id: jobId,
-            eob_document_id: eob_document_id,
-            page_number: pageNumber,
-            practice_id: practice_id,
-            file_name: file_name,  // denormalized for BQ inserts
-          }
-        };
-        try {
-          const response = await fetch(`${SUPABASE_URL}/functions/v1/eob-worker`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-            },
-            body: JSON.stringify(workerPayload),
-          });
-          const result = await response.json();
-          if (response.ok) {
-            console.info(`[eob-enqueue] worker succeeded for page ${pageNumber}: ${result.count} items`);
-            return { page: pageNumber, status: 'succeeded', items: result.count || 0 };
-          } else {
-            console.warn(`[eob-enqueue] worker returned error for page ${pageNumber}: ${result.details || result.error}`);
-            return { page: pageNumber, status: 'worker_error' };
-          }
-        } catch (e: any) {
-          console.warn(`[eob-enqueue] worker fetch failed for page ${pageNumber}: ${e.message}`);
-          return { page: pageNumber, status: 'trigger_error' };
-        }
-      });
+  const backgroundTask = (async () => {
+    const workerResults: Array<{ page: number; status: string; items?: number }> = [];
 
-      const batchResults = await Promise.allSettled(batchPromises);
-      for (const result of batchResults) {
-        if (result.status === 'fulfilled') {
-          workerResults.push(result.value);
-        }
-      }
-
-      // Rate limit between batches
-      if (b + BATCH_SIZE < enqueuedJobs.length) {
-        await sleep(BATCH_DELAY_MS);
-      }
-    }
-  } catch (e) {
-    console.warn("[eob-enqueue] worker phase error (non-fatal):", e);
-  }
-
-  const succeededCount = workerResults.filter(r => r.status === 'succeeded').length;
-  const totalItems = workerResults.reduce((sum, r) => sum + (r.items || 0), 0);
-  console.info(`[eob-enqueue] Phase 2 complete: ${succeededCount}/${workerResults.length} workers succeeded, ${totalItems} items extracted`);
-
-  // 8) Final status check — only update to "processing" if workers haven't
-  //    already completed the document (succeed_eob_page_job auto-sets "completed")
-  try {
-    const { data: docCheck } = await supabase
-      .from("eob_documents")
-      .select("status")
-      .eq("id", eob_document_id)
-      .single();
-
-    if (docCheck?.status !== "completed" && docCheck?.status !== "partial_failure" && docCheck?.status !== "failed") {
-      await supabase
-        .from("eob_documents")
-        .update({ status: "processing", updated_at: new Date().toISOString() })
-        .eq("id", eob_document_id);
-    }
-  } catch (e) {
-    console.warn("[eob-enqueue] final eob_documents status check failed", e);
-  }
-
-  // ──────────────────────────────────────────────────────────────
-  // 9) POST-PROCESSING: Move Google Drive file to "Processed" folder
-  //    Only runs when source was Google Drive AND document completed.
-  //    Non-fatal: if the move fails, processing results are preserved.
-  // ──────────────────────────────────────────────────────────────
-  if (gdrive_file_id) {
+    // Phase 2: fire workers in batches
     try {
-      // Re-read definitive document status (succeed_eob_page_job may have updated it)
-      const { data: finalDoc } = await supabase
-        .from("eob_documents")
-        .select("status")
-        .eq("id", eob_document_id)
-        .single();
+      for (let b = 0; b < _enqueuedJobs.length; b += BATCH_SIZE) {
+        const batch = _enqueuedJobs.slice(b, b + BATCH_SIZE);
 
-      if (finalDoc?.status === "completed") {
-        const { data: ps } = await supabase
-          .from("practice_settings")
-          .select("auto_move_processed, gdrive_folder_id, gdrive_processed_folder_id")
-          .eq("practice_id", practice_id)
-          .single();
-
-        if (ps?.auto_move_processed && ps?.gdrive_folder_id) {
-          const GCP_SA_JSON_STR = Deno.env.get("GCP_SA_JSON");
-          if (GCP_SA_JSON_STR) {
-            const sa = JSON.parse(GCP_SA_JSON_STR.trim());
-            const gToken = await getGoogleAccessToken(sa);
-            const newProcessedId = await moveToProcessedFolder(
-              gToken, gdrive_file_id, ps.gdrive_folder_id, ps.gdrive_processed_folder_id
-            );
-
-            // Cache the processed folder ID if newly discovered
-            if (newProcessedId && newProcessedId !== ps.gdrive_processed_folder_id) {
-              await supabase
-                .from("practice_settings")
-                .update({ gdrive_processed_folder_id: newProcessedId })
-                .eq("practice_id", practice_id);
+        const batchPromises = batch.map(async ({ jobId, pageNumber }) => {
+          const workerPayload = {
+            job: {
+              id: jobId,
+              eob_document_id: _docId,
+              page_number: pageNumber,
+              practice_id: _practiceId,
+              file_name: _fileName,
             }
-            console.info(`[eob-enqueue] moved file ${gdrive_file_id} to Processed folder`);
+          };
+          try {
+            const response = await fetch(`${_supabaseUrl}/functions/v1/eob-worker`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${_serviceKey}`,
+              },
+              body: JSON.stringify(workerPayload),
+            });
+            const result = await response.json();
+            if (response.ok) {
+              console.info(`[eob-enqueue] worker succeeded for page ${pageNumber}: ${result.count} items`);
+              return { page: pageNumber, status: 'succeeded', items: result.count || 0 };
+            } else {
+              console.warn(`[eob-enqueue] worker error page ${pageNumber}: ${result.details || result.error}`);
+              return { page: pageNumber, status: 'worker_error' };
+            }
+          } catch (e: any) {
+            console.warn(`[eob-enqueue] worker fetch failed page ${pageNumber}: ${e.message}`);
+            return { page: pageNumber, status: 'trigger_error' };
           }
+        });
+
+        const batchResults = await Promise.allSettled(batchPromises);
+        for (const r of batchResults) {
+          if (r.status === 'fulfilled') workerResults.push(r.value);
         }
-      } else {
-        console.info(`[eob-enqueue] skipping move — document status is ${finalDoc?.status}, not completed`);
+
+        if (b + BATCH_SIZE < _enqueuedJobs.length) {
+          await sleep(BATCH_DELAY_MS);
+        }
       }
     } catch (e) {
-      console.warn("[eob-enqueue] post-processing move failed (non-fatal):", e);
+      console.warn("[eob-enqueue] worker phase error (non-fatal):", e);
     }
-  }
 
-  // 10) Return success summary
-  console.info(`[eob-enqueue] complete: ${totalPages} pages, ${succeededCount}/${workerResults.length} workers succeeded, ${totalItems} items`);
+    const succeededCount = workerResults.filter(r => r.status === 'succeeded').length;
+    const totalItems     = workerResults.reduce((s, r) => s + (r.items || 0), 0);
+    console.info(`[eob-enqueue] Phase 2 complete: ${succeededCount}/${workerResults.length} workers succeeded, ${totalItems} items`);
+
+    // Step 8: nudge status to "processing" if workers haven't already set a terminal state
+    try {
+      const { data: docCheck } = await supabase
+        .from("eob_documents")
+        .select("status")
+        .eq("id", _docId)
+        .single();
+
+      if (docCheck?.status !== "completed" && docCheck?.status !== "partial_failure" && docCheck?.status !== "failed") {
+        await supabase
+          .from("eob_documents")
+          .update({ status: "processing", updated_at: new Date().toISOString() })
+          .eq("id", _docId);
+      }
+    } catch (e) {
+      console.warn("[eob-enqueue] status nudge failed (non-fatal):", e);
+    }
+
+    // Step 9: move Google Drive file to Processed folder on completion
+    if (_gdriveFileId) {
+      try {
+        const { data: finalDoc } = await supabase
+          .from("eob_documents")
+          .select("status")
+          .eq("id", _docId)
+          .single();
+
+        if (finalDoc?.status === "completed") {
+          const { data: ps } = await supabase
+            .from("practice_settings")
+            .select("auto_move_processed, gdrive_folder_id, gdrive_processed_folder_id")
+            .eq("practice_id", _practiceId)
+            .single();
+
+          if (ps?.auto_move_processed && ps?.gdrive_folder_id) {
+            const GCP_SA_JSON_STR = Deno.env.get("GCP_SA_JSON");
+            if (GCP_SA_JSON_STR) {
+              const sa = JSON.parse(GCP_SA_JSON_STR.trim());
+              const gToken = await getGoogleAccessToken(sa);
+              const newProcessedId = await moveToProcessedFolder(
+                gToken, _gdriveFileId, ps.gdrive_folder_id, ps.gdrive_processed_folder_id
+              );
+              if (newProcessedId && newProcessedId !== ps.gdrive_processed_folder_id) {
+                await supabase
+                  .from("practice_settings")
+                  .update({ gdrive_processed_folder_id: newProcessedId })
+                  .eq("practice_id", _practiceId);
+              }
+              console.info(`[eob-enqueue] moved file ${_gdriveFileId} to Processed folder`);
+            }
+          }
+        } else {
+          console.info(`[eob-enqueue] skipping move — status is ${finalDoc?.status}`);
+        }
+      } catch (e) {
+        console.warn("[eob-enqueue] post-processing move failed (non-fatal):", e);
+      }
+    }
+
+    console.info(`[eob-enqueue] background complete: ${_totalPages} pages, ${succeededCount}/${workerResults.length} workers succeeded`);
+  })();
+
+  // Register background task — keeps running after HTTP response returns
+  // @ts-ignore — EdgeRuntime is a global in the Supabase Deno runtime
+  EdgeRuntime.waitUntil(backgroundTask);
+
+  // 10) Immediate response — caller gets 200 right away; document is "queued"
   return json({
     success: true,
     eob_document_id,
     practice_id,
     total_pages: totalPages,
     jobs_enqueued: enqueuedJobs.length,
-    workers_completed: workerResults.length,
-    workers_succeeded: succeededCount,
-    total_items_extracted: totalItems,
-    message: `Split ${totalPages} pages, ${succeededCount}/${workerResults.length} workers succeeded, ${totalItems} items extracted.`,
+    message: `Split ${totalPages} pages into ${enqueuedJobs.length} jobs. Workers processing in background.`,
   });
 });
