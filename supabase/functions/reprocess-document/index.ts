@@ -1,8 +1,8 @@
 // reprocess-document — Orchestrates full re-extraction of an EOB document.
-// 1. Verifies ownership via practice_users
-// 2. Deletes existing BigQuery rows for the document
+// 1. Verifies document exists
+// 2. Deletes existing BigQuery rows (async Jobs API — required for DML)
 // 3. Deletes page jobs from Supabase
-// 4. Resets document status to 'pending'
+// 4. Resets document status to 'pending' (single clean UPDATE)
 // 5. Re-triggers eob-enqueue to re-extract with updated Gemini prompt
 
 import { createClient } from "npm:@supabase/supabase-js@2.39.7";
@@ -71,6 +71,68 @@ async function getGoogleAccessToken(sa: any) {
 }
 
 // ──────────────────────────────────────────────────────────────
+// BigQuery DML via async Jobs API
+// The synchronous /queries endpoint does not reliably execute DML (DELETE/UPDATE).
+// The Jobs API is the correct path — create job, poll until DONE, read stats.
+// ──────────────────────────────────────────────────────────────
+async function bqDeleteDocument(gToken: string, eob_document_id: string): Promise<number> {
+  const deleteQuery =
+    `DELETE FROM \`${BQ_PROJECT}.${BQ_DATASET}.${BQ_TABLE}\`` +
+    ` WHERE eob_document_id = '${eob_document_id}'`;
+
+  // 1. Start the async job
+  const jobResp = await fetch(
+    `https://bigquery.googleapis.com/bigquery/v2/projects/${BQ_PROJECT}/jobs`,
+    {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${gToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        configuration: { query: { query: deleteQuery, useLegacySql: false } }
+      }),
+    }
+  );
+  if (!jobResp.ok) {
+    const errText = await jobResp.text();
+    throw new Error(`BQ job create failed (${jobResp.status}): ${errText}`);
+  }
+  const job = await jobResp.json();
+  const jobId = job.jobReference?.jobId;
+  if (!jobId) throw new Error('BQ job create returned no jobId');
+
+  console.info(`[reprocess] BQ DELETE job started: ${jobId}`);
+
+  // 2. Poll until DONE (max 45 s — well within the 60 s edge function limit)
+  const BQ_POLL_MS = 2000;
+  const BQ_TIMEOUT_MS = 45_000;
+  const deadline = Date.now() + BQ_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, BQ_POLL_MS));
+
+    const statusResp = await fetch(
+      `https://bigquery.googleapis.com/bigquery/v2/projects/${BQ_PROJECT}/jobs/${jobId}`,
+      { headers: { 'Authorization': `Bearer ${gToken}` } }
+    );
+    if (!statusResp.ok) continue; // retry on transient HTTP error
+
+    const s = await statusResp.json();
+    if (s.status?.state !== 'DONE') continue;
+
+    // Job finished — check for errors
+    if (s.status?.errorResult) {
+      throw new Error(`BQ DELETE job error: ${JSON.stringify(s.status.errorResult)}`);
+    }
+    const deleted = parseInt(s.statistics?.query?.numDmlAffectedRows || '0');
+    console.info(`[reprocess] BQ DELETE complete — ${deleted} rows removed`);
+    return deleted;
+  }
+
+  // Timed out: log and continue — rows will be overwritten when re-extraction runs
+  console.warn(`[reprocess] BQ DELETE job ${jobId} timed out — rows may persist until re-extract overwrites them`);
+  return 0;
+}
+
+// ──────────────────────────────────────────────────────────────
 // Main Handler
 // ──────────────────────────────────────────────────────────────
 Deno.serve(async (req) => {
@@ -110,18 +172,7 @@ Deno.serve(async (req) => {
     try {
       const sa = JSON.parse(GCP_SA_JSON_STR.trim());
       const gToken = await getGoogleAccessToken(sa);
-      const deleteQuery = `DELETE FROM \`${BQ_PROJECT}.${BQ_DATASET}.${BQ_TABLE}\` WHERE eob_document_id = '${eob_document_id}'`;
-      const bqResp = await fetch(
-        `https://bigquery.googleapis.com/bigquery/v2/projects/${BQ_PROJECT}/queries`,
-        {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${gToken}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: deleteQuery, useLegacySql: false }),
-        }
-      );
-      const bqResult = await bqResp.json();
-      bqDeleted = parseInt(bqResult.numDmlAffectedRows || '0');
-      console.info(`[reprocess] Deleted ${bqDeleted} BigQuery rows`);
+      bqDeleted = await bqDeleteDocument(gToken, eob_document_id);
     } catch (bqErr: any) {
       console.error(`[reprocess] BigQuery delete failed: ${bqErr.message}`);
       return json({ error: 'Failed to delete BigQuery data', details: bqErr.message }, 500);
@@ -141,31 +192,13 @@ Deno.serve(async (req) => {
     }
 
     // 4. RESET DOCUMENT STATUS
-    // Split into required core reset (must succeed) and optional field cleanup (non-fatal).
+    // Single clean UPDATE — all columns confirmed present via migration 20260522.
     const { error: resetErr } = await supabase
       .from('eob_documents')
       .update({
         status: 'pending',
         items_extracted: 0,
         error_message: null,
-      })
-      .eq('id', eob_document_id);
-
-    if (resetErr) {
-      console.error(`[reprocess] Core reset failed: code=${(resetErr as any).code} msg=${resetErr.message} hint=${(resetErr as any).hint}`);
-      return json({
-        error: 'Failed to reset document',
-        details: resetErr.message,
-        code: (resetErr as any).code,
-        hint: (resetErr as any).hint,
-      }, 500);
-    }
-    console.info(`[reprocess] Core reset done for ${eob_document_id}`);
-
-    // Optional: clear review + export metadata — non-fatal if columns don't exist or fail
-    const { error: cleanupErr } = await supabase
-      .from('eob_documents')
-      .update({
         review_status: null,
         review_reasons: null,
         last_exported_at: null,
@@ -176,8 +209,14 @@ Deno.serve(async (req) => {
       })
       .eq('id', eob_document_id);
 
-    if (cleanupErr) {
-      console.warn(`[reprocess] Metadata cleanup failed (non-fatal): ${cleanupErr.message}`);
+    if (resetErr) {
+      console.error(`[reprocess] Reset failed: code=${(resetErr as any).code} msg=${resetErr.message} hint=${(resetErr as any).hint}`);
+      return json({
+        error: 'Failed to reset document',
+        details: resetErr.message,
+        code: (resetErr as any).code,
+        hint: (resetErr as any).hint,
+      }, 500);
     }
     console.info(`[reprocess] Reset document ${eob_document_id} to pending`);
 
