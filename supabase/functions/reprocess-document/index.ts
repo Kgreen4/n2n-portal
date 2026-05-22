@@ -141,14 +141,33 @@ Deno.serve(async (req) => {
     }
 
     // 4. RESET DOCUMENT STATUS
+    // Split into required core reset (must succeed) and optional field cleanup (non-fatal).
     const { error: resetErr } = await supabase
       .from('eob_documents')
       .update({
         status: 'pending',
         items_extracted: 0,
         error_message: null,
+      })
+      .eq('id', eob_document_id);
+
+    if (resetErr) {
+      console.error(`[reprocess] Core reset failed: code=${(resetErr as any).code} msg=${resetErr.message} hint=${(resetErr as any).hint}`);
+      return json({
+        error: 'Failed to reset document',
+        details: resetErr.message,
+        code: (resetErr as any).code,
+        hint: (resetErr as any).hint,
+      }, 500);
+    }
+    console.info(`[reprocess] Core reset done for ${eob_document_id}`);
+
+    // Optional: clear review + export metadata — non-fatal if columns don't exist or fail
+    const { error: cleanupErr } = await supabase
+      .from('eob_documents')
+      .update({
         review_status: null,
-        review_reasons: [],
+        review_reasons: null,
         last_exported_at: null,
         export_batch_id: null,
         export_total_paid: null,
@@ -157,8 +176,8 @@ Deno.serve(async (req) => {
       })
       .eq('id', eob_document_id);
 
-    if (resetErr) {
-      return json({ error: 'Failed to reset document', details: resetErr.message }, 500);
+    if (cleanupErr) {
+      console.warn(`[reprocess] Metadata cleanup failed (non-fatal): ${cleanupErr.message}`);
     }
     console.info(`[reprocess] Reset document ${eob_document_id} to pending`);
 
