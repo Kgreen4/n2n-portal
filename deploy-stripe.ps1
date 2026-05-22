@@ -14,9 +14,16 @@ Write-Host "A browser window will open. Log in to Supabase and paste the token."
 npx supabase login
 
 Write-Host "`n=== Step 2: Set Supabase Secrets ===" -ForegroundColor Cyan
+# Get these from: Stripe Dashboard > Developers > API Keys (secret key)
+#             and: Stripe Dashboard > Developers > Webhooks > endpoint > Signing secret
+# Set before running: $env:STRIPE_SECRET_KEY="sk_live_..."
+#                     $env:STRIPE_WEBHOOK_SECRET="whsec_..."
+if (-not $env:STRIPE_SECRET_KEY)    { Write-Error "Set STRIPE_SECRET_KEY env var first"; exit 1 }
+if (-not $env:STRIPE_WEBHOOK_SECRET) { Write-Error "Set STRIPE_WEBHOOK_SECRET env var first"; exit 1 }
+
 npx supabase secrets set `
-  STRIPE_SECRET_KEY="REDACTED_STRIPE_SECRET_KEY" `
-  STRIPE_WEBHOOK_SECRET="REDACTED_STRIPE_WEBHOOK_SECRET" `
+  STRIPE_SECRET_KEY="$env:STRIPE_SECRET_KEY" `
+  STRIPE_WEBHOOK_SECRET="$env:STRIPE_WEBHOOK_SECRET" `
   STRIPE_STARTER_PRICE_ID="price_1T9YSv0JXufBkchGE2BB40w3" `
   STRIPE_PRO_PRICE_ID="price_1T9YTk0JXufBkchGaQlXJG58" `
   STRIPE_BOOST100_PRICE_ID="price_1T9YUI0JXufBkchGOGwuJIhc" `
