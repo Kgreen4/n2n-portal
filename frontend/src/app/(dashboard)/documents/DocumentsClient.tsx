@@ -50,6 +50,8 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
   const [downloadError, setDownloadError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'ready' | 'history'>('ready')
   const [collapsedBatches, setCollapsedBatches] = useState<Set<string>>(new Set())
+  const [reprocessingIds, setReprocessingIds] = useState<Set<string>>(new Set())
+  const [reprocessError, setReprocessError] = useState<string | null>(null)
 
   // Partition documents into Ready (unexported) and History (exported)
   const readyDocs = documents.filter(d => !d.last_exported_at)
@@ -188,6 +190,34 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
     }
   }
 
+  async function handleReprocess(docId: string) {
+    setReprocessingIds(prev => new Set(prev).add(docId))
+    setReprocessError(null)
+    try {
+      const { error } = await supabase.functions.invoke('reprocess-document', {
+        body: { eob_document_id: docId },
+      })
+      if (error) {
+        let msg = error.message
+        try {
+          const errorBody = await (error as any).context?.json?.()
+          if (errorBody?.error) msg = errorBody.error
+        } catch { /* ignore */ }
+        setReprocessError(msg || 'Failed to reprocess document')
+      } else {
+        router.refresh()
+      }
+    } catch (err: any) {
+      setReprocessError(err.message || 'Unexpected error during reprocess')
+    } finally {
+      setReprocessingIds(prev => {
+        const next = new Set(prev)
+        next.delete(docId)
+        return next
+      })
+    }
+  }
+
   // Clear selection when switching tabs
   function switchTab(tab: 'ready' | 'history') {
     setActiveTab(tab)
@@ -275,12 +305,34 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
           }
         </td>
         <td className="px-6 py-4 text-sm">
-          <Link
-            href={`/documents/${doc.id}`}
-            className="text-blue-600 hover:text-blue-500 font-medium"
-          >
-            View →
-          </Link>
+          <div className="flex items-center gap-3">
+            <Link
+              href={`/documents/${doc.id}`}
+              className="text-blue-600 hover:text-blue-500 font-medium"
+            >
+              View →
+            </Link>
+            {doc.status === 'failed' && (
+              <button
+                onClick={() => handleReprocess(doc.id)}
+                disabled={reprocessingIds.has(doc.id)}
+                className="inline-flex items-center rounded px-2 py-1 text-xs font-medium bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Re-extract this document from Google Drive"
+              >
+                {reprocessingIds.has(doc.id) ? (
+                  <>
+                    <svg className="mr-1 h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Reprocessing…
+                  </>
+                ) : (
+                  <>↺ Reprocess</>
+                )}
+              </button>
+            )}
+          </div>
         </td>
       </tr>
     )
@@ -375,6 +427,11 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
       {downloadError && (
         <div className="mt-4 rounded-md bg-red-50 border border-red-200 p-4">
           <p className="text-sm text-red-700">{downloadError}</p>
+        </div>
+      )}
+      {reprocessError && (
+        <div className="mt-4 rounded-md bg-red-50 border border-red-200 p-4">
+          <p className="text-sm text-red-700">Reprocess failed: {reprocessError}</p>
         </div>
       )}
 
