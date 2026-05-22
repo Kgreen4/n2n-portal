@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
@@ -52,6 +52,59 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
   const [collapsedBatches, setCollapsedBatches] = useState<Set<string>>(new Set())
   const [reprocessingIds, setReprocessingIds] = useState<Set<string>>(new Set())
   const [reprocessError, setReprocessError] = useState<string | null>(null)
+  const prevStatusesRef = useRef<Map<string, string>>(new Map())
+
+  // Auto-poll every 8 s when any doc is actively queued/processing.
+  // Also fires a toast-style notification when a doc transitions from
+  // queued/processing → completed/failed.
+  useEffect(() => {
+    const activeStatuses = new Set(['queued', 'processing', 'pending'])
+    const hasActive = documents.some(d => activeStatuses.has(d.status))
+    if (!hasActive) {
+      prevStatusesRef.current = new Map(documents.map(d => [d.id, d.status]))
+      return
+    }
+
+    const interval = setInterval(() => {
+      router.refresh()
+    }, 8000)
+
+    return () => clearInterval(interval)
+  }, [documents, router])
+
+  // Detect status transitions to show completion notifications
+  const [notifications, setNotifications] = useState<{ id: string; msg: string; type: 'success' | 'error' }[]>([])
+
+  useEffect(() => {
+    const prev = prevStatusesRef.current
+    const newNotifs: { id: string; msg: string; type: 'success' | 'error' }[] = []
+    for (const doc of documents) {
+      const was = prev.get(doc.id)
+      if (was && (was === 'queued' || was === 'processing' || was === 'pending')) {
+        if (doc.status === 'completed' || doc.status === 'partial_failure') {
+          newNotifs.push({
+            id: doc.id,
+            msg: `✓ ${doc.file_name || 'Document'} — processing complete`,
+            type: 'success',
+          })
+        } else if (doc.status === 'failed') {
+          newNotifs.push({
+            id: doc.id,
+            msg: `✗ ${doc.file_name || 'Document'} — processing failed`,
+            type: 'error',
+          })
+        }
+      }
+    }
+    prevStatusesRef.current = new Map(documents.map(d => [d.id, d.status]))
+    if (newNotifs.length > 0) {
+      setNotifications(prev => [...prev, ...newNotifs])
+      // Auto-dismiss after 8 s
+      setTimeout(() => {
+        setNotifications(prev => prev.filter(n => !newNotifs.find(nn => nn.id === n.id)))
+      }, 8000)
+    }
+  }, [documents])
 
   // Partition documents into Ready (unexported) and History (exported)
   const readyDocs = documents.filter(d => !d.last_exported_at)
@@ -423,6 +476,52 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
           </button>
         </nav>
       </div>
+
+      {/* Active-processing indicator — shown when any doc is queued/processing */}
+      {(() => {
+        const activeStatuses = new Set(['queued', 'processing', 'pending'])
+        const activeDocs = documents.filter(d => activeStatuses.has(d.status))
+        if (activeDocs.length === 0) return null
+        return (
+          <div className="mt-4 flex items-center gap-2 rounded-md bg-blue-50 border border-blue-200 px-4 py-2.5 text-sm text-blue-700">
+            <svg className="h-4 w-4 animate-spin shrink-0" viewBox="0 0 24 24" fill="none">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            <span>
+              {activeDocs.length === 1
+                ? `Processing ${activeDocs[0].file_name || 'document'}…`
+                : `Processing ${activeDocs.length} documents…`
+              }
+              {' '}Page will refresh automatically every 8 seconds.
+            </span>
+          </div>
+        )
+      })()}
+
+      {/* Toast notifications for completed/failed transitions */}
+      {notifications.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {notifications.map(n => (
+            <div
+              key={n.id}
+              className={`flex items-center justify-between rounded-md border px-4 py-2.5 text-sm ${
+                n.type === 'success'
+                  ? 'bg-green-50 border-green-200 text-green-800'
+                  : 'bg-red-50 border-red-200 text-red-800'
+              }`}
+            >
+              <span>{n.msg}</span>
+              <button
+                onClick={() => setNotifications(prev => prev.filter(x => x.id !== n.id))}
+                className="ml-4 text-current opacity-50 hover:opacity-100"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {downloadError && (
         <div className="mt-4 rounded-md bg-red-50 border border-red-200 p-4">
