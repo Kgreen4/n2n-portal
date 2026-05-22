@@ -500,8 +500,13 @@ Deno.serve(async (req) => {
         const batch = _enqueuedJobs.slice(b, b + FIRE_BATCH);
 
         for (const { jobId, pageNumber } of batch) {
-          // Intentionally NOT awaited — worker runs independently
-          fetch(`${_supabaseUrl}/functions/v1/eob-worker`, {
+          // Capture fetch promise so we can register it with waitUntil.
+          // Without this, the bare fetch is abandoned the moment backgroundTask
+          // resolves — Deno cancels all pending I/O when the last waitUntil
+          // promise settles. The race(fetch, sleep(4s)) keeps the function alive
+          // long enough for the HTTP request to reach the Supabase gateway,
+          // without waiting for Gemini to finish (~20s). Workers run independently.
+          const workerFetch = fetch(`${_supabaseUrl}/functions/v1/eob-worker`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -516,7 +521,12 @@ Deno.serve(async (req) => {
                 file_name: _fileName,
               }
             }),
-          }).catch(err => console.warn(`[eob-enqueue] worker trigger failed page ${pageNumber}: ${err?.message}`));
+          }).catch(err => {
+            console.warn(`[eob-enqueue] worker trigger failed page ${pageNumber}: ${err?.message}`);
+            return null;
+          });
+          // @ts-ignore — EdgeRuntime is a global in the Supabase Deno runtime
+          EdgeRuntime.waitUntil(Promise.race([workerFetch, sleep(4000)]));
         }
 
         const batchNum = Math.floor(b / FIRE_BATCH) + 1;
