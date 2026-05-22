@@ -71,6 +71,13 @@ interface DenialByPayerRow {
   billed: number
 }
 
+interface DocGapRow {
+  sourceDoc: string
+  depositAmount: number
+  extractedPaid: number
+  gap: number
+}
+
 const fmt = (n: number) =>
   n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
 
@@ -242,6 +249,32 @@ export default function ReportsPage() {
   })
   const depositTotal = depositRows.reduce((s, r) => s + r.amount, 0)
 
+  // Per-document gap: for each source document that has a summary_total deposit,
+  // compare the check total to the sum of extracted medical_service claim lines.
+  // A gap means that document has checks/EFTs that weren't fully reconciled to
+  // individual claim lines — reprocessing the document closes the gap.
+  const docGapRows: DocGapRow[] = (() => {
+    const depositByDoc = new Map<string, number>()
+    for (const row of depositRows) {
+      const doc = row.source_doc || '(unknown)'
+      depositByDoc.set(doc, (depositByDoc.get(doc) || 0) + row.amount)
+    }
+    const paidByDoc = new Map<string, number>()
+    for (const item of medicalItems) {
+      const doc = item.file_name || '(unknown)'
+      paidByDoc.set(doc, (paidByDoc.get(doc) || 0) + (item.paid_amount || 0))
+    }
+    return Array.from(depositByDoc.entries())
+      .map(([sourceDoc, depositAmount]) => ({
+        sourceDoc,
+        depositAmount,
+        extractedPaid: paidByDoc.get(sourceDoc) || 0,
+        gap: depositAmount - (paidByDoc.get(sourceDoc) || 0),
+      }))
+      .filter(r => Math.abs(r.gap) > 1)
+      .sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap))
+  })()
+
   // Filtered + paginated items for the table (exclude summary_total rows — those appear in Deposit Summary)
   const serviceItems = items.filter(i => i.line_type !== 'summary_total')
   const filtered = serviceItems.filter(i => {
@@ -332,7 +365,7 @@ export default function ReportsPage() {
             </div>
             <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Paid</p>
-              <p className="mt-1 text-2xl font-bold text-green-700">{fmt(totalPaid)}</p>
+              <p className="mt-1 text-2xl font-bold text-green-700">{fmtDec(totalPaid)}</p>
               <p className="mt-1 text-xs text-gray-400">Collection rate: {pct(totalPaid, totalBilled)}</p>
               <p className="mt-1 text-xs text-gray-400 italic">Extracted claim lines only — see Deposit Summary for check totals</p>
             </div>
@@ -370,7 +403,7 @@ export default function ReportsPage() {
                   {Math.abs(depositTotal - totalPaid) > 1 && (
                     <p className="mt-1 text-xs text-amber-700 font-medium">
                       ⚠ Gap of {fmtDec(Math.abs(depositTotal - totalPaid))} between deposit total and claim-line total —
-                      likely due to partially processed EOB pages.
+                      see breakdown below by source document. Reprocess affected files in the Documents page to close the gap.
                     </p>
                   )}
                 </div>
@@ -434,6 +467,37 @@ export default function ReportsPage() {
                   </tfoot>
                 </table>
               </div>
+
+              {/* Per-document gap breakdown — only visible when gaps exist */}
+              {docGapRows.length > 0 && (
+                <div className="border-t border-amber-100 bg-amber-50 px-5 py-4">
+                  <p className="text-xs font-semibold text-amber-900 mb-3">
+                    Gap by source document — reprocess these files in the Documents page to close the gap
+                  </p>
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-amber-700 border-b border-amber-200">
+                        <th className="pb-1.5 pr-4">Source Document</th>
+                        <th className="pb-1.5 pr-4 text-right">Deposit Total</th>
+                        <th className="pb-1.5 pr-4 text-right">Extracted Paid</th>
+                        <th className="pb-1.5 text-right">Gap</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {docGapRows.map((row, idx) => (
+                        <tr key={idx} className="border-t border-amber-100">
+                          <td className="py-1.5 pr-4 text-amber-800 max-w-[300px] truncate" title={row.sourceDoc}>
+                            {row.sourceDoc || '(unknown)'}
+                          </td>
+                          <td className="py-1.5 pr-4 text-right text-gray-700">{fmtDec(row.depositAmount)}</td>
+                          <td className="py-1.5 pr-4 text-right text-gray-700">{fmtDec(row.extractedPaid)}</td>
+                          <td className="py-1.5 text-right font-semibold text-amber-700">{fmtDec(row.gap)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
 
