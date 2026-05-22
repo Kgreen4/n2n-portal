@@ -165,6 +165,33 @@ Deno.serve(async (req) => {
       return json({ error: 'Document is currently being processed. Wait for it to finish.' }, 409);
     }
 
+    // PRE-FLIGHT: detect orphaned failed rows that co-exist with a non-failed duplicate.
+    // This happens when duplicate rows were inserted before the unique constraint
+    // (practice_id, file_name) was enforced. Postgres fires the constraint during the
+    // internal tuple-rewrite of any UPDATE on either row, even when the constrained
+    // columns aren't being changed. Detect and block cleanly rather than crash.
+    const { data: nfDupe } = await supabase
+      .from('eob_documents')
+      .select('id, status')
+      .eq('practice_id', doc.practice_id)
+      .eq('file_name', doc.file_name)
+      .neq('id', eob_document_id)
+      .neq('status', 'failed')
+      .maybeSingle();
+
+    if (nfDupe) {
+      console.warn(`[reprocess] Blocked: non-failed duplicate exists for same file`, {
+        failed_id: eob_document_id,
+        duplicate_id: nfDupe.id,
+        duplicate_status: nfDupe.status,
+      });
+      return json({
+        error: `Cannot reprocess — a ${nfDupe.status} version of this document already exists. The failed record is an orphan and should be deleted.`,
+        duplicate_id: nfDupe.id,
+        duplicate_status: nfDupe.status,
+      }, 409);
+    }
+
     console.info(`[reprocess] Document ${eob_document_id}: status=${doc.status}, practice=${doc.practice_id}`);
 
     // 2. DELETE BIGQUERY ROWS (best-effort — non-fatal)
