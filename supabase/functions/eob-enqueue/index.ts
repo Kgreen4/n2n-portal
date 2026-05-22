@@ -343,89 +343,120 @@ Deno.serve(async (req) => {
   // ──────────────────────────────────────────────────────────────
   const enqueuedJobs: Array<{ jobId: string; pageNumber: number }> = [];
 
+  // ── STAGE A: Build all single-page PDFs (CPU-bound, synchronous) ──
+  // Keeping this sequential avoids saturating Deno's V8 heap with 60+ PDFs in memory at once.
+  type PageItem = { pageNumber: number; pageName: string; pagePath: string; bytes: Uint8Array | null };
+  const pageItems: PageItem[] = [];
   try {
     for (let i = 0; i < totalPages; i++) {
       const pageNumber = i + 1;
       const pageName = `page-${String(pageNumber).padStart(3, "0")}.pdf`;
       const pagePath = `${eob_document_id}/${pageName}`;
 
-      // ── A. Split & Upload page ──
       if (existingObjects.has(pageName)) {
-        console.info(`[eob-enqueue] skipping upload for ${pagePath} (exists)`);
+        console.info(`[eob-enqueue] page ${pageNumber} already uploaded — skipping PDF creation`);
+        pageItems.push({ pageNumber, pageName, pagePath, bytes: null }); // null = skip upload
       } else {
-        // Physically create single-page PDF
         const newPdf = await PDFDocument.create();
-        const [page] = await newPdf.copyPages(pdfDoc, [i]);
-        newPdf.addPage(page);
+        const [pg] = await newPdf.copyPages(pdfDoc, [i]);
+        newPdf.addPage(pg);
         const pageBytes = await newPdf.save();
-
-        // Upload to eob-pages bucket
-        const { error: uploadErr } = await supabase.storage
-          .from(STORAGE_BUCKET)
-          .upload(pagePath, pageBytes, { contentType: "application/pdf", upsert: true });
-
-        if (uploadErr) {
-          console.error("[eob-enqueue] upload error", { pagePath, message: uploadErr.message });
-          await refundCredits();
-          return json({ error: `Failed to upload page ${pageNumber}` }, 500);
-        }
-
-        console.info(`[eob-enqueue] uploaded ${pagePath}`);
+        pageItems.push({ pageNumber, pageName, pagePath, bytes: pageBytes });
       }
-
-      // ── B. Check for existing job (idempotency) ──
-      try {
-        const { data: existingJob, error: jobCheckErr } = await supabase
-          .from("eob_page_jobs")
-          .select("id,status")
-          .eq("eob_document_id", eob_document_id)
-          .eq("page_number", pageNumber)
-          .limit(1);
-
-        if (jobCheckErr) {
-          console.warn("[eob-enqueue] job existence check error", jobCheckErr);
-        } else if (Array.isArray(existingJob) && existingJob.length > 0) {
-          console.info(`[eob-enqueue] job already exists for page ${pageNumber}, skipping enqueue`);
-          continue;
-        }
-      } catch (e) {
-        console.warn("[eob-enqueue] job existence check thrown", e);
-      }
-
-      // ── C. Enqueue page job via RPC ──
-      let jobId: string | null = null;
-      try {
-        const { data: enqueueResult, error: enqueueErr } = await supabase.rpc("enqueue_eob_page_job", {
-          p_eob_document_id: eob_document_id,
-          p_practice_id: practice_id,
-          p_page_number: pageNumber,
-          p_total_pages: totalPages,
-          p_page_storage_bucket: STORAGE_BUCKET,
-          p_page_storage_path: pagePath,
-          p_run_after: nowIso,
-          p_file_name: file_name,  // denormalized from eob_documents
-        });
-
-        if (enqueueErr) {
-          console.error("[eob-enqueue] enqueue_eob_page_job rpc error", enqueueErr);
-          await refundCredits();
-          return json({ error: "Failed to enqueue page job", detail: enqueueErr.message }, 500);
-        }
-
-        // Capture the job ID returned by the RPC (if it returns one)
-        jobId = enqueueResult?.id || enqueueResult || null;
-        console.info(`[eob-enqueue] enqueued job for ${pagePath}, jobId: ${jobId}`);
-        enqueuedJobs.push({ jobId: jobId!, pageNumber });
-      } catch (e) {
-        console.error("[eob-enqueue] enqueue rpc thrown", e);
-        await refundCredits();
-        return json({ error: "Failed to enqueue page job" }, 500);
-      }
-    } // end enqueue loop
+    }
+    console.info(`[eob-enqueue] Stage A complete: built ${pageItems.length} page PDFs`);
   } catch (e) {
-    console.error("[eob-enqueue] enqueue phase error", e);
+    console.error("[eob-enqueue] Stage A (PDF split) error", e);
     await refundCredits();
-    return json({ error: "Enqueue phase error" }, 500);
+    return json({ error: "PDF split phase error" }, 500);
+  }
+
+  // ── STAGE B: Upload all pages in parallel batches of 10 ──
+  // 62 pages serial ≈ 124s (hits 150s timeout); 10-concurrent batches ≈ 14s.
+  const UPLOAD_BATCH = 10;
+  try {
+    for (let b = 0; b < pageItems.length; b += UPLOAD_BATCH) {
+      const batch = pageItems.slice(b, b + UPLOAD_BATCH).filter(item => item.bytes !== null);
+      if (batch.length === 0) continue;
+
+      await Promise.all(
+        batch.map(async ({ pageNumber, pagePath, bytes }) => {
+          const { error: uploadErr } = await supabase.storage
+            .from(STORAGE_BUCKET)
+            .upload(pagePath, bytes!, { contentType: "application/pdf", upsert: true });
+          if (uploadErr) {
+            console.error("[eob-enqueue] upload error", { pagePath, message: uploadErr.message });
+            throw new Error(`Failed to upload page ${pageNumber}: ${uploadErr.message}`);
+          }
+          console.info(`[eob-enqueue] uploaded ${pagePath}`);
+        })
+      );
+
+      const batchNum = Math.floor(b / UPLOAD_BATCH) + 1;
+      const batchEnd = Math.min(b + UPLOAD_BATCH, pageItems.length);
+      console.info(`[eob-enqueue] Stage B batch ${batchNum} complete (pages ${b + 1}–${batchEnd})`);
+    }
+    console.info(`[eob-enqueue] Stage B complete: all ${totalPages} pages uploaded`);
+  } catch (e: any) {
+    console.error("[eob-enqueue] Stage B (upload) error", e);
+    await refundCredits();
+    return json({ error: e.message || "Upload phase error" }, 500);
+  }
+
+  // ── STAGE C: Enqueue all page jobs in parallel batches of 5 ──
+  const ENQUEUE_BATCH = 5;
+  try {
+    for (let b = 0; b < pageItems.length; b += ENQUEUE_BATCH) {
+      const batch = pageItems.slice(b, b + ENQUEUE_BATCH);
+
+      await Promise.all(
+        batch.map(async ({ pageNumber, pagePath }) => {
+          // Idempotency: skip if job already exists
+          try {
+            const { data: existingJob } = await supabase
+              .from("eob_page_jobs")
+              .select("id,status")
+              .eq("eob_document_id", eob_document_id)
+              .eq("page_number", pageNumber)
+              .limit(1);
+            if (Array.isArray(existingJob) && existingJob.length > 0) {
+              console.info(`[eob-enqueue] job already exists for page ${pageNumber}, skipping`);
+              return;
+            }
+          } catch (e) {
+            console.warn(`[eob-enqueue] job existence check thrown for page ${pageNumber}`, e);
+          }
+
+          const { data: enqueueResult, error: enqueueErr } = await supabase.rpc("enqueue_eob_page_job", {
+            p_eob_document_id: eob_document_id,
+            p_practice_id: practice_id,
+            p_page_number: pageNumber,
+            p_total_pages: totalPages,
+            p_page_storage_bucket: STORAGE_BUCKET,
+            p_page_storage_path: pagePath,
+            p_run_after: nowIso,
+            p_file_name: file_name,
+          });
+
+          if (enqueueErr) {
+            console.error("[eob-enqueue] enqueue_eob_page_job rpc error", { pageNumber, enqueueErr });
+            throw new Error(`Failed to enqueue page ${pageNumber}: ${enqueueErr.message}`);
+          }
+
+          const jobId: string | null = enqueueResult?.id || enqueueResult || null;
+          console.info(`[eob-enqueue] enqueued job for page ${pageNumber}, jobId: ${jobId}`);
+          if (jobId) enqueuedJobs.push({ jobId, pageNumber });
+        })
+      );
+
+      const batchNum = Math.floor(b / ENQUEUE_BATCH) + 1;
+      console.info(`[eob-enqueue] Stage C batch ${batchNum} complete`);
+    }
+    console.info(`[eob-enqueue] Stage C complete: ${enqueuedJobs.length} jobs enqueued`);
+  } catch (e: any) {
+    console.error("[eob-enqueue] Stage C (enqueue) error", e);
+    await refundCredits();
+    return json({ error: e.message || "Enqueue phase error" }, 500);
   }
 
   console.info(`[eob-enqueue] Phase 1 complete: ${enqueuedJobs.length} jobs enqueued for ${totalPages} pages`);
