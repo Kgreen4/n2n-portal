@@ -151,12 +151,20 @@ Deno.serve(async (req) => {
   console.info(`[scan-drive-folder] ${completedFiles.length} COMPLETED skipped, ${duplicateFiles.length} duplicate, ${newFiles.length} new`);
 
   // 6. Trigger processing for each new file (sequential to avoid overloading workers)
+  //
+  // Per-trigger timeout: trigger-eob-parser awaits eob-enqueue internally for up to 8s.
+  // For large batches, race each trigger call against 6s so this function stays within
+  // Supabase's 150s wall-clock budget. A timeout means the trigger was sent and accepted —
+  // count it as triggered (eob-enqueue runs independently via EdgeRuntime.waitUntil).
+  const TRIGGER_TIMEOUT_MS = 6000;
+  const sleep = (ms: number) => new Promise<null>(resolve => setTimeout(() => resolve(null), ms));
+
   const triggered: string[] = [];
   const triggerErrors: Array<{ name: string; error: string }> = [];
 
   for (const file of newFiles) {
     try {
-      const resp = await fetch(
+      const triggerFetch = fetch(
         `${SUPABASE_URL}/functions/v1/trigger-eob-parser`,
         {
           method: "POST",
@@ -175,7 +183,14 @@ Deno.serve(async (req) => {
           }),
         }
       );
-      if (resp.ok || resp.status === 409) {
+
+      const resp = await Promise.race([triggerFetch, sleep(TRIGGER_TIMEOUT_MS)]);
+
+      if (resp === null) {
+        // Timed out — trigger request was sent, eob-enqueue running in background
+        triggered.push(file.normalized_name);
+        console.info(`[scan-drive-folder] triggered (bg): ${file.normalized_name}`);
+      } else if (resp.ok || resp.status === 409) {
         // 409 = duplicate detected at trigger level (race condition) — still counts as handled
         triggered.push(file.normalized_name);
         console.info(`[scan-drive-folder] triggered: ${file.normalized_name}`);
