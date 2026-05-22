@@ -2,6 +2,9 @@ import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import DocumentsClient from './DocumentsClient'
 
+// Always fetch fresh data — never serve a cached snapshot when polling for processing status
+export const dynamic = 'force-dynamic'
+
 export default async function DocumentsPage() {
   const supabase = await createClient()
 

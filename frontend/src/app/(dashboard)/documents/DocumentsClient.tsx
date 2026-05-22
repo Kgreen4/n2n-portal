@@ -53,6 +53,10 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
   const [reprocessingIds, setReprocessingIds] = useState<Set<string>>(new Set())
   const [reprocessError, setReprocessError] = useState<string | null>(null)
   const prevStatusesRef = useRef<Map<string, string>>(new Map())
+  // Keep a stable ref to router so the setInterval callback never captures a stale closure.
+  // Updating a ref in render (outside useEffect) is the standard React "latest value" pattern.
+  const routerRef = useRef(router)
+  routerRef.current = router
 
   // Auto-poll every 8 s when any doc is actively queued/processing.
   // Also fires a toast-style notification when a doc transitions from
@@ -66,11 +70,13 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
     }
 
     const interval = setInterval(() => {
-      router.refresh()
+      routerRef.current.refresh()
     }, 8000)
 
     return () => clearInterval(interval)
-  }, [documents, router])
+  // router intentionally excluded — accessed via routerRef to avoid dependency churn
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documents])
 
   // Detect status transitions to show completion notifications
   const [notifications, setNotifications] = useState<{ id: string; msg: string; type: 'success' | 'error' }[]>([])
@@ -396,6 +402,14 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
 
   return (
     <div>
+      {/* ── Sticky page header ─────────────────────────────────────────
+          -mx-8 px-8 extends the bg-white across the full main-area width
+          (counteracts the parent p-8 padding) so scrolled content is
+          fully covered. z-10 sits above table rows. pb-2 leaves a small
+          gap below the tabs / processing indicator.
+      ─────────────────────────────────────────────────────────────── */}
+      <div className="sticky top-0 z-10 -mx-8 px-8 bg-white pb-2">
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -501,6 +515,8 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
           </div>
         )
       })()}
+
+      </div>{/* /sticky page header */}
 
       {/* Toast notifications for completed/failed transitions */}
       {notifications.length > 0 && (
