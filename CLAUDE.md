@@ -1,6 +1,6 @@
 # N2N Analytics — Project Brief
 # Repo-level project memory. Updated at end of each session.
-# Last updated: 2026-03-28
+# Last updated: 2026-05-21
 
 ---
 
@@ -83,9 +83,17 @@ Raw tables may contain streaming buffer duplicates within 90-minute window.
 | `ingest-ledger` | GCW Analytics | ✅ Deployed |
 | `ingest-uploads` | GCW Analytics | ✅ Deployed |
 | `get-practice-summary` | N2N Portal | ✅ Deployed + tested · all 8 KPIs verified |
+| `eob-enqueue` | N2N Portal | ✅ Deployed · waitUntil fix — workers no longer abandoned on large docs |
+| `trigger-eob-parser` | N2N Portal | ✅ Deployed · COMPLETED guard + bypass_completed_guard flag |
+| `scan-drive-folder` | N2N Portal | ✅ Deployed `--no-verify-jwt` · per-trigger 6s timeout for large batches |
 
 All functions: `--no-verify-jwt` · env var is `GCP_SA_JSON` (not
 `GCP_SERVICE_ACCOUNT_JSON` — that was a fixed bug, never revert it).
+
+**eob-enqueue critical fix (2026-05-21):** Fire-and-forget worker fetches were
+being abandoned by Deno when the backgroundTask IIFE resolved. Fix: register
+each `workerFetch` with `EdgeRuntime.waitUntil(Promise.race([workerFetch, sleep(4000)]))`.
+Without this, documents with 30+ pages would silently stall in "queued" status.
 
 ### n8n — Render.com (`cardio-metrics-n8n.onrender.com`)
 
@@ -105,6 +113,31 @@ All functions: `--no-verify-jwt` · env var is `GCP_SA_JSON` (not
 | Path | `..\Dr. Ravi\GreatCare and Wellness\Financials\` |
 | Status | Complete, in use. Do not rebuild. |
 | Gap | KPI data is hardcoded — `get-practice-summary` will replace it |
+
+---
+
+## AZHS CLIENT
+
+| Item | Value |
+|---|---|
+| Client | Arizona Heart Specialists |
+| Practice (active) | "AZHS-test" · UUID `45204f7a-3f24-4048-935c-686e0fcd89ad` |
+| User linked | `a2ebab83-10d7-4f5b-97e2-a592dffb49dd` |
+| Drive folder (MAY 2026) | `1IMWX86UIORNmbGlalLNmg5XcoZFX2_tI` |
+| Seeded practice (unused) | "Arizona Heart Specialists" · UUID `aa000001-0000-4000-8000-000000000001` · no user linked |
+
+**Important:** Two AZHS practices exist in the DB. "AZHS-test" is the live
+practice (has user link, Settings page configured). The seeded "Arizona Heart
+Specialists" (`aa000001`) has no user and cannot be logged into. Keith should
+confirm whether to delete the seed record or link his user to it.
+
+**Nightly workflow:** A manual processor marks finished files with "COMPLETED"
+in the filename. `scan-drive-folder` skips these by default. Use
+`include_completed: true` with `after_date` for catch-up runs against already-
+completed files (normalizes out the COMPLETED prefix before dedup check).
+
+**Settings page:** Drive folder scan button is live at Settings → Google Drive
+section. Supports `after_date` filter and `include_completed` toggle.
 
 ---
 
@@ -207,6 +240,17 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
 - [x] Build and deploy `get-practice-summary` edge function
 - [x] Wire `get-practice-summary` into `GCW_Financial_Dashboard.html` — live RCM panel on EOB tab
 - [x] Create `reporting/looker/REPORT_STRUCTURE.md`
+- [x] Fix `eob-enqueue` fire-and-forget workers abandoned on large docs (waitUntil fix)
+- [x] Deploy `scan-drive-folder` edge function with per-trigger timeout
+- [x] COMPLETED guard in `trigger-eob-parser` + `bypass_completed_guard` flag
+- [x] `practice_settings` migration (codified table, RLS policies)
+- [x] AZHS seed migration (`aa000001` practice + settings row)
+- [x] Settings page "Scan & Process Folder" button — live
+- [x] Reset 4 stuck documents to `failed` status for reprocessing via UI
+- [ ] Keith to click Reprocess on 4 stuck documents in UI ⬅ ACTION NEEDED
+- [ ] Resolve duplicate AZHS practice — confirm if `aa000001` (no user) should be
+      deleted or if Keith's user should be linked to it ⬅ CLARIFY WITH KEITH
+- [ ] Configure n8n eob-sweeper trigger (credential ID not set) — recovery for stuck jobs
 - [ ] Upgrade Supabase to Pro — required for HIPAA BAA ⚠️ URGENT — PHI on free plan
 - [ ] Sign BAA with Supabase
 - [ ] Sign BAA with Dr. Ravi (Keith's responsibility)
@@ -220,6 +264,16 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
 - `cardio-metrics-dev` named dev but is production. Treat as production.
 - n8n workflow not yet run end-to-end with real files — biller data pending.
 - Supabase service role key was shared in a Claude chat session — rotate it.
+- n8n eob-sweeper trigger not yet configured (credential ID missing) — stuck
+  queued jobs require manual UI reprocess until this is set up.
+- AZHS duplicate practice: two rows in `practices` / `practice_settings` for AZHS.
+  Active practice is "AZHS-test" (`45204f7a`). Seeded "Arizona Heart Specialists"
+  (`aa000001`) has no user link — confirm with Keith before cleaning up.
+- 4 documents reset to `failed` 2026-05-21 — need manual Reprocess click in UI:
+  · BCBS OF AZ_EOB'S_MULTIPLE PAYMENTS (ccdbe216) — 31 pages succeeded, 81 cleared
+  · BCBS OF AZ_MULTIPLE EOB'S_PAYMENTS (c4a94f14) — 47 pages succeeded, 75 cleared
+  · MERCY CARE_EOB'S_MULTIPLE PAYMENTS (a7ded716) — all pages cleared, full reprocess
+  · BCBS OF MI $75.81 (d7e3fa21) — all pages cleared, full reprocess
 
 ---
 
