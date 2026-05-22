@@ -469,9 +469,6 @@ Deno.serve(async (req) => {
   //    run; succeed_eob_page_job() auto-transitions it to
   //    "completed" / "partial_failure" when all pages finish.
   // ──────────────────────────────────────────────────────────────
-  const BATCH_SIZE = 3;        // workers per concurrent batch (Gemini rate-limit safe)
-  const BATCH_DELAY_MS = 3000; // ms between batches
-
   // Capture all variables needed by the background closure
   const _enqueuedJobs   = enqueuedJobs;
   const _supabaseUrl    = SUPABASE_URL!;
@@ -479,68 +476,65 @@ Deno.serve(async (req) => {
   const _docId          = eob_document_id;
   const _practiceId     = practice_id;
   const _fileName       = file_name;
-  const _totalPages     = totalPages;
-  const _gdriveFileId   = gdrive_file_id;
 
   const backgroundTask = (async () => {
-    const workerResults: Array<{ page: number; status: string; items?: number }> = [];
+    // Phase 2: fire workers — fire-and-forget (no await on responses).
+    //
+    // WHY fire-and-forget:
+    //   Awaiting each worker response serializes execution. For a 112-page doc
+    //   at ~20s/page in batches of 3, that's ~870 seconds of background runtime —
+    //   far beyond what EdgeRuntime.waitUntil can sustain. Only ~8 workers fire
+    //   before the budget runs out, leaving 100+ jobs stuck in "queued".
+    //
+    //   Workers are independent edge function invocations that update their own
+    //   job/document status via succeed_eob_page_job / fail_eob_page_job RPCs.
+    //   eob-enqueue does NOT need to observe their completion.
+    //
+    // Staggering (500ms between batches of 5) prevents a simultaneous burst of
+    // 100+ Gemini calls. Workers retry on transient rate-limit errors.
+    const FIRE_BATCH = 5;
+    const FIRE_DELAY_MS = 500;
 
-    // Phase 2: fire workers in batches
     try {
-      for (let b = 0; b < _enqueuedJobs.length; b += BATCH_SIZE) {
-        const batch = _enqueuedJobs.slice(b, b + BATCH_SIZE);
+      for (let b = 0; b < _enqueuedJobs.length; b += FIRE_BATCH) {
+        const batch = _enqueuedJobs.slice(b, b + FIRE_BATCH);
 
-        const batchPromises = batch.map(async ({ jobId, pageNumber }) => {
-          const workerPayload = {
-            job: {
-              id: jobId,
-              eob_document_id: _docId,
-              page_number: pageNumber,
-              practice_id: _practiceId,
-              file_name: _fileName,
-            }
-          };
-          try {
-            const response = await fetch(`${_supabaseUrl}/functions/v1/eob-worker`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${_serviceKey}`,
-              },
-              body: JSON.stringify(workerPayload),
-            });
-            const result = await response.json();
-            if (response.ok) {
-              console.info(`[eob-enqueue] worker succeeded for page ${pageNumber}: ${result.count} items`);
-              return { page: pageNumber, status: 'succeeded', items: result.count || 0 };
-            } else {
-              console.warn(`[eob-enqueue] worker error page ${pageNumber}: ${result.details || result.error}`);
-              return { page: pageNumber, status: 'worker_error' };
-            }
-          } catch (e: any) {
-            console.warn(`[eob-enqueue] worker fetch failed page ${pageNumber}: ${e.message}`);
-            return { page: pageNumber, status: 'trigger_error' };
-          }
-        });
-
-        const batchResults = await Promise.allSettled(batchPromises);
-        for (const r of batchResults) {
-          if (r.status === 'fulfilled') workerResults.push(r.value);
+        for (const { jobId, pageNumber } of batch) {
+          // Intentionally NOT awaited — worker runs independently
+          fetch(`${_supabaseUrl}/functions/v1/eob-worker`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${_serviceKey}`,
+            },
+            body: JSON.stringify({
+              job: {
+                id: jobId,
+                eob_document_id: _docId,
+                page_number: pageNumber,
+                practice_id: _practiceId,
+                file_name: _fileName,
+              }
+            }),
+          }).catch(err => console.warn(`[eob-enqueue] worker trigger failed page ${pageNumber}: ${err?.message}`));
         }
 
-        if (b + BATCH_SIZE < _enqueuedJobs.length) {
-          await sleep(BATCH_DELAY_MS);
+        const batchNum = Math.floor(b / FIRE_BATCH) + 1;
+        const batchEnd = Math.min(b + FIRE_BATCH, _enqueuedJobs.length);
+        console.info(`[eob-enqueue] fired worker batch ${batchNum} (pages ${b + 1}–${batchEnd})`);
+
+        if (b + FIRE_BATCH < _enqueuedJobs.length) {
+          await sleep(FIRE_DELAY_MS);
         }
       }
+      console.info(`[eob-enqueue] Phase 2 complete: fired ${_enqueuedJobs.length} workers (fire-and-forget)`);
     } catch (e) {
       console.warn("[eob-enqueue] worker phase error (non-fatal):", e);
     }
 
-    const succeededCount = workerResults.filter(r => r.status === 'succeeded').length;
-    const totalItems     = workerResults.reduce((s, r) => s + (r.items || 0), 0);
-    console.info(`[eob-enqueue] Phase 2 complete: ${succeededCount}/${workerResults.length} workers succeeded, ${totalItems} items`);
-
-    // Step 8: nudge status to "processing" if workers haven't already set a terminal state
+    // Nudge document to "processing" now that all workers are in flight.
+    // Workers will transition the document to completed/failed/partial_failure
+    // via their RPC calls as they finish — we just need to clear "queued".
     try {
       const { data: docCheck } = await supabase
         .from("eob_documents")
@@ -553,53 +547,18 @@ Deno.serve(async (req) => {
           .from("eob_documents")
           .update({ status: "processing", updated_at: new Date().toISOString() })
           .eq("id", _docId);
+        console.info(`[eob-enqueue] nudged document to 'processing'`);
       }
     } catch (e) {
       console.warn("[eob-enqueue] status nudge failed (non-fatal):", e);
     }
 
-    // Step 9: move Google Drive file to Processed folder on completion
-    if (_gdriveFileId) {
-      try {
-        const { data: finalDoc } = await supabase
-          .from("eob_documents")
-          .select("status")
-          .eq("id", _docId)
-          .single();
+    // NOTE: Drive file move to Processed folder is intentionally omitted here.
+    // With fire-and-forget workers, the document won't be "completed" yet when
+    // this background task finishes (~12s). The eob-sweeper handles post-completion
+    // cleanup including the Drive file move.
 
-        if (finalDoc?.status === "completed") {
-          const { data: ps } = await supabase
-            .from("practice_settings")
-            .select("auto_move_processed, gdrive_folder_id, gdrive_processed_folder_id")
-            .eq("practice_id", _practiceId)
-            .single();
-
-          if (ps?.auto_move_processed && ps?.gdrive_folder_id) {
-            const GCP_SA_JSON_STR = Deno.env.get("GCP_SA_JSON");
-            if (GCP_SA_JSON_STR) {
-              const sa = JSON.parse(GCP_SA_JSON_STR.trim());
-              const gToken = await getGoogleAccessToken(sa);
-              const newProcessedId = await moveToProcessedFolder(
-                gToken, _gdriveFileId, ps.gdrive_folder_id, ps.gdrive_processed_folder_id
-              );
-              if (newProcessedId && newProcessedId !== ps.gdrive_processed_folder_id) {
-                await supabase
-                  .from("practice_settings")
-                  .update({ gdrive_processed_folder_id: newProcessedId })
-                  .eq("practice_id", _practiceId);
-              }
-              console.info(`[eob-enqueue] moved file ${_gdriveFileId} to Processed folder`);
-            }
-          }
-        } else {
-          console.info(`[eob-enqueue] skipping move — status is ${finalDoc?.status}`);
-        }
-      } catch (e) {
-        console.warn("[eob-enqueue] post-processing move failed (non-fatal):", e);
-      }
-    }
-
-    console.info(`[eob-enqueue] background complete: ${_totalPages} pages, ${succeededCount}/${workerResults.length} workers succeeded`);
+    console.info(`[eob-enqueue] background task done: ${_enqueuedJobs.length} workers fired for doc ${_docId}`);
   })();
 
   // Register background task — keeps running after HTTP response returns
