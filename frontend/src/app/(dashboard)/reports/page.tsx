@@ -73,6 +73,7 @@ interface DenialByPayerRow {
 
 interface DocGapRow {
   sourceDoc: string
+  docId: string | null   // eob_document_id — null if not resolvable from line items
   depositAmount: number
   extractedPaid: number
   gap: number
@@ -105,6 +106,11 @@ export default function ReportsPage() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const PAGE_SIZE = 25
+  // Increment to force the data useEffect to re-run after a reprocess is triggered
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [reprocessingDocs, setReprocessingDocs] = useState<Set<string>>(new Set())
+  const [reprocessedDocs, setReprocessedDocs] = useState<Set<string>>(new Set())
+  const [reprocessError, setReprocessError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -147,7 +153,9 @@ export default function ReportsPage() {
 
     load()
     return () => { cancelled = true }
-  }, [period])
+  // refreshKey is intentionally included: incrementing it re-runs load() after a reprocess
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period, refreshKey])
 
   // ── Aggregations ──────────────────────────────────────────────
   const medicalItems = items.filter(i => i.line_type === 'medical_service' || i.line_type === null)
@@ -249,6 +257,16 @@ export default function ReportsPage() {
   })
   const depositTotal = depositRows.reduce((s, r) => s + r.amount, 0)
 
+  // Build file_name → eob_document_id lookup so the gap table can wire up Reprocess.
+  // Use the first eob_document_id seen for each file_name (all rows for a given
+  // document share the same eob_document_id).
+  const fileNameToDocId = new Map<string, string>()
+  for (const item of items) {
+    if (item.file_name && item.eob_document_id && !fileNameToDocId.has(item.file_name)) {
+      fileNameToDocId.set(item.file_name, item.eob_document_id)
+    }
+  }
+
   // Per-document gap: for each source document that has a summary_total deposit,
   // compare the check total to the sum of extracted medical_service claim lines.
   // A gap means that document has checks/EFTs that weren't fully reconciled to
@@ -267,6 +285,7 @@ export default function ReportsPage() {
     return Array.from(depositByDoc.entries())
       .map(([sourceDoc, depositAmount]) => ({
         sourceDoc,
+        docId: fileNameToDocId.get(sourceDoc) || null,
         depositAmount,
         extractedPaid: paidByDoc.get(sourceDoc) || 0,
         gap: depositAmount - (paidByDoc.get(sourceDoc) || 0),
@@ -299,6 +318,40 @@ export default function ReportsPage() {
     if (lower.includes('partial')) return 'bg-yellow-100 text-yellow-800'
     if (lower.includes('denied') || lower.includes('rejected')) return 'bg-red-100 text-red-800'
     return 'bg-gray-100 text-gray-600'
+  }
+
+  async function handleReprocess(docId: string) {
+    setReprocessingDocs(prev => new Set(prev).add(docId))
+    setReprocessError(null)
+    try {
+      const { error } = await supabase.functions.invoke('reprocess-document', {
+        body: { eob_document_id: docId },
+      })
+      if (error) {
+        let msg = error.message
+        try {
+          const errorBody = await (error as any).context?.json?.()
+          if (errorBody?.error) {
+            msg = errorBody.error
+            if (errorBody?.details) msg += `: ${errorBody.details}`
+          }
+        } catch { /* ignore parse errors */ }
+        setReprocessError(msg || 'Failed to reprocess document')
+      } else {
+        // Mark as queued — the gap will close once the background job finishes.
+        // Increment refreshKey so the useEffect re-fetches line items.
+        setReprocessedDocs(prev => new Set(prev).add(docId))
+        setRefreshKey(k => k + 1)
+      }
+    } catch (err: any) {
+      setReprocessError(err.message || 'Unexpected error during reprocess')
+    } finally {
+      setReprocessingDocs(prev => {
+        const next = new Set(prev)
+        next.delete(docId)
+        return next
+      })
+    }
   }
 
   const PERIOD_LABELS: Record<Period, string> = {
@@ -385,6 +438,106 @@ export default function ReportsPage() {
             </div>
           </div>
 
+          {/* ── Reconciliation Gap Analysis ───────────────────────────
+              Shown prominently between KPIs and the itemised Deposit Summary.
+              Each row identifies a source document where the remittance cover-page
+              check total doesn't match the sum of extracted claim lines, and
+              exposes a one-click Reprocess action to re-extract and close the gap.
+          ──────────────────────────────────────────────────────────── */}
+          {docGapRows.length > 0 && (
+            <div className="mt-6 rounded-xl border border-amber-200 bg-white shadow-sm overflow-hidden">
+              <div className="border-b border-amber-200 px-5 py-4 bg-amber-50 flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-sm font-semibold text-amber-900 flex items-center gap-1.5">
+                    <svg className="h-4 w-4 text-amber-600 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                    </svg>
+                    Reconciliation Gap — {fmtDec(Math.abs(depositTotal - totalPaid))}
+                  </h2>
+                  <p className="mt-0.5 text-xs text-amber-700">
+                    {docGapRows.length} document{docGapRows.length !== 1 ? 's' : ''} where the remittance check total
+                    doesn&apos;t match the sum of extracted claim lines. Reprocess to close the gap, or investigate
+                    if the document has no individual claim lines (e.g. a check-only stub with no EOB pages).
+                  </p>
+                </div>
+                <span className="shrink-0 inline-flex items-center rounded-full bg-amber-100 border border-amber-200 px-2.5 py-0.5 text-xs font-semibold text-amber-800">
+                  {docGapRows.length} file{docGapRows.length !== 1 ? 's' : ''}
+                </span>
+              </div>
+
+              {reprocessError && (
+                <div className="border-b border-red-100 bg-red-50 px-5 py-2.5 text-xs text-red-700 flex items-center gap-2">
+                  <svg className="h-3.5 w-3.5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9.303 3.376c.866 1.5-.217 3.374-1.948 3.374H4.645c-1.73 0-2.813-1.874-1.948-3.374L10.051 3.378c.866-1.5 3.032-1.5 3.898 0l7.354 12.748zM12 15.75h.007v.008H12v-.008z" />
+                  </svg>
+                  {reprocessError}
+                  <button onClick={() => setReprocessError(null)} className="ml-auto text-red-400 hover:text-red-600">✕</button>
+                </div>
+              )}
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left bg-gray-50 border-b border-gray-100">
+                      <th className="px-5 py-2.5 text-xs font-medium text-gray-500">Source Document</th>
+                      <th className="px-5 py-2.5 text-xs font-medium text-gray-500 text-right">Deposit Total</th>
+                      <th className="px-5 py-2.5 text-xs font-medium text-gray-500 text-right">Extracted Paid</th>
+                      <th className="px-5 py-2.5 text-xs font-medium text-amber-600 text-right">Gap</th>
+                      <th className="px-5 py-2.5 text-xs font-medium text-gray-500 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {docGapRows.map((row, idx) => {
+                      const isReprocessing = row.docId ? reprocessingDocs.has(row.docId) : false
+                      const wasReprocessed = row.docId ? reprocessedDocs.has(row.docId) : false
+                      return (
+                        <tr key={idx} className="hover:bg-amber-50/40">
+                          <td className="px-5 py-2.5 text-gray-800 max-w-[320px] truncate" title={row.sourceDoc}>
+                            {row.sourceDoc || '(unknown)'}
+                          </td>
+                          <td className="px-5 py-2.5 text-right text-gray-600">{fmtDec(row.depositAmount)}</td>
+                          <td className="px-5 py-2.5 text-right text-gray-600">{fmtDec(row.extractedPaid)}</td>
+                          <td className="px-5 py-2.5 text-right font-semibold text-amber-700">{fmtDec(row.gap)}</td>
+                          <td className="px-5 py-2.5 text-right">
+                            {!row.docId ? (
+                              <span className="text-gray-300 text-xs">—</span>
+                            ) : wasReprocessed && !isReprocessing ? (
+                              <span className="inline-flex items-center gap-1 text-xs font-medium text-green-700">
+                                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth="2.5" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                                </svg>
+                                Queued
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => handleReprocess(row.docId!)}
+                                disabled={isReprocessing}
+                                className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm transition-colors"
+                                title="Re-extract this document to close the gap"
+                              >
+                                {isReprocessing ? (
+                                  <>
+                                    <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                    </svg>
+                                    Reprocessing…
+                                  </>
+                                ) : (
+                                  <>↺ Reprocess</>
+                                )}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           {/* Deposit Summary */}
           {depositRows.length > 0 && (
             <div className="mt-6 rounded-xl border border-blue-100 bg-white shadow-sm overflow-hidden">
@@ -402,8 +555,7 @@ export default function ReportsPage() {
                   </p>
                   {Math.abs(depositTotal - totalPaid) > 1 && (
                     <p className="mt-1 text-xs text-amber-700 font-medium">
-                      ⚠ Gap of {fmtDec(Math.abs(depositTotal - totalPaid))} between deposit total and claim-line total —
-                      see breakdown below by source document. Reprocess affected files in the Documents page to close the gap.
+                      ⚠ Gap of {fmtDec(Math.abs(depositTotal - totalPaid))} — see Reconciliation Gap Analysis above.
                     </p>
                   )}
                 </div>
@@ -467,37 +619,6 @@ export default function ReportsPage() {
                   </tfoot>
                 </table>
               </div>
-
-              {/* Per-document gap breakdown — only visible when gaps exist */}
-              {docGapRows.length > 0 && (
-                <div className="border-t border-amber-100 bg-amber-50 px-5 py-4">
-                  <p className="text-xs font-semibold text-amber-900 mb-3">
-                    Gap by source document — reprocess these files in the Documents page to close the gap
-                  </p>
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="text-left text-amber-700 border-b border-amber-200">
-                        <th className="pb-1.5 pr-4">Source Document</th>
-                        <th className="pb-1.5 pr-4 text-right">Deposit Total</th>
-                        <th className="pb-1.5 pr-4 text-right">Extracted Paid</th>
-                        <th className="pb-1.5 text-right">Gap</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {docGapRows.map((row, idx) => (
-                        <tr key={idx} className="border-t border-amber-100">
-                          <td className="py-1.5 pr-4 text-amber-800 max-w-[300px] truncate" title={row.sourceDoc}>
-                            {row.sourceDoc || '(unknown)'}
-                          </td>
-                          <td className="py-1.5 pr-4 text-right text-gray-700">{fmtDec(row.depositAmount)}</td>
-                          <td className="py-1.5 pr-4 text-right text-gray-700">{fmtDec(row.extractedPaid)}</td>
-                          <td className="py-1.5 text-right font-semibold text-amber-700">{fmtDec(row.gap)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
             </div>
           )}
 
