@@ -195,7 +195,13 @@ function deduplicateItems(items: any[]): any[] {
     // Group by normalized paid_amount; keep the highest-quality row (which will be the
     // one with a non-null remark_code / check number, scored higher by quality()).
     if (item.line_type === 'summary_total') {
-      const summaryKey = `__summary_${String(parseCurrency(item.paid_amount) ?? item.paid_amount ?? '__noamt')}`;
+      // Key on BOTH amount AND check/EFT number (remark_code) so that two checks
+      // in the same PDF with the same dollar amount are NOT collapsed into one row.
+      // A bare amount-only key caused multi-check PDFs with equal amounts to merge,
+      // losing a check entry and widening the reconciliation gap artificially.
+      const summaryAmt = String(parseCurrency(item.paid_amount) ?? item.paid_amount ?? '__noamt');
+      const summaryChk = String(item.remark_code ?? '__nochk').trim();
+      const summaryKey = `__summary_${summaryAmt}_${summaryChk}`;
       const existing = groups.get(summaryKey);
       if (!existing) {
         groups.set(summaryKey, item);
@@ -355,6 +361,14 @@ IMPORTANT — Summary/Check Pages:
 - Set payment_date to the check/EFT issue date if visible.
 - If the page lists both individual claim lines AND a total, extract BOTH: the individual lines as "medical_service" and the total as "summary_total".
 - Do NOT double-count: the summary_total represents the check total, not an additional payment.
+
+IMPORTANT — Multi-Check Sections (single PDF containing multiple checks or EFTs):
+- A single EOB PDF may contain multiple distinct check or EFT payment sections. Each section begins with its own check number, check date, and check amount, followed by the claim lines it covers.
+- When extracting medical_service claim lines, tag EACH line with the check_number (remark_code) from the section header that immediately precedes it — NOT from the overall document header or from a different section.
+- The active check_number for any claim line is determined by the most recent check/EFT section header appearing ABOVE that line in the document. When you encounter a new section header (new check number), update the active check_number for all subsequent lines until the next section header.
+- Never inherit a check_number from a different section into another section's claim lines, even if they appear on the same page.
+- For summary_total items: create exactly ONE summary_total row per distinct check or EFT. Use that check's unique number as remark_code and that check's total as paid_amount. Do not create a single summary_total for the grand total across all checks unless there is no per-check breakdown.
+- Example: if page 2 has "Check #0231499940 — $71.20" followed by claims A and B, then page 6 has "Check #0231499945 — $97.56" followed by claim C, then claim C's remark_code must be "0231499945" and the summary_total for claim C's section must also use "0231499945" — not "0231499940".
 
 IMPORTANT — Subtotal / Per-Claim Totals (DO NOT extract):
 - Many EOBs print a subtotal box below individual claim lines showing "Benefits Paid", "Total Paid", "Claim Total", or a bare dollar amount. These subtotal boxes merely restate the paid_amount from the detail line above. Do NOT extract these as separate items.

@@ -413,7 +413,7 @@ export default function ReportsPage() {
           <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Billed</p>
-              <p className="mt-1 text-2xl font-bold text-gray-900">{fmt(totalBilled)}</p>
+              <p className="mt-1 text-2xl font-bold text-gray-900">{fmtDec(totalBilled)}</p>
               <p className="mt-1 text-xs text-gray-400">{totalClaims.toLocaleString()} claim lines</p>
             </div>
             <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
@@ -432,7 +432,7 @@ export default function ReportsPage() {
             <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Contractual Adj.</p>
               <p className="mt-1 text-2xl font-bold text-orange-600">
-                {totalAdjustment > 0 ? fmt(totalAdjustment) : '—'}
+                {totalAdjustment > 0 ? fmtDec(totalAdjustment) : '—'}
               </p>
               <p className="mt-1 text-xs text-gray-400">write-downs where captured</p>
             </div>
@@ -811,13 +811,20 @@ export default function ReportsPage() {
                   {filtered.length.toLocaleString()} of {serviceItems.length.toLocaleString()}
                 </span>
               </h2>
-              <input
-                type="search"
-                placeholder="Search patient, payer, CPT, file…"
-                value={search}
-                onChange={e => { setSearch(e.target.value); setPage(0) }}
-                className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 w-64"
-              />
+              <div className="relative w-72">
+                <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+                  <svg className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35m0 0A7.5 7.5 0 104.5 4.5a7.5 7.5 0 0012.15 12.15z" />
+                  </svg>
+                </span>
+                <input
+                  type="search"
+                  placeholder="Search patient, payer, CPT, file…"
+                  value={search}
+                  onChange={e => { setSearch(e.target.value); setPage(0) }}
+                  className="w-full rounded-lg border border-slate-300 bg-white pl-9 pr-3 py-1.5 text-sm text-gray-800 shadow-sm placeholder:text-slate-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:shadow-md transition-shadow"
+                />
+              </div>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -862,10 +869,10 @@ export default function ReportsPage() {
                           </span>
                         </td>
                         <td className="px-4 py-2.5 text-right text-gray-600 whitespace-nowrap text-xs">
-                          {i.billed_amount != null ? fmt(i.billed_amount) : <span className="text-gray-300">—</span>}
+                          {i.billed_amount != null ? fmtDec(i.billed_amount) : <span className="text-gray-300">—</span>}
                         </td>
                         <td className="px-4 py-2.5 text-right font-medium text-gray-800 whitespace-nowrap text-xs">
-                          {i.paid_amount != null ? fmt(i.paid_amount) : <span className="text-gray-300">—</span>}
+                          {i.paid_amount != null ? fmtDec(i.paid_amount) : <span className="text-gray-300">—</span>}
                         </td>
                         <td className="px-4 py-2.5 max-w-[180px] text-xs text-gray-500" title={remarkTitle || undefined}>
                           {i.remark_code ? (
