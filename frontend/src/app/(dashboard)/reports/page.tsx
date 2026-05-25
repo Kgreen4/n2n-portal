@@ -227,8 +227,52 @@ export default function ReportsPage() {
   }
   const denialByPayerRows = Array.from(denialByPayerMap.values()).sort((a, b) => b.billed - a.billed)
 
-  // Deposit summary — from summary_total rows (check/EFT cover pages captured by eob-worker)
-  const depositItems = items.filter(i => i.line_type === 'summary_total' && (i.paid_amount ?? 0) > 0)
+  // Deposit summary — from summary_total rows (check/EFT cover pages captured by eob-worker).
+  //
+  // Cross-page extraction produces three inflation artifacts that must be collapsed here:
+  //   1. Per-page / per-section subtotals: a large EOB prints a running subtotal on every page
+  //      under the same check number. Gemini extracts each subtotal as a summary_total.
+  //      Fix: per unique check number, keep only the ROW WITH THE HIGHEST AMOUNT (= real check
+  //      total, since subtotals are always ≤ the full check).
+  //   2. Payer-name spelling variants: "Blue Cross Blue Shield of Arizona" vs "BlueCross
+  //      BlueShield Arizona" produce separate deposit rows for the same check when the old
+  //      payer+checkNum key was used. Fix: dedup by checkNum alone first.
+  //   3. Dual-numbered payer payments: some MCOs (e.g. Mercy Care/Aetna) show each payment
+  //      twice — a primary check row (with payment_date) and an EFT-trace reference row
+  //      (no payment_date). Fix: exclude all summary_total rows where payment_date is null.
+  const rawDepositItems = items.filter(i => i.line_type === 'summary_total' && (i.paid_amount ?? 0) > 0)
+
+  // Step 1 — drop null-date rows (EFT trace references, cover-page stubs without a date).
+  // A genuine deposited check always has a date; phantom references do not.
+  const datedDepositItems = rawDepositItems.filter(i => i.payment_date != null)
+
+  // Step 2 — per unique check number, keep the single row with the highest paid_amount.
+  // This collapses page-level subtotals (smaller) into the true check total (larger).
+  // When two rows tie on amount, prefer the one with a non-null payer name.
+  const checkMap = new Map<string, LineItem>()
+  for (const i of datedDepositItems) {
+    const checkNum = i.remark_code?.trim()
+    if (!checkNum) {
+      // No check number — can't dedup safely; fall through to a separate bucket below
+      continue
+    }
+    const existing = checkMap.get(checkNum)
+    if (!existing) {
+      checkMap.set(checkNum, i)
+    } else {
+      const iAmt = i.paid_amount ?? 0
+      const eAmt = existing.paid_amount ?? 0
+      const iHasPayer = i.payer_name != null && i.payer_name.trim() !== ''
+      const eHasPayer = existing.payer_name != null && existing.payer_name.trim() !== ''
+      if (iAmt > eAmt || (iAmt === eAmt && iHasPayer && !eHasPayer)) {
+        checkMap.set(checkNum, i)
+      }
+    }
+  }
+  // Include null-check# rows that have a date (rare; keep as-is — can't dedup without a key)
+  const nullCheckItems = datedDepositItems.filter(i => !i.remark_code?.trim())
+
+  const depositItems = [...checkMap.values(), ...nullCheckItems]
   const depositMap = new Map<string, DepositRow>()
   for (const i of depositItems) {
     const checkNum = i.remark_code || '(Unknown)'
@@ -244,7 +288,9 @@ export default function ReportsPage() {
         source_doc: i.file_name || '',
       })
     } else {
-      row.amount += i.paid_amount ?? 0
+      // After checkMap dedup, same payer+checkNum collisions are rare; keep the larger amount
+      row.amount = Math.max(row.amount, i.paid_amount ?? 0)
+      if (!row.payment_date && i.payment_date) row.payment_date = i.payment_date
       if (!row.source_doc && i.file_name) row.source_doc = i.file_name
     }
   }
