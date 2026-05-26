@@ -1,6 +1,6 @@
 # N2N Analytics — Project Brief
 # Repo-level project memory. Updated at end of each session.
-# Last updated: 2026-05-21
+# Last updated: 2026-05-25
 
 ---
 
@@ -248,32 +248,40 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
 - [x] Settings page "Scan & Process Folder" button — live
 - [x] Reset 4 stuck documents to `failed` status for reprocessing via UI
 - [ ] Keith to click Reprocess on 4 stuck documents in UI ⬅ ACTION NEEDED
-- [ ] Resolve duplicate AZHS practice — confirm if `aa000001` (no user) should be
-      deleted or if Keith's user should be linked to it ⬅ CLARIFY WITH KEITH
+- [ ] Delete AZHS seed practice `aa000001` from DB — Keith thought it was deleted
+      but DB query confirmed it still exists (slug "azhs", no user link) ⬅ ACTION NEEDED
 - [ ] Configure n8n eob-sweeper trigger (credential ID not set) — recovery for stuck jobs
-- [ ] Upgrade Supabase to Pro — required for HIPAA BAA ⚠️ URGENT — PHI on free plan
+- [x] Upgrade Supabase to Pro — Keith confirmed done (upgraded to Premier for testing)
 - [ ] Sign BAA with Supabase
 - [ ] Sign BAA with Dr. Ravi (Keith's responsibility)
-- [ ] Rotate Supabase service role key (was shared in chat session)
+- [x] Rotate Supabase + Stripe service role keys — old key revoked, 57 commits scrubbed
+      from git history, force-pushed to both GitLab and GitHub ✅ 2026-05-25
+- [x] Fix deposit dedup cross-document collision + CHK- prefix normalization in
+      Reports page — deployed to production 2026-05-25
 
 ---
 
 ## KNOWN ISSUES
 
-- **URGENT:** Supabase on FREE plan — PHI is live. Upgrade to Pro for HIPAA BAA.
 - `cardio-metrics-dev` named dev but is production. Treat as production.
 - n8n workflow not yet run end-to-end with real files — biller data pending.
-- Supabase service role key was shared in a Claude chat session — rotate it.
 - n8n eob-sweeper trigger not yet configured (credential ID missing) — stuck
   queued jobs require manual UI reprocess until this is set up.
 - AZHS duplicate practice: two rows in `practices` / `practice_settings` for AZHS.
   Active practice is "AZHS-test" (`45204f7a`). Seeded "Arizona Heart Specialists"
-  (`aa000001`) has no user link — confirm with Keith before cleaning up.
+  (`aa000001`) confirmed still exists in DB — needs manual deletion (Keith thought
+  it was removed but it wasn't). Run in Supabase SQL editor:
+  `DELETE FROM practice_settings WHERE practice_id = 'aa000001-0000-4000-8000-000000000001';`
+  `DELETE FROM practices WHERE id = 'aa000001-0000-4000-8000-000000000001';`
 - 4 documents reset to `failed` 2026-05-21 — need manual Reprocess click in UI:
   · BCBS OF AZ_EOB'S_MULTIPLE PAYMENTS (ccdbe216) — 31 pages succeeded, 81 cleared
   · BCBS OF AZ_MULTIPLE EOB'S_PAYMENTS (c4a94f14) — 47 pages succeeded, 75 cleared
   · MERCY CARE_EOB'S_MULTIPLE PAYMENTS (a7ded716) — all pages cleared, full reprocess
   · BCBS OF MI $75.81 (d7e3fa21) — all pages cleared, full reprocess
+- Reports page deposit gaps for BCBS/MercyCare docs may still show after reprocess
+  if Gemini extracts same check# in multiple documents. Per-doc gap analysis now
+  correct (2026-05-25 fix) but positive gaps (deposit > extracted) require reprocess.
+  Sign BAA with Supabase before PHI goes on paid plan.
 
 ---
 
