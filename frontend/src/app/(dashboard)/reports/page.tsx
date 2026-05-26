@@ -229,53 +229,76 @@ export default function ReportsPage() {
 
   // Deposit summary — from summary_total rows (check/EFT cover pages captured by eob-worker).
   //
-  // Cross-page extraction produces three inflation artifacts that must be collapsed here:
+  // Cross-page extraction produces several inflation/dedup artifacts that must be collapsed:
   //   1. Per-page / per-section subtotals: a large EOB prints a running subtotal on every page
-  //      under the same check number. Gemini extracts each subtotal as a summary_total.
-  //      Fix: per unique check number, keep only the ROW WITH THE HIGHEST AMOUNT (= real check
-  //      total, since subtotals are always ≤ the full check).
-  //   2. Payer-name spelling variants: "Blue Cross Blue Shield of Arizona" vs "BlueCross
-  //      BlueShield Arizona" produce separate deposit rows for the same check when the old
-  //      payer+checkNum key was used. Fix: dedup by checkNum alone first.
-  //   3. Dual-numbered payer payments: some MCOs (e.g. Mercy Care/Aetna) show each payment
-  //      twice — a primary check row (with payment_date) and an EFT-trace reference row
-  //      (no payment_date). Fix: exclude all summary_total rows where payment_date is null.
+  //      under the same check number. Fix: per unique check number keep only the MAX amount.
+  //   2. Payer-name spelling variants produce duplicate rows for the same check. Fix: dedup by
+  //      normalized check number alone (not payer+checkNum).
+  //   3. Dual-numbered payer payments (e.g. Mercy Care/Aetna) show a primary check row (with
+  //      payment_date) and an EFT-trace reference row (no date). Fix: drop null-date rows.
+  //   4. "CHK-XXXXXXXX" vs "XXXXXXXX" prefix variants: Gemini sometimes prefixes check numbers
+  //      with "CHK-". Strip it before using as a dedup key so both forms collapse to one entry.
+  //   5. Cross-document check collisions: the same check number can appear in multiple documents
+  //      (different PDFs that each contain a cover-page reference to the same remittance).
+  //      The global deposit table dedups to one entry per physical check (correct for totals).
+  //      The per-document gap analysis uses a SEPARATE per-document dedup so each document's
+  //      deposit credit is computed from the checks found *within* that document, not stolen
+  //      by another document that happens to share the same check number.
+
+  // Helper: strip "CHK-" prefix (case-insensitive) before using as a dedup key.
+  const normalizeCheckNum = (s: string | null | undefined): string =>
+    s ? s.trim().replace(/^CHK-/i, '') : ''
+
   const rawDepositItems = items.filter(i => i.line_type === 'summary_total' && (i.paid_amount ?? 0) > 0)
 
   // Step 1 — drop null-date rows (EFT trace references, cover-page stubs without a date).
-  // A genuine deposited check always has a date; phantom references do not.
   const datedDepositItems = rawDepositItems.filter(i => i.payment_date != null)
 
-  // Step 2 — per unique check number, keep the single row with the highest paid_amount.
-  // This collapses page-level subtotals (smaller) into the true check total (larger).
-  // When two rows tie on amount, prefer the one with a non-null payer name.
-  const checkMap = new Map<string, LineItem>()
+  // Step 2a — GLOBAL dedup by normalized check number.
+  // One physical check = one entry in the deposit table. When two rows share a normalized
+  // check number, keep the one with the highest amount; tie-break on non-null payer name.
+  const globalCheckMap = new Map<string, LineItem>()
   for (const i of datedDepositItems) {
-    const checkNum = i.remark_code?.trim()
-    if (!checkNum) {
-      // No check number — can't dedup safely; fall through to a separate bucket below
-      continue
-    }
-    const existing = checkMap.get(checkNum)
+    const checkNum = normalizeCheckNum(i.remark_code)
+    if (!checkNum) continue  // no check number — handled below in nullCheckItems
+    const existing = globalCheckMap.get(checkNum)
     if (!existing) {
-      checkMap.set(checkNum, i)
+      globalCheckMap.set(checkNum, i)
     } else {
       const iAmt = i.paid_amount ?? 0
       const eAmt = existing.paid_amount ?? 0
       const iHasPayer = i.payer_name != null && i.payer_name.trim() !== ''
       const eHasPayer = existing.payer_name != null && existing.payer_name.trim() !== ''
       if (iAmt > eAmt || (iAmt === eAmt && iHasPayer && !eHasPayer)) {
-        checkMap.set(checkNum, i)
+        globalCheckMap.set(checkNum, i)
       }
     }
   }
-  // Include null-check# rows that have a date (rare; keep as-is — can't dedup without a key)
-  const nullCheckItems = datedDepositItems.filter(i => !i.remark_code?.trim())
 
-  const depositItems = [...checkMap.values(), ...nullCheckItems]
+  // Step 2b — PER-DOCUMENT dedup by (file_name + normalized check number).
+  // Used exclusively for the per-document gap analysis below.
+  // Each document independently keeps the MAX amount for each check number it references,
+  // so a document's deposit credit is never stolen by another document that shares the
+  // same check number string.
+  const perDocCheckMap = new Map<string, LineItem>()
+  for (const i of datedDepositItems) {
+    const checkNum = normalizeCheckNum(i.remark_code)
+    const doc = i.file_name || ''
+    if (!checkNum) continue
+    const key = `${doc}||${checkNum}`
+    const existing = perDocCheckMap.get(key)
+    if (!existing || (i.paid_amount ?? 0) > (existing.paid_amount ?? 0)) {
+      perDocCheckMap.set(key, i)
+    }
+  }
+
+  // Null-check# rows that have a date (rare; can't dedup without a key — keep all)
+  const nullCheckItems = datedDepositItems.filter(i => !normalizeCheckNum(i.remark_code))
+
+  const depositItems = [...globalCheckMap.values(), ...nullCheckItems]
   const depositMap = new Map<string, DepositRow>()
   for (const i of depositItems) {
-    const checkNum = i.remark_code || '(Unknown)'
+    const checkNum = normalizeCheckNum(i.remark_code) || '(Unknown)'
     const payer = normalizePayer(i.payer_name)
     const key = `${payer}||${checkNum}`
     const row = depositMap.get(key)
@@ -288,7 +311,7 @@ export default function ReportsPage() {
         source_doc: i.file_name || '',
       })
     } else {
-      // After checkMap dedup, same payer+checkNum collisions are rare; keep the larger amount
+      // After globalCheckMap dedup, same payer+checkNum collisions are rare; keep the larger amount
       row.amount = Math.max(row.amount, i.paid_amount ?? 0)
       if (!row.payment_date && i.payment_date) row.payment_date = i.payment_date
       if (!row.source_doc && i.file_name) row.source_doc = i.file_name
@@ -317,11 +340,20 @@ export default function ReportsPage() {
   // compare the check total to the sum of extracted medical_service claim lines.
   // A gap means that document has checks/EFTs that weren't fully reconciled to
   // individual claim lines — reprocessing the document closes the gap.
+  //
+  // IMPORTANT: uses perDocCheckMap (not depositRows / globalCheckMap) so that each
+  // document's deposit credit is based on the checks found within *that document*,
+  // not stolen by another doc that shares the same check number in the global dedup.
   const docGapRows: DocGapRow[] = (() => {
     const depositByDoc = new Map<string, number>()
-    for (const row of depositRows) {
-      const doc = row.source_doc || '(unknown)'
-      depositByDoc.set(doc, (depositByDoc.get(doc) || 0) + row.amount)
+    for (const i of perDocCheckMap.values()) {
+      const doc = i.file_name || '(unknown)'
+      depositByDoc.set(doc, (depositByDoc.get(doc) || 0) + (i.paid_amount ?? 0))
+    }
+    // Also credit null-check# items to their source document
+    for (const i of nullCheckItems) {
+      const doc = i.file_name || '(unknown)'
+      depositByDoc.set(doc, (depositByDoc.get(doc) || 0) + (i.paid_amount ?? 0))
     }
     const paidByDoc = new Map<string, number>()
     for (const item of medicalItems) {
