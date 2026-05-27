@@ -234,8 +234,12 @@ export default function ReportsPage() {
   //      under the same check number. Fix: per unique check number keep only the MAX amount.
   //   2. Payer-name spelling variants produce duplicate rows for the same check. Fix: dedup by
   //      normalized check number alone (not payer+checkNum).
-  //   3. Dual-numbered payer payments (e.g. Mercy Care/Aetna) show a primary check row (with
-  //      payment_date) and an EFT-trace reference row (no date). Fix: drop null-date rows.
+  //   3. Dual-numbered payer payments (Mercy Care/Aetna): each physical payment appears as
+  //      both an Aetna EFT trace row (≤7-digit remark_code, HAS payment_date, on claim-detail
+  //      page) and a Mercy Care check stub row (9-digit remark_code, HAS payment_date, on
+  //      dedicated check-stub page). Fix (Step 1): drop null-date rows. Fix (Step 1b): within
+  //      the same document + date, when full check # rows (8+ digits) exist alongside short
+  //      trace refs (≤7 digits), discard the trace refs — they duplicate the check stub rows.
   //   4. "CHK-XXXXXXXX" vs "XXXXXXXX" prefix variants: Gemini sometimes prefixes check numbers
   //      with "CHK-". Strip it before using as a dedup key so both forms collapse to one entry.
   //   5. Cross-document check collisions: the same check number can appear in multiple documents
@@ -249,16 +253,57 @@ export default function ReportsPage() {
   const normalizeCheckNum = (s: string | null | undefined): string =>
     s ? s.trim().replace(/^CHK-/i, '') : ''
 
+  // Helper: pure-numeric strings of ≤7 digits are treated as short EFT trace references
+  // (e.g. Aetna 7-digit trace "7901273"). Authoritative check numbers tend to be 8+ digits.
+  const isShortTraceRef = (checkNum: string): boolean => /^\d{1,7}$/.test(checkNum)
+
   const rawDepositItems = items.filter(i => i.line_type === 'summary_total' && (i.paid_amount ?? 0) > 0)
 
   // Step 1 — drop null-date rows (EFT trace references, cover-page stubs without a date).
   const datedDepositItems = rawDepositItems.filter(i => i.payment_date != null)
 
+  // Step 1b — MCO trace-ref dedup within document + payment_date.
+  //
+  // In MCO remittances (Mercy Care / Aetna), each physical payment generates two
+  // summary_total rows in the same document, both with payment_date set:
+  //   (a) Claim-detail page: remark_code = short 7-digit Aetna EFT trace # (e.g. "7901273")
+  //   (b) Check-stub page:   remark_code = full 9-digit Mercy Care check # (e.g. "400897236")
+  //
+  // Both survive Step 1's null-date filter and would enter globalCheckMap as two
+  // separate deposits — inflating the total by the value of every Mercy Care payment.
+  //
+  // Fix: within the same (eob_document_id, payment_date), if authoritative full check #
+  // rows (8+ digits) exist alongside short trace refs (≤7 digits), drop the trace refs.
+  // Two genuinely distinct payments would each have their own full check # → no collision.
+  const withinDocDedupedItems = (() => {
+    type Group = { trace: LineItem[]; full: LineItem[] }
+    const groups = new Map<string, Group>()
+    for (const i of datedDepositItems) {
+      const k = `${i.eob_document_id}||${i.payment_date ?? ''}`
+      const g = groups.get(k) ?? { trace: [], full: [] }
+      const chk = normalizeCheckNum(i.remark_code)
+      if (isShortTraceRef(chk)) g.trace.push(i)
+      else g.full.push(i)
+      groups.set(k, g)
+    }
+    const result: LineItem[] = []
+    for (const { trace, full } of groups.values()) {
+      if (full.length > 0 && trace.length > 0) {
+        // Full check #s exist — trace refs are duplicates of the same physical payments
+        result.push(...full)
+      } else {
+        // No mixing — keep all rows (covers payers that only have trace refs or only checks)
+        result.push(...trace, ...full)
+      }
+    }
+    return result
+  })()
+
   // Step 2a — GLOBAL dedup by normalized check number.
   // One physical check = one entry in the deposit table. When two rows share a normalized
   // check number, keep the one with the highest amount; tie-break on non-null payer name.
   const globalCheckMap = new Map<string, LineItem>()
-  for (const i of datedDepositItems) {
+  for (const i of withinDocDedupedItems) {
     const checkNum = normalizeCheckNum(i.remark_code)
     if (!checkNum) continue  // no check number — handled below in nullCheckItems
     const existing = globalCheckMap.get(checkNum)
@@ -281,7 +326,7 @@ export default function ReportsPage() {
   // so a document's deposit credit is never stolen by another document that shares the
   // same check number string.
   const perDocCheckMap = new Map<string, LineItem>()
-  for (const i of datedDepositItems) {
+  for (const i of withinDocDedupedItems) {
     const checkNum = normalizeCheckNum(i.remark_code)
     const doc = i.file_name || ''
     if (!checkNum) continue
@@ -293,7 +338,7 @@ export default function ReportsPage() {
   }
 
   // Null-check# rows that have a date (rare; can't dedup without a key — keep all)
-  const nullCheckItems = datedDepositItems.filter(i => !normalizeCheckNum(i.remark_code))
+  const nullCheckItems = withinDocDedupedItems.filter(i => !normalizeCheckNum(i.remark_code))
 
   const depositItems = [...globalCheckMap.values(), ...nullCheckItems]
   const depositMap = new Map<string, DepositRow>()
