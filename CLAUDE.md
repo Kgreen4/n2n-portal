@@ -247,9 +247,14 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
 - [x] AZHS seed migration (`aa000001` practice + settings row)
 - [x] Settings page "Scan & Process Folder" button — live
 - [x] Reset 4 stuck documents to `failed` status for reprocessing via UI
-- [ ] Keith to click Reprocess on 4 stuck documents in UI ⬅ ACTION NEEDED
-- [ ] Delete AZHS seed practice `aa000001` from DB — Keith thought it was deleted
-      but DB query confirmed it still exists (slug "azhs", no user link) ⬅ ACTION NEEDED
+- [x] Keith reprocessed 5 gap documents — BCBS of MI closed, BCBS/MercyCare at floor
+- [x] Delete AZHS seed practice `aa000001` from DB — confirmed deleted 2026-05-26
+- [ ] Improve eob-worker Gemini prompt for MCO remittance formats (Mercy Care/Aetna):
+      Mercy Care EOB shows a persistent +$1,210 gap (deposit $3,799, extracted $2,588)
+      across 3 reprocesses — Gemini is finding the check totals but not fully parsing
+      individual claim lines from the MCO-style page layout. Fix: add MCO-specific
+      extraction guidance to the Gemini prompt in eob-worker (e.g. handle grid-style
+      claim tables, Aetna dual-number rows, EFT trace references without claim detail)
 - [ ] Configure n8n eob-sweeper trigger (credential ID not set) — recovery for stuck jobs
 - [x] Upgrade Supabase to Pro — Keith confirmed done (upgraded to Premier for testing)
 - [ ] Sign BAA with Supabase
