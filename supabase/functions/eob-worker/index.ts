@@ -391,11 +391,29 @@ IMPORTANT — Legend / Footnote Code Explanations:
   • CO suffix → the amount relates to contractual_adjustment
 - When you see a "Patient Resp" or "Patient Responsibility" column on the EOB, map that value to the patient_responsibility field.
 
+IMPORTANT — MCO / Managed Care Remittance Formats (Mercy Care, Aetna, UnitedHealthcare, Humana, etc.):
+Many Managed Care Organizations use a compact grid-style remittance layout that differs significantly from standard BCBS-style EOBs. Follow these rules when you encounter MCO-style documents:
+
+1. GRID-STYLE CLAIM TABLES: MCO remittances often pack multiple claims into a dense columnar grid. Each row in the grid is a separate claim and must be extracted as a separate medical_service item. Common column headers include: "Patient Name", "Claim Number", "Date of Service", "DOS", "Proc", "Billed", "Allowed", "Paid", "Patient Resp", "Adj Reason", "Remark". Map each column to the appropriate field. Do NOT skip rows because they appear compressed — extract every claim row.
+
+2. CHECK / EFT TOTAL AT TOP: Many MCO remittances print the check or EFT total at the TOP of the page (before the claim grid), labeled "Total Payment", "Check Amount", "EFT Amount", "Net Payment", or "Total Enclosed". Extract this as a summary_total item with remark_code = the check or EFT number (e.g., "12345678" or "EFT-0001234567"). Then extract each claim row in the grid below as medical_service items. Both the summary_total AND the medical_service rows should appear in the output for the same page.
+
+3. EFT TRACE REFERENCE ROWS: Some MCO pages include a row that shows only an EFT trace number (e.g., "EFT Trace #: 1234567890") with no claim detail and no date. These are payment reference lines, NOT claim lines. Do NOT extract them as summary_total or medical_service items. If the page already has a summary_total for this EFT, the trace row is a duplicate — skip it.
+
+4. DUAL-NUMBER PAYMENTS (Aetna and similar): A single Aetna payment may show BOTH a "Check #" (or "EFT #") AND an "EFT Trace #" for the same payment. Extract EXACTLY ONE summary_total row for this payment. Prefer the Check # as remark_code if present; otherwise use the EFT Trace # with "EFT-" prefix. Do NOT create two separate summary_total rows for the same physical payment.
+
+5. MCO ADJUSTMENT CODES: MCO remittances may use adjustment reason codes formatted as plain numbers (e.g., "45", "97", "1") without the standard "CO-" / "PR-" prefix. These are still CARC codes. When you see bare numeric codes like "45", "97", "4", "16", "18", "22", treat them as their CARC equivalents (CO-45, CO-97, CO-4, CO-16, CO-18, CO-22) and include them in remark_code. Map their standard descriptions to remark_description.
+
+6. PROVIDER GROUPINGS: Some MCO EOBs group claims by rendering provider or by provider NPI, with the provider name appearing as a section header above a block of claim rows. Apply that provider name and NPI to all claim rows in that section — treat it like a page header for NPI/provider assignment purposes (same "Header Memory" rule above).
+
+7. MERCY CARE / ARIZONA-SPECIFIC MCO: Mercy Care remittances may show the member's Mercy Care ID (a long numeric string starting with the state prefix) in a "Member ID" column. Use that as member_id. The "Auth #" or "Auth Number" column is NOT the claim_number — that is a prior authorization number. Use the "Claim #" or "Reference #" column for claim_number.
+
 Other instructions:
 - Extract EVERY line item on the page, do not skip any
 - If a field is not present, set it to null
 - Return amounts as numbers without dollar signs or commas
 - If the page has absolutely no extractable data (blank page, signature-only page), return: {"items": []}`;
+
 
 // ──────────────────────────────────────────────────────────────
 // Main Worker Handler
