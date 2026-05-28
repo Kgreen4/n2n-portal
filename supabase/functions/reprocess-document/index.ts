@@ -154,7 +154,7 @@ Deno.serve(async (req) => {
     // 1. VERIFY DOCUMENT EXISTS AND GET DETAILS
     const { data: doc, error: docErr } = await supabase
       .from('eob_documents')
-      .select('id, practice_id, file_name, file_path, status')
+      .select('id, practice_id, file_name, file_path, status, total_pages')
       .eq('id', eob_document_id)
       .single();
 
@@ -250,6 +250,21 @@ Deno.serve(async (req) => {
     }
     console.info(`[reprocess] Reset document ${eob_document_id} to pending`);
 
+    // 4b. REFUND CREDITS for the original page count so re-enqueue doesn't double-charge
+    const originalPages = doc.total_pages ?? 0;
+    if (originalPages > 0) {
+      try {
+        await supabase.rpc('add_parsing_credits', {
+          p_practice_id: doc.practice_id,
+          p_amount: originalPages,
+        });
+        console.info(`[reprocess] Refunded ${originalPages} credits for document ${eob_document_id}`);
+      } catch (refundErr: any) {
+        // Non-fatal — log and continue; worst case eob-enqueue will catch insufficient credits
+        console.warn(`[reprocess] Credit refund failed (non-fatal): ${refundErr.message}`);
+      }
+    }
+
     // 5. RE-TRIGGER EXTRACTION
     // Determine source based on file_path format:
     //   - "gdrive://FILE_ID" → re-download from Google Drive (legacy records before archival)
@@ -287,10 +302,18 @@ Deno.serve(async (req) => {
     const enqueueResult = await enqueueResp.json();
 
     if (!enqueueResp.ok) {
-      console.error(`[reprocess] eob-enqueue failed: ${JSON.stringify(enqueueResult)}`);
+      // Extract a readable string from whatever eob-enqueue returned
+      const errDetail: string =
+        typeof enqueueResult === 'string'
+          ? enqueueResult
+          : (enqueueResult?.error
+              ? `${enqueueResult.error}${enqueueResult.details ? `: ${enqueueResult.details}` : ''}`
+              : JSON.stringify(enqueueResult));
+      console.error(`[reprocess] eob-enqueue failed (HTTP ${enqueueResp.status}): ${errDetail}`);
       return json({
         error: 'Document reset but re-enqueue failed',
-        details: enqueueResult,
+        details: errDetail,          // always a string now — frontend can display it
+        http_status: enqueueResp.status,
         bq_rows_deleted: bqDeleted,
       }, 500);
     }
