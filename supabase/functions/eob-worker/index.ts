@@ -5,6 +5,26 @@
 import { createClient } from "npm:@supabase/supabase-js@2.39.7";
 import { getCorsHeaders, corsResponse } from "../_shared/cors.ts";
 
+// ── Hybrid PDF Mode: unpdf for digital-native text extraction ─────────────────
+// unpdf is edge-compatible and works without canvas or fs.
+// We import dynamically at module load so a failure never crashes the worker —
+// pages fall back to base64-PDF vision mode automatically.
+// See: https://github.com/unjs/unpdf
+type PdfExtractFn = (buf: Uint8Array, opts?: { mergePages?: boolean }) => Promise<{ totalPages: number; text: string | string[] }>;
+let pdfExtractText: PdfExtractFn | null = null;
+try {
+  const mod = await import('npm:unpdf@0.11.0');
+  pdfExtractText = mod.extractText ?? null;
+  if (pdfExtractText) {
+    console.info('[eob-worker] unpdf loaded — hybrid PDF text extraction enabled');
+  }
+} catch (_importErr) {
+  console.warn('[eob-worker] unpdf not available — all pages will use vision mode');
+}
+// Threshold: pages with fewer "meaningful" characters fall back to vision mode.
+// Typical digital-native EOB page yields 500-2000 chars; scanned yields <50.
+const DIGITAL_NATIVE_MIN_CHARS = 150;
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const GCP_SA_JSON_STR = Deno.env.get('GCP_SA_JSON')!;
@@ -458,19 +478,62 @@ Deno.serve(async (req) => {
     const filePath = `${job.eob_document_id}/page-${pageStr}.pdf`;
     const { data: fileBlob, error: dlErr } = await supabase.storage.from('eob-pages').download(filePath);
     if (dlErr) throw new Error(`Download failed: ${dlErr.message}`);
-    const base64PDF = uint8ToBase64(new Uint8Array(await fileBlob.arrayBuffer()));
-    console.info(`[eob-worker] Downloaded page ${job.page_number} for doc ${job.eob_document_id}`);
+    // Store raw bytes for dual use: text extraction attempt + base64 vision fallback
+    const pdfBytes = new Uint8Array(await fileBlob.arrayBuffer());
+    const base64PDF = uint8ToBase64(pdfBytes);   // always computed; used only in vision mode
+    console.info(`[eob-worker] Downloaded page ${job.page_number} for doc ${job.eob_document_id} (${pdfBytes.length} bytes)`);
+
+    // STEP 1.5: DETECT DIGITAL-NATIVE vs SCANNED PAGE (hybrid mode)
+    // If unpdf successfully extracts meaningful text, we send text to Gemini instead of
+    // the raw base64 PDF — dramatically reducing token cost for digital-native EOBs
+    // (Mercy Care, Aetna, most BCBS). Scanned pages fall back to vision automatically.
+    let pageTextContent: string | null = null;
+    let extractionMode: 'text' | 'vision' = 'vision';
+
+    if (pdfExtractText) {
+      try {
+        const result = await pdfExtractText(pdfBytes, { mergePages: true });
+        const rawText = typeof result.text === 'string'
+          ? result.text
+          : (result.text as string[]).join('\n');
+
+        // Count meaningful characters (letters, digits, common EOB symbols)
+        const meaningfulChars = (rawText.match(/[a-zA-Z0-9$.,\-\/:()|]/g) || []).length;
+
+        if (meaningfulChars >= DIGITAL_NATIVE_MIN_CHARS) {
+          pageTextContent = rawText.trim();
+          extractionMode = 'text';
+          console.info(`[eob-worker] page ${job.page_number}: digital-native (${meaningfulChars} chars) → TEXT mode`);
+        } else {
+          console.info(`[eob-worker] page ${job.page_number}: scanned/sparse (${meaningfulChars} chars) → VISION mode`);
+        }
+      } catch (pdfErr: any) {
+        // Non-fatal: any extraction error falls through to vision
+        console.warn(`[eob-worker] PDF text extraction failed, using vision: ${pdfErr.message}`);
+      }
+    }
 
     // STEP 2: AUTHENTICATE to GCP
     const gToken = await getGoogleAccessToken(sa);
 
     // STEP 3: CALL GEMINI 2.0 FLASH (Vertex AI) — per-page extraction with retry
+    // TEXT MODE: send extracted text inline → far fewer tokens, lower cost
+    // VISION MODE: send raw base64 PDF → handles scanned / image-based pages
     const VERTEX_URL = `https://us-central1-aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/us-central1/publishers/google/models/gemini-2.0-flash-001:generateContent`;
+
+    const geminiParts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> =
+      extractionMode === 'text' && pageTextContent
+        ? [
+            { text: GEMINI_PROMPT },
+            { text: `\n\nEOB PAGE TEXT (extracted from digital PDF — treat this as the complete page content):\n\`\`\`\n${pageTextContent}\n\`\`\`` }
+          ]
+        : [
+            { text: GEMINI_PROMPT },
+            { inlineData: { mimeType: 'application/pdf', data: base64PDF } }
+          ];
+
     const geminiBody = JSON.stringify({
-      contents: [{ "role": "user", "parts": [
-        { "text": GEMINI_PROMPT },
-        { "inlineData": { "mimeType": "application/pdf", "data": base64PDF } }
-      ]}],
+      contents: [{ "role": "user", "parts": geminiParts }],
       generationConfig: { "responseMimeType": "application/json", "maxOutputTokens": 8192 }
     });
 
@@ -558,7 +621,7 @@ Deno.serve(async (req) => {
     }
 
     const rawExtracted = parsed.items || parsed.line_items || [];
-    console.info(`[eob-worker] Gemini extracted ${rawExtracted.length} raw line items from page ${job.page_number}`);
+    console.info(`[eob-worker] Gemini extracted ${rawExtracted.length} raw line items from page ${job.page_number} [${extractionMode} mode]`);
 
     // STEP 3B: DEDUPLICATE — merge rows with same composite key
     // Gemini sometimes extracts the same service line twice (once from summary, once from detail).
@@ -752,7 +815,8 @@ Deno.serve(async (req) => {
       status: 'succeeded',
       count: extracted.length,
       page_number: job.page_number,
-      eob_document_id: job.eob_document_id
+      eob_document_id: job.eob_document_id,
+      extraction_mode: extractionMode   // 'text' | 'vision' — for cost analysis
     }), { status: 200 });
 
   } catch (err) {
