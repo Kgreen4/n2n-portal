@@ -2,7 +2,12 @@
 //
 // After a document is reprocessed, BigQuery data changes but bank_deposits.match_delta
 // is a static value written at CSV-upload time. This function re-queries BQ and updates
-// match_delta / match_status for any deposits whose check_number matches the new BQ data.
+// match_delta / match_status for any deposits whose matched_eob_document_id is found in BQ.
+//
+// Primary path  (Path A): query eob_line_items summary_total rows by matched_eob_document_id.
+//   Works even when remark_code (check_number) is NULL in BQ.
+// Fallback path (Path B): derive check_number from summary_total.remark_code and match
+//   deposits by check_number. Used when matched_eob_document_id is not set on the deposit.
 //
 // Input:  { practice_id: string, eob_document_id?: string }
 //   - practice_id is required (scopes the bank_deposits query)
@@ -13,7 +18,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2.39.7";
 import { getCorsHeaders, corsResponse } from "../_shared/cors.ts";
 
-const SUPABASE_URL             = Deno.env.get('SUPABASE_URL')!;
+const SUPABASE_URL              = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const GCP_SA_JSON_STR           = Deno.env.get('GCP_SA_JSON')!;
 
@@ -116,76 +121,9 @@ Deno.serve(async (req) => {
 
     console.info(`[rematch-deposits] Starting for practice=${practice_id}${eob_document_id ? ` doc=${eob_document_id}` : ''}`);
 
-    // ── Step 1: Get current check totals from BigQuery ──────────────────────
-    // Use eob_payment_items VIEW — it derives check_number (from summary_total.remark_code)
-    // and check_total_amount (from summary_total.paid_amount) correctly.
-    // GROUP BY check_number + take MAX(check_total_amount) to handle streaming-buffer
-    // duplicates where old and new rows co-exist with different totals.
-    const docFilter = eob_document_id
-      ? `AND eob_document_id = '${eob_document_id}'`
-      : '';
+    const gToken = await getGoogleAccessToken(JSON.parse(GCP_SA_JSON_STR.trim()));
 
-    // Query eob_line_items directly (inline the eob_payment_items view logic)
-    // to avoid a dependency on the view that may not exist after BQ housekeeping.
-    // For each document, the summary_total row (highest page_number) carries the
-    // check number (remark_code) and check total (paid_amount). We join it onto
-    // every non-summary row so we can GROUP BY check_number.
-    const checkRows = await bqQuery(
-      await getGoogleAccessToken(JSON.parse(GCP_SA_JSON_STR.trim())),
-      `
-        SELECT
-          check_number,
-          MAX(CAST(check_total_amount AS FLOAT64)) AS check_total,
-          ANY_VALUE(eob_doc_id)                    AS eob_doc_id
-        FROM (
-          SELECT
-            li.eob_document_id  AS eob_doc_id,
-            st.remark_code      AS check_number,
-            st.paid_amount      AS check_total_amount
-          FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_line_items\` li
-          LEFT JOIN (
-            SELECT
-              eob_document_id,
-              remark_code,
-              paid_amount,
-              ROW_NUMBER() OVER (PARTITION BY eob_document_id ORDER BY page_number DESC) AS rn
-            FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_line_items\`
-            WHERE line_type = 'summary_total'
-          ) st ON li.eob_document_id = st.eob_document_id AND st.rn = 1
-          WHERE li.line_type    != 'summary_total'
-            AND li.practice_id   = '${practice_id}'
-            ${docFilter}
-        )
-        WHERE check_number       IS NOT NULL
-          AND check_total_amount IS NOT NULL
-        GROUP BY check_number
-      `,
-    );
-
-    if (checkRows.length === 0) {
-      console.warn(`[rematch-deposits] No check totals found in BQ for practice=${practice_id}${eob_document_id ? ` doc=${eob_document_id}` : ''}`);
-      return json({
-        updated: 0,
-        matched: 0,
-        discrepancies: 0,
-        unchanged: 0,
-        warning: 'No check totals found in BigQuery — document may still be processing or streaming buffer not yet cleared',
-      });
-    }
-
-    // Build lookup: checkNumber → { checkTotal, docId }
-    const checkMap = new Map<string, { checkTotal: number; docId: string }>();
-    for (const row of checkRows) {
-      if (row.check_number) {
-        checkMap.set(row.check_number.trim(), {
-          checkTotal: parseFloat(row.check_total) || 0,
-          docId: row.eob_doc_id || '',
-        });
-      }
-    }
-    console.info(`[rematch-deposits] Loaded ${checkMap.size} check totals from BQ`);
-
-    // ── Step 2: Fetch bank deposits from Supabase ───────────────────────────
+    // ── Step 1: Fetch bank deposits from Supabase ───────────────────────────
     let depositsQuery = supabase
       .from('bank_deposits')
       .select('id, check_number, amount, match_status, match_delta, matched_eob_document_id')
@@ -193,7 +131,6 @@ Deno.serve(async (req) => {
 
     if (eob_document_id) {
       // When scoped to a doc: match either by matched_eob_document_id OR by check_number
-      // (the deposit might have been unmatched previously, so matched_eob_document_id may be null)
       depositsQuery = depositsQuery.or(
         `matched_eob_document_id.eq.${eob_document_id},matched_eob_document_id.is.null`,
       );
@@ -205,18 +142,139 @@ Deno.serve(async (req) => {
       return json({ updated: 0, matched: 0, discrepancies: 0, unchanged: 0, warning: 'No deposits found for this practice' });
     }
 
+    console.info(`[rematch-deposits] Found ${deposits.length} deposits in Supabase`);
+
+    // ── Step 2a: Path A — query BQ by matched_eob_document_id ──────────────
+    // This is the PRIMARY path. Works even when remark_code (check_number) is
+    // NULL in BQ summary_total rows. Uses the document ID already stored in
+    // bank_deposits.matched_eob_document_id to look up the current check total.
+    const matchedDocIds = [...new Set(
+      deposits
+        .filter(d => d.matched_eob_document_id)
+        .map(d => d.matched_eob_document_id as string)
+    )];
+
+    // docCheckMap: eob_document_id → check_total
+    const docCheckMap = new Map<string, number>();
+
+    if (matchedDocIds.length > 0) {
+      const inClause = matchedDocIds.map(id => `'${id}'`).join(', ');
+      try {
+        const docRows = await bqQuery(gToken, `
+          SELECT
+            eob_document_id,
+            MAX(CAST(paid_amount AS FLOAT64)) AS check_total
+          FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_line_items\`
+          WHERE line_type = 'summary_total'
+            AND eob_document_id IN (${inClause})
+          GROUP BY eob_document_id
+        `);
+        for (const row of docRows) {
+          if (row.eob_document_id && row.check_total !== null && row.check_total !== undefined) {
+            docCheckMap.set(row.eob_document_id, parseFloat(row.check_total) || 0);
+          }
+        }
+        console.info(`[rematch-deposits] Path A: loaded ${docCheckMap.size} check totals from BQ by document ID`);
+      } catch (e: any) {
+        console.warn(`[rematch-deposits] Path A BQ query failed: ${e.message}`);
+      }
+    }
+
+    // ── Step 2b: Path B — derive check_number from summary_total.remark_code ──
+    // FALLBACK path for deposits without matched_eob_document_id.
+    // Groups by check_number (remark_code on summary_total rows).
+    const unmatchedDeposits = deposits.filter(d => !d.matched_eob_document_id && d.check_number?.trim());
+    const docFilter = eob_document_id ? `AND eob_document_id = '${eob_document_id}'` : '';
+
+    // checkMap: check_number → { checkTotal, docId }
+    const checkMap = new Map<string, { checkTotal: number; docId: string }>();
+
+    if (unmatchedDeposits.length > 0 || docCheckMap.size === 0) {
+      // Run Path B if there are unmatched deposits, or as a safety net if Path A found nothing
+      try {
+        const checkRows = await bqQuery(gToken, `
+          SELECT
+            check_number,
+            MAX(CAST(check_total_amount AS FLOAT64)) AS check_total,
+            ANY_VALUE(eob_doc_id)                    AS eob_doc_id
+          FROM (
+            SELECT
+              li.eob_document_id  AS eob_doc_id,
+              st.remark_code      AS check_number,
+              st.paid_amount      AS check_total_amount
+            FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_line_items\` li
+            LEFT JOIN (
+              SELECT
+                eob_document_id,
+                remark_code,
+                paid_amount,
+                ROW_NUMBER() OVER (PARTITION BY eob_document_id ORDER BY page_number DESC) AS rn
+              FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_line_items\`
+              WHERE line_type = 'summary_total'
+            ) st ON li.eob_document_id = st.eob_document_id AND st.rn = 1
+            WHERE li.line_type    != 'summary_total'
+              AND li.practice_id   = '${practice_id}'
+              ${docFilter}
+          )
+          WHERE check_number       IS NOT NULL
+            AND check_total_amount IS NOT NULL
+          GROUP BY check_number
+        `);
+
+        for (const row of checkRows) {
+          if (row.check_number) {
+            checkMap.set(row.check_number.trim(), {
+              checkTotal: parseFloat(row.check_total) || 0,
+              docId: row.eob_doc_id || '',
+            });
+          }
+        }
+        console.info(`[rematch-deposits] Path B: loaded ${checkMap.size} check totals from BQ by check_number`);
+      } catch (e: any) {
+        console.warn(`[rematch-deposits] Path B BQ query skipped: ${e.message}`);
+      }
+    }
+
+    if (docCheckMap.size === 0 && checkMap.size === 0) {
+      console.warn(`[rematch-deposits] No check totals found via either path for practice=${practice_id}`);
+      return json({
+        updated: 0,
+        matched: 0,
+        discrepancies: 0,
+        unchanged: 0,
+        warning: 'No check totals found in BigQuery — documents may still be processing or have no summary totals',
+      });
+    }
+
     // ── Step 3: Recompute and update changed rows ───────────────────────────
     let updated = 0, matched = 0, discrepancies = 0, unchanged = 0;
     const details: any[] = [];
 
     for (const dep of deposits) {
-      const checkNum = dep.check_number?.trim();
-      if (!checkNum) continue; // skip deposits with no check number
+      // Determine BQ check total — Path A first, then Path B fallback
+      let bqCheckTotal: number | undefined;
+      let resolvedDocId = dep.matched_eob_document_id || '';
 
-      const bqMatch = checkMap.get(checkNum);
-      if (!bqMatch) continue; // check number not in BQ — leave as-is
+      // Path A: match by matched_eob_document_id
+      if (dep.matched_eob_document_id && docCheckMap.has(dep.matched_eob_document_id)) {
+        bqCheckTotal = docCheckMap.get(dep.matched_eob_document_id);
+      }
 
-      const newDelta  = Math.round((Number(dep.amount) - bqMatch.checkTotal) * 100) / 100;
+      // Path B: fall back to check_number
+      if (bqCheckTotal === undefined) {
+        const checkNum = dep.check_number?.trim();
+        if (checkNum) {
+          const checkMatch = checkMap.get(checkNum);
+          if (checkMatch) {
+            bqCheckTotal = checkMatch.checkTotal;
+            resolvedDocId = checkMatch.docId || dep.matched_eob_document_id || '';
+          }
+        }
+      }
+
+      if (bqCheckTotal === undefined) continue; // no BQ data for this deposit
+
+      const newDelta  = Math.round((Number(dep.amount) - bqCheckTotal) * 100) / 100;
       const newStatus = Math.abs(newDelta) < 0.01 ? 'matched' : 'discrepancy';
       const oldDelta  = dep.match_delta === null ? null : Number(dep.match_delta);
       const oldStatus = dep.match_status;
@@ -232,9 +290,9 @@ Deno.serve(async (req) => {
       const { error: updateErr } = await supabase
         .from('bank_deposits')
         .update({
-          match_delta:              newDelta,
-          match_status:             newStatus,
-          matched_eob_document_id:  bqMatch.docId || dep.matched_eob_document_id,
+          match_delta:             newDelta,
+          match_status:            newStatus,
+          matched_eob_document_id: resolvedDocId || dep.matched_eob_document_id,
         })
         .eq('id', dep.id);
 
@@ -248,17 +306,19 @@ Deno.serve(async (req) => {
       if (newStatus === 'discrepancy') discrepancies++;
 
       details.push({
-        deposit_id:     dep.id,
-        check_number:   checkNum,
-        bank_amount:    Number(dep.amount),
-        bq_check_total: bqMatch.checkTotal,
-        old_delta:      oldDelta,
-        new_delta:      newDelta,
-        old_status:     oldStatus,
-        new_status:     newStatus,
+        deposit_id:      dep.id,
+        check_number:    dep.check_number || null,
+        eob_document_id: resolvedDocId,
+        bank_amount:     Number(dep.amount),
+        bq_check_total:  bqCheckTotal,
+        old_delta:       oldDelta,
+        new_delta:       newDelta,
+        old_status:      oldStatus,
+        new_status:      newStatus,
+        path:            dep.matched_eob_document_id && docCheckMap.has(dep.matched_eob_document_id) ? 'A' : 'B',
       });
 
-      console.info(`[rematch-deposits] Updated ${checkNum}: delta ${oldDelta} → ${newDelta}, status ${oldStatus} → ${newStatus}`);
+      console.info(`[rematch-deposits] Updated deposit ${dep.id} (${dep.check_number || 'no check#'}): delta ${oldDelta} → ${newDelta}, status ${oldStatus} → ${newStatus}`);
     }
 
     console.info(`[rematch-deposits] Done: updated=${updated} matched=${matched} discrepancies=${discrepancies} unchanged=${unchanged}`);
