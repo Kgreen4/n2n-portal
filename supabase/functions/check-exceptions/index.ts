@@ -113,54 +113,68 @@ Deno.serve(async (req) => {
     let hasFoundRevenue = false;
 
     // ── Check 1: Reconciliation status (math variance / no check total) ──
-    const reconRows = await bqQuery(gToken, `
-      SELECT reconciliation_status, reconciliation_delta
-      FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_reconciliation\`
-      WHERE eob_document_id = '${eob_document_id}'
-      LIMIT 1
-    `);
+    // Uses eob_reconciliation view; skipped gracefully if view doesn't exist yet.
+    try {
+      const reconRows = await bqQuery(gToken, `
+        SELECT reconciliation_status, reconciliation_delta
+        FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_reconciliation\`
+        WHERE eob_document_id = '${eob_document_id}'
+        LIMIT 1
+      `);
 
-    if (reconRows.length > 0) {
-      const recon = reconRows[0];
-      if (recon.reconciliation_status === 'unbalanced') {
-        reasons.push('math_variance');
-        console.info(`[check-exceptions] math_variance: delta=${recon.reconciliation_delta}`);
+      if (reconRows.length > 0) {
+        const recon = reconRows[0];
+        if (recon.reconciliation_status === 'unbalanced') {
+          reasons.push('math_variance');
+          console.info(`[check-exceptions] math_variance: delta=${recon.reconciliation_delta}`);
+        }
+        if (recon.reconciliation_status === 'no_check_total') {
+          reasons.push('no_check_total');
+          console.info(`[check-exceptions] no_check_total`);
+        }
+      } else {
+        console.warn(`[check-exceptions] No reconciliation row found for ${eob_document_id}`);
       }
-      if (recon.reconciliation_status === 'no_check_total') {
-        reasons.push('no_check_total');
-        console.info(`[check-exceptions] no_check_total`);
-      }
-    } else {
-      // No reconciliation row means no line items at all — unusual
-      console.warn(`[check-exceptions] No reconciliation row found for ${eob_document_id}`);
+    } catch (e: any) {
+      console.warn(`[check-exceptions] Check 1 (reconciliation) skipped: ${e.message}`);
+    }
+
+    // ── Checks 2, 3, 5 use eob_payment_items; inline the view logic so we
+    //    don't depend on the view existing in BigQuery.
+    // Inline query: non-summary rows from eob_line_items for this document.
+    let paymentItemRows: any[] = [];
+    try {
+      paymentItemRows = await bqQuery(gToken, `
+        SELECT
+          line_type,
+          claim_number,
+          confidence_score,
+          paid_amount
+        FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_line_items\`
+        WHERE eob_document_id = '${eob_document_id}'
+          AND line_type != 'summary_total'
+      `);
+    } catch (e: any) {
+      console.warn(`[check-exceptions] Payment items query skipped: ${e.message}`);
     }
 
     // ── Check 2: Missing claim numbers on medical_service lines ──
-    const missingClaimRows = await bqQuery(gToken, `
-      SELECT COUNT(*) as cnt
-      FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_payment_items\`
-      WHERE eob_document_id = '${eob_document_id}'
-        AND line_type = 'medical_service'
-        AND claim_number IS NULL
-    `);
-
-    if (missingClaimRows.length > 0 && parseInt(missingClaimRows[0].cnt) > 0) {
+    const missingClaimCount = paymentItemRows.filter(
+      r => r.line_type === 'medical_service' && !r.claim_number
+    ).length;
+    if (missingClaimCount > 0) {
       reasons.push('missing_claim_id');
-      console.info(`[check-exceptions] missing_claim_id: ${missingClaimRows[0].cnt} lines`);
+      console.info(`[check-exceptions] missing_claim_id: ${missingClaimCount} lines`);
     }
 
     // ── Check 3: Low confidence items (below 85) ──
-    const lowConfRows = await bqQuery(gToken, `
-      SELECT COUNT(*) as cnt, MIN(confidence_score) as min_score
-      FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_payment_items\`
-      WHERE eob_document_id = '${eob_document_id}'
-        AND confidence_score IS NOT NULL
-        AND confidence_score < 85
-    `);
-
-    if (lowConfRows.length > 0 && parseInt(lowConfRows[0].cnt) > 0) {
+    const lowConfItems = paymentItemRows.filter(
+      r => r.confidence_score !== null && r.confidence_score !== undefined && parseFloat(r.confidence_score) < 85
+    );
+    if (lowConfItems.length > 0) {
+      const minScore = Math.min(...lowConfItems.map(r => parseFloat(r.confidence_score)));
       reasons.push('low_confidence');
-      console.info(`[check-exceptions] low_confidence: ${lowConfRows[0].cnt} items, min=${lowConfRows[0].min_score}`);
+      console.info(`[check-exceptions] low_confidence: ${lowConfItems.length} items, min=${minScore}`);
     }
 
     // ── Check 4: Partial failure (from Postgres) ──
@@ -176,16 +190,11 @@ Deno.serve(async (req) => {
     }
 
     // ── Check 5: Found Revenue (incentive_bonus line items) ──
-    const revenueRows = await bqQuery(gToken, `
-      SELECT COUNT(*) as cnt, SUM(CAST(paid_amount AS FLOAT64)) as total_revenue
-      FROM \`${BQ_PROJECT}.${BQ_DATASET}.eob_payment_items\`
-      WHERE eob_document_id = '${eob_document_id}'
-        AND line_type = 'incentive_bonus'
-    `);
-
-    if (revenueRows.length > 0 && parseInt(revenueRows[0].cnt) > 0) {
+    const bonusItems = paymentItemRows.filter(r => r.line_type === 'incentive_bonus');
+    if (bonusItems.length > 0) {
       hasFoundRevenue = true;
-      console.info(`[check-exceptions] Found Revenue! ${revenueRows[0].cnt} bonus items, $${revenueRows[0].total_revenue}`);
+      const totalRevenue = bonusItems.reduce((s, r) => s + (parseFloat(r.paid_amount) || 0), 0);
+      console.info(`[check-exceptions] Found Revenue! ${bonusItems.length} bonus items, $${totalRevenue}`);
     }
 
     // ── Update Postgres ──
@@ -213,6 +222,31 @@ Deno.serve(async (req) => {
     };
 
     console.info(`[check-exceptions] Result:`, JSON.stringify(result));
+
+    // ── Auto-refresh bank reconciliation ────────────────────────────────────
+    // Fire rematch-deposits so bank_deposits.match_delta reflects the latest
+    // BQ extraction. Non-blocking — does not affect the check-exceptions response.
+    const { data: docForRematch } = await supabase
+      .from('eob_documents')
+      .select('practice_id')
+      .eq('id', eob_document_id)
+      .single();
+
+    if (docForRematch?.practice_id) {
+      fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/rematch-deposits`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          practice_id:     docForRematch.practice_id,
+          eob_document_id: eob_document_id,
+        }),
+      })
+        .then(r => console.info(`[check-exceptions] rematch-deposits fired: HTTP ${r.status}`))
+        .catch(err => console.warn(`[check-exceptions] rematch-deposits fire failed: ${err.message}`));
+    }
 
     return new Response(JSON.stringify(result), {
       status: 200,
