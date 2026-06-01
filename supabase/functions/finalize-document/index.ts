@@ -44,11 +44,21 @@ function isValidCheckId(s: string | null | undefined): boolean {
   return /^\d{4,}/.test(t) || /^(CHK|EFT|ACH|TRN|TRACE|CHECK)[-\s]/i.test(t);
 }
 
+// Strict check for claim_number fallback: only accept explicit check/EFT prefix formats.
+// ICN/DCN payer references are bare digit strings (e.g., "202611900110708") and are NOT
+// prefixed with CHK/EFT/ACH/etc., so this gate prevents ICN pollution while still handling
+// any edge-case payer that writes a prefixed check ID into claim_number.
+function hasExplicitCheckPrefix(s: string | null | undefined): boolean {
+  if (!s) return false;
+  return /^(CHK|EFT|ACH|TRN|TRACE|CHECK)[-\s]/i.test(s.trim());
+}
+
 // Extract check/EFT identifier from summary_total rows.
-// Only remark_code is consulted — that's where Gemini places check/EFT numbers on summary rows.
-// claim_number is an ICN/DCN (payer internal claim reference), never a check identifier here.
-function extractCheckId(remark_code: string | null): string | null {
+// Primary: remark_code — Gemini places check/EFT numbers here on summary_total rows.
+// Fallback: claim_number, only when it carries an explicit check/EFT prefix (never bare digits).
+function extractCheckId(remark_code: string | null, claim_number: string | null): string | null {
   if (isValidCheckId(remark_code)) return remark_code!.trim();
+  if (hasExplicitCheckPrefix(claim_number)) return claim_number!.trim();
   return null;
 }
 
@@ -74,7 +84,7 @@ Deno.serve(async (req) => {
     // ── PASS 1: Fetch all rows ordered by page ─────────────────────────────
     const { data: rows, error: fetchErr } = await supabase
       .from('eob_line_items')
-      .select('id, page_number, line_type, remark_code, source_check_number')
+      .select('id, page_number, line_type, remark_code, claim_number, source_check_number')
       .eq('eob_document_id', eob_document_id)
       .order('page_number', { ascending: true });
 
@@ -92,7 +102,7 @@ Deno.serve(async (req) => {
 
     for (const row of rows) {
       if (row.line_type === 'summary_total') {
-        const checkId = extractCheckId(row.remark_code);
+        const checkId = extractCheckId(row.remark_code, row.claim_number);
         if (checkId) {
           // First-write-wins: if multiple summary_total rows share a page, keep the
           // identifier from the first one encountered (rows are ordered by page_number ASC).
