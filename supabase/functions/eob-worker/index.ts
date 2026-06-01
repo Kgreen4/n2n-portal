@@ -24,6 +24,11 @@ try {
 // Threshold: pages with fewer "meaningful" characters fall back to vision mode.
 // Typical digital-native EOB page yields 500-2000 chars; scanned yields <50.
 const DIGITAL_NATIVE_MIN_CHARS = 150;
+// Numeric density guard: if >35% of meaningful chars are digits, the page is a
+// financial claim grid (amounts, DOS dates, claim IDs packed in columns). unpdf
+// loses the column alignment, producing a number stream Gemini can't parse.
+// Force VISION mode so Gemini sees the actual visual table structure.
+const FINANCIAL_GRID_DIGIT_RATIO = 0.35;
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -499,11 +504,19 @@ Deno.serve(async (req) => {
 
         // Count meaningful characters (letters, digits, common EOB symbols)
         const meaningfulChars = (rawText.match(/[a-zA-Z0-9$.,\-\/:()|]/g) || []).length;
+        const digitChars = (rawText.match(/\d/g) || []).length;
+        const digitDensity = meaningfulChars > 0 ? digitChars / meaningfulChars : 0;
+        const isFinancialGrid = digitDensity > FINANCIAL_GRID_DIGIT_RATIO;
 
-        if (meaningfulChars >= DIGITAL_NATIVE_MIN_CHARS) {
+        if (meaningfulChars >= DIGITAL_NATIVE_MIN_CHARS && !isFinancialGrid) {
+          // Digital-native prose page (low digit density) — text extraction is reliable
           pageTextContent = rawText.trim();
           extractionMode = 'text';
-          console.info(`[eob-worker] page ${job.page_number}: digital-native (${meaningfulChars} chars) → TEXT mode`);
+          console.info(`[eob-worker] page ${job.page_number}: digital-native prose (${meaningfulChars} chars, ${Math.round(digitDensity * 100)}% digits) → TEXT mode`);
+        } else if (isFinancialGrid) {
+          // Financial claim grid: unpdf loses column alignment → Gemini can't map amounts.
+          // Always use VISION so Gemini sees the visual table structure.
+          console.info(`[eob-worker] page ${job.page_number}: financial grid (${Math.round(digitDensity * 100)}% digits, ${meaningfulChars} chars) → VISION mode (column layout preserved)`);
         } else {
           console.info(`[eob-worker] page ${job.page_number}: scanned/sparse (${meaningfulChars} chars) → VISION mode`);
         }
