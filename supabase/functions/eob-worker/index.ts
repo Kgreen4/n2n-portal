@@ -416,6 +416,18 @@ IMPORTANT — Legend / Footnote Code Explanations:
   • CO suffix → the amount relates to contractual_adjustment
 - When you see a "Patient Resp" or "Patient Responsibility" column on the EOB, map that value to the patient_responsibility field.
 
+IMPORTANT — BCBS of Arizona "Payment Detail" Pages (check-stub → detail-page pairs):
+Large BCBS of Arizona EOBs commonly use a two-page pattern for each payment:
+  PAGE A — Check Stub: shows the check or EFT number, payment date, and check total. Extract as summary_total with remark_code = check/EFT number.
+  PAGE B — Payment Detail: immediately follows the check stub and lists every claim paid by that check in a compact table — typically: Patient Name | Claim # (ICN) | Date of Service | Billed | Allowed | Paid | Remark Codes. This page often DOES NOT repeat the check number and DOES NOT show CPT codes — it summarises at the claim level.
+
+CRITICAL RULES for Payment Detail pages:
+- Extract EVERY row in the table as a separate medical_service item, even when no CPT code is visible. Set cpt_code to null — do NOT skip the row.
+- Do NOT return {"items": []} for a page that shows a table of patients, claim numbers, dates, and dollar amounts. That IS claim data and MUST be extracted.
+- A large dollar amount per row ($1,000+) does not make a row a "summary_total" — it is still a medical_service row if it represents a specific claim.
+- The absence of a check number on the detail page is expected — it appeared on the preceding check stub page. Extract claim rows without it.
+- If the page shows a per-claim roster without individual CPT/service-line breakdowns, extract one medical_service item per claim row (one row per patient/claim, not per service line).
+
 IMPORTANT — MCO / Managed Care Remittance Formats (Mercy Care, Aetna, UnitedHealthcare, Humana, etc.):
 Many Managed Care Organizations use a compact grid-style remittance layout that differs significantly from standard BCBS-style EOBs. Follow these rules when you encounter MCO-style documents:
 
