@@ -44,11 +44,11 @@ function isValidCheckId(s: string | null | undefined): boolean {
   return /^\d{4,}/.test(t) || /^(CHK|EFT|ACH|TRN|TRACE|CHECK)[-\s]/i.test(t);
 }
 
-// Prefer remark_code on summary_total rows (that's where Gemini puts check/EFT numbers).
-// Fall back to claim_number if remark_code isn't a valid check identifier.
-function extractCheckId(remark_code: string | null, claim_number: string | null): string | null {
+// Extract check/EFT identifier from summary_total rows.
+// Only remark_code is consulted — that's where Gemini places check/EFT numbers on summary rows.
+// claim_number is an ICN/DCN (payer internal claim reference), never a check identifier here.
+function extractCheckId(remark_code: string | null): string | null {
   if (isValidCheckId(remark_code)) return remark_code!.trim();
-  if (isValidCheckId(claim_number)) return claim_number!.trim();
   return null;
 }
 
@@ -74,7 +74,7 @@ Deno.serve(async (req) => {
     // ── PASS 1: Fetch all rows ordered by page ─────────────────────────────
     const { data: rows, error: fetchErr } = await supabase
       .from('eob_line_items')
-      .select('id, page_number, line_type, remark_code, claim_number, source_check_number')
+      .select('id, page_number, line_type, remark_code, source_check_number')
       .eq('eob_document_id', eob_document_id)
       .order('page_number', { ascending: true });
 
@@ -92,9 +92,13 @@ Deno.serve(async (req) => {
 
     for (const row of rows) {
       if (row.line_type === 'summary_total') {
-        const checkId = extractCheckId(row.remark_code, row.claim_number);
+        const checkId = extractCheckId(row.remark_code);
         if (checkId) {
-          pageCheckMap.set(row.page_number, checkId);
+          // First-write-wins: if multiple summary_total rows share a page, keep the
+          // identifier from the first one encountered (rows are ordered by page_number ASC).
+          if (!pageCheckMap.has(row.page_number)) {
+            pageCheckMap.set(row.page_number, checkId);
+          }
           if (!allCheckIds.includes(checkId)) allCheckIds.push(checkId);
         }
       }
