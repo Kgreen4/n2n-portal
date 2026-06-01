@@ -427,6 +427,7 @@ CRITICAL RULES for Payment Detail pages:
 - A large dollar amount per row ($1,000+) does not make a row a "summary_total" — it is still a medical_service row if it represents a specific claim.
 - The absence of a check number on the detail page is expected — it appeared on the preceding check stub page. Extract claim rows without it.
 - If the page shows a per-claim roster without individual CPT/service-line breakdowns, extract one medical_service item per claim row (one row per patient/claim, not per service line).
+- NEVER extract a summary_total row from a Payment Detail page. The "Total", "Total Paid", or "Grand Total" line that sometimes appears at the bottom of a detail page is a page footer — omit it entirely. Only Check Stub pages produce summary_total rows. If you extract the grand total from a detail page as summary_total, the same check amount will be counted twice (once from the stub, once from the detail) and the deposit total will be wrong.
 
 IMPORTANT — MCO / Managed Care Remittance Formats (Mercy Care, Aetna, UnitedHealthcare, Humana, etc.):
 Many Managed Care Organizations use a compact grid-style remittance layout that differs significantly from standard BCBS-style EOBs. Follow these rules when you encounter MCO-style documents:
