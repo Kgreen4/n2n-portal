@@ -223,9 +223,28 @@ Deno.serve(async (req) => {
 
     console.info(`[check-exceptions] Result:`, JSON.stringify(result));
 
+    // ── Document-Level Context Stitching ────────────────────────────────────
+    // Resolve source_check_number for all rows before deposit rematch so that
+    // rematch-deposits can join service lines to bank deposits by check identifier.
+    // Awaited synchronously — finalize-document is fast and rematch needs the data.
+    try {
+      const finalizeResp = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/finalize-document`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ eob_document_id }),
+      });
+      const finalizeResult = await finalizeResp.json();
+      console.info(`[check-exceptions] finalize-document: ${JSON.stringify(finalizeResult)}`);
+    } catch (finalErr: any) {
+      console.warn(`[check-exceptions] finalize-document failed (non-fatal): ${finalErr.message}`);
+    }
+
     // ── Auto-refresh bank reconciliation ────────────────────────────────────
     // Fire rematch-deposits so bank_deposits.match_delta reflects the latest
-    // BQ extraction. Non-blocking — does not affect the check-exceptions response.
+    // extracted data. Non-blocking — does not affect the check-exceptions response.
     const { data: docForRematch } = await supabase
       .from('eob_documents')
       .select('practice_id')
