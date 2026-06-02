@@ -181,7 +181,89 @@ export default function ReportsPage() {
   }, [period, refreshKey])
 
   // ── Aggregations ──────────────────────────────────────────────
-  const medicalItems = items.filter(i => i.line_type === 'medical_service' || i.line_type === null)
+  //
+  // medicalItems is built in four steps to handle Provider Summary Roster pages
+  // (e.g. BCBS pages 106-110) that appear at the end of a payment block.
+  // These roster pages duplicate claim-level totals already captured in the
+  // per-CPT detail pages above them. We must not double-count them.
+  //
+  // STEP A — Raw medical_service pool (identical to the old single-line filter)
+  const rawMedicalItems = items.filter(i => i.line_type === 'medical_service' || i.line_type === null)
+
+  // STEP B — Roster rows (populated ONLY after eob-worker is reprocessed with the
+  // roster_summary prompt; empty for all legacy data extracted before this change)
+  const rosterItems = items.filter(i => i.line_type === 'roster_summary')
+
+  // STEP C — Pre-reprocess safety-net dedup ──────────────────────────────────
+  // Before the file is reprocessed with the new prompt, roster pages are still in
+  // rawMedicalItems as "thin" rows: claim_number + paid_amount, but no CPT code
+  // and no date_of_service. Drop any thin row when a richer row already exists
+  // for the same (eob_document_id, claim_number) pair within the document.
+  // "Rich" = has a real CPT code (not "SUMMARY") AND a date_of_service.
+  // "Thin" = missing CPT code or date_of_service (the summary-roster profile).
+  //
+  // This safely no-ops on claims that genuinely lack DOS (unusual but possible)
+  // because those claims will have no matching rich row and pass through unchanged.
+  const claimsWithDetail = new Set<string>()
+  for (const item of rawMedicalItems) {
+    if (!item.claim_number || !item.eob_document_id) continue
+    const isRich = item.cpt_code && item.cpt_code !== 'SUMMARY' && item.date_of_service
+    if (isRich) claimsWithDetail.add(`${item.eob_document_id}||${item.claim_number}`)
+  }
+
+  const dedupedMedicalItems = rawMedicalItems.filter(item => {
+    if (!item.claim_number || !item.eob_document_id) return true  // no key → can't dedup, keep
+    const key = `${item.eob_document_id}||${item.claim_number}`
+    if (!claimsWithDetail.has(key)) return true  // no rich row exists → keep this row
+    // A rich row exists for this claim. Keep ONLY if this row is also rich.
+    const isRich = item.cpt_code && item.cpt_code !== 'SUMMARY' && item.date_of_service
+    return !!isRich
+  })
+
+  // STEP D — Post-reprocess roster_summary cross-reference ───────────────────
+  // Once the document is reprocessed with the new prompt, roster pages produce
+  // roster_summary rows instead of medical_service rows. Cross-reference them:
+  //   • Roster row matches a detail row   → verify amounts, DROP roster row
+  //   • Roster row has NO matching detail → promote to medical_service (backfill)
+  //
+  // Pre-build a sum-of-paid-amounts map per (doc + claim_number) for variance checks.
+  // A single claim can have multiple CPT lines; the roster total = sum of all lines.
+  const detailPaidSumByKey = new Map<string, number>()
+  for (const item of dedupedMedicalItems) {
+    if (!item.claim_number || !item.eob_document_id) continue
+    const key = `${item.eob_document_id}||${item.claim_number}`
+    detailPaidSumByKey.set(key, (detailPaidSumByKey.get(key) ?? 0) + (item.paid_amount ?? 0))
+  }
+
+  const backfillItems: LineItem[] = []
+  for (const roster of rosterItems) {
+    if (!roster.claim_number || !roster.eob_document_id) continue
+    const key = `${roster.eob_document_id}||${roster.claim_number}`
+    const detailSum = detailPaidSumByKey.get(key)
+    if (detailSum !== undefined) {
+      // Detail row exists — validate amounts and drop roster row
+      const rosterPaid = roster.paid_amount ?? 0
+      const variance = Math.abs(detailSum - rosterPaid)
+      if (variance > 0.01) {
+        console.warn(
+          `[Reports Reconcile] Amount variance on claim# "${roster.claim_number}": ` +
+          `detail total=${fmtDec(detailSum)} vs roster=${fmtDec(rosterPaid)} ` +
+          `(Δ${fmtDec(variance)}) | doc=${roster.eob_document_id}`
+        )
+      }
+      // Drop the roster row — detail is the authoritative source
+    } else {
+      // No detail row found — backfill this claim to plug the revenue gap
+      console.warn(
+        `[Reports Reconcile] Backfilling orphan claim# "${roster.claim_number}" ` +
+        `from roster_summary (no detail row found) | paid=${fmtDec(roster.paid_amount ?? 0)} ` +
+        `| doc=${roster.eob_document_id}`
+      )
+      backfillItems.push({ ...roster, line_type: 'medical_service' })
+    }
+  }
+
+  const medicalItems = [...dedupedMedicalItems, ...backfillItems]
 
   const totalBilled      = medicalItems.reduce((s, i) => s + (i.billed_amount ?? 0), 0)
   const totalPaid        = medicalItems.reduce((s, i) => s + (i.paid_amount   ?? 0), 0)
@@ -465,8 +547,9 @@ export default function ReportsPage() {
       .sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap))
   })()
 
-  // Filtered + paginated items for the table (exclude summary_total rows — those appear in Deposit Summary)
-  const serviceItems = items.filter(i => i.line_type !== 'summary_total')
+  // Filtered + paginated items for the table (exclude summary_total rows — those appear in Deposit Summary;
+  // exclude roster_summary rows — aggregate roster pages are cross-referenced into medicalItems above)
+  const serviceItems = items.filter(i => i.line_type !== 'summary_total' && i.line_type !== 'roster_summary')
   const filtered = serviceItems.filter(i => {
     if (!search) return true
     const q = search.toLowerCase()

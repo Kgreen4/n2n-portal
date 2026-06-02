@@ -289,7 +289,7 @@ FIRST — Identify the document type for this page:
 - COVER PAGE: Contains only headers, instructions, or administrative info with no extractable data
 
 Return a JSON object with an 'items' array. Each item must include these fields (use null if not found):
-- line_type: "medical_service" for standard claims, "incentive_bonus" for MIPS/quality bonuses, "adjustment" for payment adjustments, "summary_total" for check/payment totals
+- line_type: "medical_service" for standard claims, "incentive_bonus" for MIPS/quality bonuses, "adjustment" for payment adjustments, "summary_total" for check/payment totals, "roster_summary" for provider summary roster aggregate pages (see IMPORTANT — Provider Summary Roster Pages below)
 - patient_name: Full name of the patient
 - member_id: Member/subscriber ID number
 - date_of_service: Date service was provided (format: YYYY-MM-DD)
@@ -356,6 +356,15 @@ IMPORTANT — Legend / Footnote Code Explanations:
   • OA suffix → the amount relates to coinsurance_amount or adjustment_amount
   • CO suffix → the amount relates to contractual_adjustment
 - When you see a "Patient Resp" or "Patient Responsibility" column on the EOB, map that value to the patient_responsibility field.
+
+IMPORTANT — Provider Summary Roster Pages:
+- Some payers (e.g. BCBS) print aggregate Provider Summary Roster pages at the END of a payment block. These pages are a high-level recap and contain ONLY: Claim #, Amount Paid, and Patient Responsibility — with NO dates of service, NO CPT/HCPCS procedure codes, NO billed amounts, and NO allowed amounts.
+- Distinguishing features: a narrow table with only 3–4 columns (Claim #, Amount Paid, Patient Responsibility, and sometimes Rendering Provider or NPI); no service-date column; often labeled "Provider Summary", "Summary Roster", "Provider Roster", or similar at the top of the page.
+- For EVERY row on a Provider Summary Roster page, set line_type to "roster_summary".
+- Extract: claim_number, paid_amount, patient_responsibility, rendering_provider_npi (if present), payer_name (from header). Set cpt_code, date_of_service, billed_amount, allowed_amount, and all other fields to null.
+- Do NOT emit a summary_total row for the grand total line on a roster page. Omit any page-level total rows entirely.
+- CRITICAL: NEVER set line_type to "medical_service" for a roster page row, even though it looks like a claim row. The definitive indicator of a roster page is the complete absence of CPT/HCPCS codes and dates of service across all rows on the page.
+- The frontend cross-references roster_summary rows against the detail medical_service rows already extracted from earlier pages. Roster rows that match an existing detail row are used for validation only (dropped from totals). Roster rows with NO matching detail row are promoted as backfill to plug revenue gaps. Correct tagging here is essential for accurate reconciliation.
 
 Other instructions:
 - Extract EVERY line item on the page, do not skip any
