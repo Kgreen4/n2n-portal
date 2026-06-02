@@ -262,19 +262,18 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
 - [ ] Resolve duplicate AZHS practice — confirm if `aa000001` (no user) should be
       deleted or if Keith's user should be linked to it ⬅ CLARIFY WITH KEITH
 - [ ] Configure n8n eob-sweeper trigger (credential ID not set) — recovery for stuck jobs
-- [ ] Upgrade Supabase to Pro — required for HIPAA BAA ⚠️ URGENT — PHI on free plan
+- [x] Upgrade Supabase to Pro — HIPAA BAA enabled ✅
 - [ ] Sign BAA with Supabase
 - [ ] Sign BAA with Dr. Ravi (Keith's responsibility)
-- [ ] Rotate Supabase service role key (was shared in chat session)
+- [x] Rotate Supabase service role key ✅
 
 ---
 
 ## KNOWN ISSUES
 
-- **URGENT:** Supabase on FREE plan — PHI is live. Upgrade to Pro for HIPAA BAA.
 - `cardio-metrics-dev` named dev but is production. Treat as production.
 - n8n workflow not yet run end-to-end with real files — biller data pending.
-- Supabase service role key was shared in a Claude chat session — rotate it.
+- Supabase BAA still needs to be signed (Pro plan is active, BAA signature pending).
 - n8n eob-sweeper trigger not yet configured (credential ID missing) — stuck
   queued jobs require manual UI reprocess until this is set up.
 - AZHS duplicate practice: two rows in `practices` / `practice_settings` for AZHS.
