@@ -111,6 +111,8 @@ export default function ReportsPage() {
   const [reprocessingDocs, setReprocessingDocs] = useState<Set<string>>(new Set())
   const [reprocessedDocs, setReprocessedDocs] = useState<Set<string>>(new Set())
   const [reprocessError, setReprocessError] = useState<string | null>(null)
+  // Polled from eob_documents.status — persists across navigations unlike reprocessingDocs
+  const [docStatuses, setDocStatuses] = useState<Map<string, string>>(new Map())
 
   useEffect(() => {
     let cancelled = false
@@ -417,6 +419,60 @@ export default function ReportsPage() {
       .sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap))
   })()
 
+  // Stable string key built from the current gap-row document IDs.
+  // Changing IDs (e.g. a gap row disappears after reprocess) re-runs the
+  // polling effect; stable IDs keep the interval alive without re-mounting.
+  const gapDocIdKey = docGapRows
+    .map(r => r.docId)
+    .filter((id): id is string => id !== null)
+    .sort()
+    .join(',')
+
+  // Poll eob_documents.status every 5 s while any gap-row document is active
+  // (processing / queued). When the last active doc transitions to done,
+  // trigger a data refresh so the gap table re-computes.
+  useEffect(() => {
+    if (!gapDocIdKey) {
+      setDocStatuses(new Map())
+      return
+    }
+    const ids = gapDocIdKey.split(',')
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let wasActive = false
+
+    async function pollStatuses() {
+      if (cancelled) return
+      const { data } = await supabase
+        .from('eob_documents')
+        .select('id, status')
+        .in('id', ids)
+      if (cancelled || !data) return
+
+      const map = new Map<string, string>()
+      for (const d of data) map.set(d.id, d.status ?? 'unknown')
+      setDocStatuses(map)
+
+      const anyActive = data.some(
+        d => d.status === 'processing' || d.status === 'queued'
+      )
+      if (anyActive) {
+        wasActive = true
+        timer = setTimeout(pollStatuses, 5000)
+      } else if (wasActive) {
+        // All docs just finished — refresh gap data once
+        wasActive = false
+        setRefreshKey(k => k + 1)
+      }
+    }
+
+    pollStatuses()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [gapDocIdKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Filtered + paginated items for the table (exclude summary_total rows — those appear in Deposit Summary)
   const serviceItems = items.filter(i => i.line_type !== 'summary_total')
   const filtered = serviceItems.filter(i => {
@@ -613,6 +669,9 @@ export default function ReportsPage() {
                     {docGapRows.map((row, idx) => {
                       const isReprocessing = row.docId ? reprocessingDocs.has(row.docId) : false
                       const wasReprocessed = row.docId ? reprocessedDocs.has(row.docId) : false
+                      // DB-polled status — survives navigation (unlike reprocessingDocs)
+                      const docStatus = row.docId ? (docStatuses.get(row.docId) ?? null) : null
+                      const isActive = isReprocessing || docStatus === 'processing' || docStatus === 'queued'
                       return (
                         <tr key={idx} className="hover:bg-amber-50/40">
                           <td className="px-5 py-2.5 text-gray-800 max-w-[320px] truncate" title={row.sourceDoc}>
@@ -624,12 +683,20 @@ export default function ReportsPage() {
                           <td className="px-5 py-2.5 text-right">
                             {!row.docId ? (
                               <span className="text-gray-300 text-xs">—</span>
-                            ) : wasReprocessed && !isReprocessing ? (
+                            ) : isActive ? (
+                              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600">
+                                <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                </svg>
+                                {isReprocessing ? 'Reprocessing…' : 'Processing…'}
+                              </span>
+                            ) : wasReprocessed ? (
                               <span className="inline-flex items-center gap-1 text-xs font-medium text-green-700">
                                 <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth="2.5" stroke="currentColor">
                                   <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
                                 </svg>
-                                Queued
+                                Done ✓
                               </span>
                             ) : (
                               <button
@@ -638,17 +705,7 @@ export default function ReportsPage() {
                                 className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm transition-colors"
                                 title="Re-extract this document to close the gap"
                               >
-                                {isReprocessing ? (
-                                  <>
-                                    <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
-                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                                    </svg>
-                                    Reprocessing…
-                                  </>
-                                ) : (
-                                  <>↺ Reprocess</>
-                                )}
+                                ↺ Reprocess
                               </button>
                             )}
                           </td>
