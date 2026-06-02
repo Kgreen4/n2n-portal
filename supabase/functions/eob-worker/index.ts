@@ -289,7 +289,7 @@ FIRST — Identify the document type for this page:
 - COVER PAGE: Contains only headers, instructions, or administrative info with no extractable data
 
 Return a JSON object with an 'items' array. Each item must include these fields (use null if not found):
-- line_type: "medical_service" for standard claims, "incentive_bonus" for MIPS/quality bonuses, "adjustment" for payment adjustments, "summary_total" for check/payment totals
+- line_type: "medical_service" for standard claims, "incentive_bonus" for MIPS/quality bonuses, "adjustment" for payment adjustments, "summary_total" for check/payment totals, "roster_summary" for provider summary roster aggregate pages (see IMPORTANT — Provider Summary Roster Pages below)
 - patient_name: Full name of the patient
 - member_id: Member/subscriber ID number
 - date_of_service: Date service was provided (format: YYYY-MM-DD)
@@ -332,7 +332,8 @@ IMPORTANT — Summary/Check Pages:
 - Set paid_amount to the total check/EFT amount.
 - Set remark_code to the check number or EFT trace number (e.g., "CHK-12345" or "EFT-98765").
 - Set payment_date to the check/EFT issue date if visible.
-- If the page lists both individual claim lines AND a total, extract BOTH: the individual lines as "medical_service" and the total as "summary_total".
+- CRITICAL — when to emit summary_total: A "summary_total" row is ONLY correct when this page is a true check stub or payment-summary page — meaning it shows a check number / EFT trace / payment total but does NOT contain individual CPT/HCPCS procedure codes or service-line breakdowns. If the page has CPT/HCPCS codes or individual claim-service rows (e.g., BCBS Payment Detail pages, MCO claim-detail grids), it is a DETAIL page. Extract ONLY "medical_service" rows from it — NEVER emit a "summary_total". Any "Total", "Total Paid", or grand-total line printed at the bottom of a detail page is a page footer — omit it entirely.
+- A true check-stub page may additionally list the claims it covers at a high level (patient names + amounts, no CPT codes). In that case extract those rows as "medical_service" AND the overall check total as one "summary_total". But the presence of CPT codes anywhere on the page immediately reclassifies it as a detail page where no summary_total is allowed.
 - Do NOT double-count: the summary_total represents the check total, not an additional payment.
 
 IMPORTANT — Subtotal / Per-Claim Totals (DO NOT extract):
@@ -355,6 +356,15 @@ IMPORTANT — Legend / Footnote Code Explanations:
   • OA suffix → the amount relates to coinsurance_amount or adjustment_amount
   • CO suffix → the amount relates to contractual_adjustment
 - When you see a "Patient Resp" or "Patient Responsibility" column on the EOB, map that value to the patient_responsibility field.
+
+IMPORTANT — Provider Summary Roster Pages:
+- Some payers (e.g. BCBS) print aggregate Provider Summary Roster pages at the END of a payment block. These pages are a high-level recap and contain ONLY: Claim #, Amount Paid, and Patient Responsibility — with NO dates of service, NO CPT/HCPCS procedure codes, NO billed amounts, and NO allowed amounts.
+- Distinguishing features: a narrow table with only 3–4 columns (Claim #, Amount Paid, Patient Responsibility, and sometimes Rendering Provider or NPI); no service-date column; often labeled "Provider Summary", "Summary Roster", "Provider Roster", or similar at the top of the page.
+- For EVERY row on a Provider Summary Roster page, set line_type to "roster_summary".
+- Extract: claim_number, paid_amount, patient_responsibility, rendering_provider_npi (if present), payer_name (from header). Set cpt_code, date_of_service, billed_amount, allowed_amount, and all other fields to null.
+- Do NOT emit a summary_total row for the grand total line on a roster page. Omit any page-level total rows entirely.
+- CRITICAL: NEVER set line_type to "medical_service" for a roster page row, even though it looks like a claim row. The definitive indicator of a roster page is the complete absence of CPT/HCPCS codes and dates of service across all rows on the page.
+- The frontend cross-references roster_summary rows against the detail medical_service rows already extracted from earlier pages. Roster rows that match an existing detail row are used for validation only (dropped from totals). Roster rows with NO matching detail row are promoted as backfill to plug revenue gaps. Correct tagging here is essential for accurate reconciliation.
 
 Other instructions:
 - Extract EVERY line item on the page, do not skip any
@@ -596,6 +606,65 @@ Deno.serve(async (req) => {
       }
 
       console.info(`[eob-worker] Inserted ${rows.length} rows into BigQuery for page ${job.page_number}`);
+    }
+
+    // STEP 4c: PERSIST TO SUPABASE eob_line_items (for in-app reporting)
+    // Dual-write: BigQuery is source of truth for Looker; Supabase drives the portal Reports page.
+    // Non-fatal: BQ success is what matters; Supabase failure logs a warning and continues.
+    if (extracted.length > 0) {
+      try {
+        // Delete existing rows for this doc+page first (idempotent re-runs)
+        await supabase
+          .from('eob_line_items')
+          .delete()
+          .eq('eob_document_id', job.eob_document_id)
+          .eq('page_number', job.page_number);
+
+        const supabaseRows = extracted.map((it: any) => ({
+          eob_document_id: job.eob_document_id,
+          practice_id: practice_id,
+          page_number: job.page_number,
+          file_name: file_name,
+          line_type: it.line_type || 'medical_service',
+          patient_name: it.patient_name || null,
+          member_id: it.member_id || null,
+          date_of_service: formatBQDate(it.date_of_service),
+          cpt_code: it.cpt_code || null,
+          cpt_description: it.cpt_description || null,
+          billed_amount: parseCurrency(it.billed_amount),
+          allowed_amount: parseCurrency(it.allowed_amount),
+          paid_amount: parseCurrency(it.paid_amount),
+          patient_responsibility: parseCurrency(it.patient_responsibility),
+          rendering_provider_npi: it.rendering_provider_npi || null,
+          remark_code: it.remark_code || null,
+          remark_reason: it.remark_reason || null,
+          remark_description: it.remark_description || null,
+          claim_status: it.claim_status || null,
+          claim_number: it.claim_number || null,
+          payment_date: formatBQDate(it.payment_date),
+          payer_name: it.payer_name || null,
+          payer_id: it.payer_id || null,
+          adjustment_amount: parseCurrency(it.adjustment_amount),
+          deductible_amount: parseCurrency(it.deductible_amount),
+          coinsurance_amount: parseCurrency(it.coinsurance_amount),
+          copay_amount: parseCurrency(it.copay_amount),
+          contractual_adjustment: parseCurrency(it.contractual_adjustment),
+          non_covered_amount: parseCurrency(it.non_covered_amount),
+          confidence_score: parseInt(it.confidence_score) || null,
+        }));
+
+        const { error: sbErr } = await supabase
+          .from('eob_line_items')
+          .insert(supabaseRows);
+
+        if (sbErr) {
+          console.warn(`[eob-worker] Supabase eob_line_items insert failed (non-fatal): ${sbErr.message}`);
+        } else {
+          console.info(`[eob-worker] Inserted ${supabaseRows.length} rows into Supabase eob_line_items for page ${job.page_number}`);
+        }
+      } catch (sbEx: any) {
+        console.warn(`[eob-worker] Supabase eob_line_items exception (non-fatal): ${sbEx.message}`);
+      }
     }
 
     // STEP 5: FINALIZE — mark job as succeeded with audit data
