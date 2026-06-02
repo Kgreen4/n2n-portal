@@ -134,7 +134,7 @@ export default function ReportsPage() {
   const [reprocessingDocs, setReprocessingDocs] = useState<Set<string>>(new Set())
   const [reprocessedDocs, setReprocessedDocs] = useState<Set<string>>(new Set())
   const [reprocessError, setReprocessError] = useState<string | null>(null)
-  // Live processing_status from eob_documents — polled while any doc is in-flight
+  // Live status from eob_documents — polled while any doc is in-flight
   const [docStatuses, setDocStatuses] = useState<Map<string, string>>(new Map())
   const prevDocStatusesRef = useRef<Map<string, string>>(new Map())
 
@@ -184,7 +184,7 @@ export default function ReportsPage() {
   }, [period, refreshKey])
 
   // ── Live document-status polling ──────────────────────────────────────────
-  // After every items reload, fetch processing_status for all docs present in
+  // After every items reload, fetch status for all docs present in
   // the data, then poll every 5 s while any doc is queued or processing.
   // When a doc transitions to finished, increment refreshKey so the gap table
   // re-derives from the freshly extracted line items.
@@ -207,12 +207,12 @@ export default function ReportsPage() {
       if (cancelled) return
       const { data } = await supabase
         .from('eob_documents')
-        .select('id, processing_status')
+        .select('id, status')
         .in('id', docIds)
       if (cancelled || !data) return
 
       const newMap = new Map<string, string>()
-      for (const row of data) newMap.set(row.id, row.processing_status ?? '')
+      for (const row of data) newMap.set(row.id, row.status ?? '')
 
       // Detect transitions from in-progress → finished so we can reload line items
       let anyJustFinished = false
@@ -234,7 +234,7 @@ export default function ReportsPage() {
       }
 
       const anyInProgress = data.some(
-        r => r.processing_status === 'queued' || r.processing_status === 'processing'
+        r => r.status === 'queued' || r.status === 'processing'
       )
       if (anyInProgress) {
         pollTimer = setTimeout(fetchStatuses, 5000)
@@ -848,25 +848,8 @@ export default function ReportsPage() {
                                 </svg>
                                 Processing…
                               </span>
-                            ) : isQueuedDB || wasJustQueued ? (
-                              // DB confirmed queued (or just submitted locally)
-                              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700">
-                                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                </svg>
-                                Queued
-                              </span>
-                            ) : dbStatus === 'failed' ? (
-                              // Processing failed — offer retry
-                              <button
-                                onClick={() => handleReprocess(row.docId!)}
-                                className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium bg-white border border-red-300 text-red-700 hover:bg-red-50 shadow-sm transition-colors"
-                                title="Processing failed — click to retry"
-                              >
-                                ⚠ Failed — Retry
-                              </button>
                             ) : dbStatus === 'completed' || dbStatus === 'needs_review' ? (
-                              // Extraction finished but gap persists — show status + re-run option
+                              // DB confirmed extraction finished — authoritative, beats wasJustQueued
                               <div className="inline-flex flex-col items-end gap-1">
                                 <span className="inline-flex items-center gap-1 text-xs font-medium text-green-700">
                                   <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
@@ -882,6 +865,23 @@ export default function ReportsPage() {
                                   re-run
                                 </button>
                               </div>
+                            ) : dbStatus === 'failed' ? (
+                              // DB confirmed failed — authoritative, beats wasJustQueued
+                              <button
+                                onClick={() => handleReprocess(row.docId!)}
+                                className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium bg-white border border-red-300 text-red-700 hover:bg-red-50 shadow-sm transition-colors"
+                                title="Processing failed — click to retry"
+                              >
+                                ⚠ Failed — Retry
+                              </button>
+                            ) : isQueuedDB || wasJustQueued ? (
+                              // DB confirmed queued (or just submitted locally before first poll)
+                              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700">
+                                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                                Queued
+                              </span>
                             ) : (
                               // No status yet — offer initial reprocess
                               <button
