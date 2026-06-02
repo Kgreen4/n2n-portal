@@ -429,6 +429,25 @@ CRITICAL RULES for Payment Detail pages:
 - If the page shows a per-claim roster without individual CPT/service-line breakdowns, extract one medical_service item per claim row (one row per patient/claim, not per service line).
 - NEVER extract a summary_total row from a Payment Detail page. The "Total", "Total Paid", or "Grand Total" line that sometimes appears at the bottom of a detail page is a page footer — omit it entirely. Only Check Stub pages produce summary_total rows. If you extract the grand total from a detail page as summary_total, the same check amount will be counted twice (once from the stub, once from the detail) and the deposit total will be wrong.
 
+CRITICAL — BCBS "Section-Delimited" Remittance Pages (multi-claim pages with horizontal separators):
+Some BCBS payment detail pages organize multiple claims into SECTIONS separated by horizontal lines or rules. Each section covers one claim and has this structure:
+  ─────────────────────────────────────────────────────────
+  Claim # [XXXXXXX]  |  Patient: [Name]  |  DOS: [Date]  |  Amount Paid: $XX.XX
+    [CPT code]  [Date]  Billed: $YY.YY  Allowed: $ZZ.ZZ  Paid: $AA.AA  Remarks: [codes]
+    [CPT code]  [Date]  Billed: $YY.YY  Allowed: $ZZ.ZZ  Paid: $BB.BB  Remarks: [codes]
+  Total Paid:  $XX.XX   ← same dollar amount as "Amount Paid" in the section header above
+  ─────────────────────────────────────────────────────────
+  [next claim section begins here]
+
+CRITICAL RULES for section-delimited pages:
+1. EXTRACT CPT SERVICE LINES — Each CPT/service row inside a section is a separate medical_service item. Use the Claim # and patient name from that section's header for every row in that section.
+2. DO NOT DOUBLE-COUNT — "Amount Paid: $XX.XX" in the section HEADER and "Total Paid: $XX.XX" at the section FOOTER are THE SAME dollar amount printed twice for readability. They are not separate payments. DO NOT extract the section footer "Total Paid" or "Total" as a medical_service row — doing so would count the claim amount twice.
+3. DO NOT extract the section header "Amount Paid" as its own separate medical_service row when individual CPT service lines are present inside the section. The header is a summary label only.
+4. CHOOSE ONE LEVEL PER SECTION: If individual CPT service rows are visible inside the section (each with a "Paid" column value), extract those CPT rows. If NO individual CPT rows are visible (section shows claim-level summary only with no CPT breakdown), extract exactly ONE medical_service row for the section using the "Amount Paid" value and the Claim # as claim_number.
+5. PAID AMOUNTS ON CPT ROWS — For each CPT row, the paid_amount is the value in the "Paid" column on that specific row. Extract it as-is, even if it is $0.00. The sum of all CPT-row paid_amounts within a section should equal the section's "Amount Paid" / "Total Paid" — if they do not sum correctly, prefer the CPT-level values over the section total.
+6. PAGE GRAND TOTAL — Some pages show a grand total at the very bottom summing all sections (e.g., "Page Total: $XXX.XX" or "Total for this page: $XXX.XX"). Omit it entirely. It is a page-level footer, not a claim row, and must not be extracted as either medical_service or summary_total.
+7. ZERO PAID ROWS — Include CPT service lines where the "Paid" column is $0.00 as medical_service rows with paid_amount = 0. Do not skip them.
+
 IMPORTANT — MCO / Managed Care Remittance Formats (Mercy Care, Aetna, UnitedHealthcare, Humana, etc.):
 Many Managed Care Organizations use a compact grid-style remittance layout that differs significantly from standard BCBS-style EOBs. Follow these rules when you encounter MCO-style documents:
 
