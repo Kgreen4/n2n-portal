@@ -608,6 +608,65 @@ Deno.serve(async (req) => {
       console.info(`[eob-worker] Inserted ${rows.length} rows into BigQuery for page ${job.page_number}`);
     }
 
+    // STEP 4c: PERSIST TO SUPABASE eob_line_items (for in-app reporting)
+    // Dual-write: BigQuery is source of truth for Looker; Supabase drives the portal Reports page.
+    // Non-fatal: BQ success is what matters; Supabase failure logs a warning and continues.
+    if (extracted.length > 0) {
+      try {
+        // Delete existing rows for this doc+page first (idempotent re-runs)
+        await supabase
+          .from('eob_line_items')
+          .delete()
+          .eq('eob_document_id', job.eob_document_id)
+          .eq('page_number', job.page_number);
+
+        const supabaseRows = extracted.map((it: any) => ({
+          eob_document_id: job.eob_document_id,
+          practice_id: practice_id,
+          page_number: job.page_number,
+          file_name: file_name,
+          line_type: it.line_type || 'medical_service',
+          patient_name: it.patient_name || null,
+          member_id: it.member_id || null,
+          date_of_service: formatBQDate(it.date_of_service),
+          cpt_code: it.cpt_code || null,
+          cpt_description: it.cpt_description || null,
+          billed_amount: parseCurrency(it.billed_amount),
+          allowed_amount: parseCurrency(it.allowed_amount),
+          paid_amount: parseCurrency(it.paid_amount),
+          patient_responsibility: parseCurrency(it.patient_responsibility),
+          rendering_provider_npi: it.rendering_provider_npi || null,
+          remark_code: it.remark_code || null,
+          remark_reason: it.remark_reason || null,
+          remark_description: it.remark_description || null,
+          claim_status: it.claim_status || null,
+          claim_number: it.claim_number || null,
+          payment_date: formatBQDate(it.payment_date),
+          payer_name: it.payer_name || null,
+          payer_id: it.payer_id || null,
+          adjustment_amount: parseCurrency(it.adjustment_amount),
+          deductible_amount: parseCurrency(it.deductible_amount),
+          coinsurance_amount: parseCurrency(it.coinsurance_amount),
+          copay_amount: parseCurrency(it.copay_amount),
+          contractual_adjustment: parseCurrency(it.contractual_adjustment),
+          non_covered_amount: parseCurrency(it.non_covered_amount),
+          confidence_score: parseInt(it.confidence_score) || null,
+        }));
+
+        const { error: sbErr } = await supabase
+          .from('eob_line_items')
+          .insert(supabaseRows);
+
+        if (sbErr) {
+          console.warn(`[eob-worker] Supabase eob_line_items insert failed (non-fatal): ${sbErr.message}`);
+        } else {
+          console.info(`[eob-worker] Inserted ${supabaseRows.length} rows into Supabase eob_line_items for page ${job.page_number}`);
+        }
+      } catch (sbEx: any) {
+        console.warn(`[eob-worker] Supabase eob_line_items exception (non-fatal): ${sbEx.message}`);
+      }
+    }
+
     // STEP 5: FINALIZE — mark job as succeeded with audit data
     await supabase.rpc('succeed_eob_page_job', {
       p_page_job_id: job.id,
