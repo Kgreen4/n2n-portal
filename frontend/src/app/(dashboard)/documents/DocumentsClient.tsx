@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
@@ -22,6 +22,8 @@ interface Document {
   export_found_revenue_amount: number | null
   export_found_revenue_count: number | null
   has_found_revenue: boolean
+  pages_capped: boolean | null
+  pages_actual: number | null
 }
 
 interface BatchGroup {
@@ -48,6 +50,82 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
   const [downloadError, setDownloadError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'ready' | 'history'>('ready')
   const [collapsedBatches, setCollapsedBatches] = useState<Set<string>>(new Set())
+  const [reprocessingIds, setReprocessingIds] = useState<Set<string>>(new Set())
+  const [reprocessError, setReprocessError] = useState<string | null>(null)
+  const prevStatusesRef = useRef<Map<string, string>>(new Map())
+  // Keep a stable ref to router so the setInterval callback never captures a stale closure.
+  // Updating a ref in render (outside useEffect) is the standard React "latest value" pattern.
+  const routerRef = useRef(router)
+  routerRef.current = router
+  // Measure the sticky page-header height so the sticky <thead> knows where to stop.
+  const stickyHeaderRef = useRef<HTMLDivElement>(null)
+  const [theadTop, setTheadTop] = useState(0)
+
+  // Auto-poll every 8 s when any doc is actively queued/processing.
+  // Also fires a toast-style notification when a doc transitions from
+  // queued/processing → completed/failed.
+  useEffect(() => {
+    const activeStatuses = new Set(['queued', 'processing', 'pending'])
+    const hasActive = documents.some(d => activeStatuses.has(d.status))
+    if (!hasActive) {
+      prevStatusesRef.current = new Map(documents.map(d => [d.id, d.status]))
+      return
+    }
+
+    const interval = setInterval(() => {
+      routerRef.current.refresh()
+    }, 8000)
+
+    return () => clearInterval(interval)
+  // router intentionally excluded — accessed via routerRef to avoid dependency churn
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documents])
+
+  // Sync sticky-header height into theadTop whenever the header resizes
+  // (e.g. processing indicator appears/disappears).
+  useEffect(() => {
+    const el = stickyHeaderRef.current
+    if (!el) return
+    const update = () => setTheadTop(el.offsetHeight)
+    update() // capture initial height after first render
+    const obs = new ResizeObserver(update)
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [])
+
+  // Detect status transitions to show completion notifications
+  const [notifications, setNotifications] = useState<{ id: string; msg: string; type: 'success' | 'error' }[]>([])
+
+  useEffect(() => {
+    const prev = prevStatusesRef.current
+    const newNotifs: { id: string; msg: string; type: 'success' | 'error' }[] = []
+    for (const doc of documents) {
+      const was = prev.get(doc.id)
+      if (was && (was === 'queued' || was === 'processing' || was === 'pending')) {
+        if (doc.status === 'completed' || doc.status === 'partial_failure') {
+          newNotifs.push({
+            id: doc.id,
+            msg: `✓ ${doc.file_name || 'Document'} — processing complete`,
+            type: 'success',
+          })
+        } else if (doc.status === 'failed') {
+          newNotifs.push({
+            id: doc.id,
+            msg: `✗ ${doc.file_name || 'Document'} — processing failed`,
+            type: 'error',
+          })
+        }
+      }
+    }
+    prevStatusesRef.current = new Map(documents.map(d => [d.id, d.status]))
+    if (newNotifs.length > 0) {
+      setNotifications(prev => [...prev, ...newNotifs])
+      // Auto-dismiss after 8 s
+      setTimeout(() => {
+        setNotifications(prev => prev.filter(n => !newNotifs.find(nn => nn.id === n.id)))
+      }, 8000)
+    }
+  }, [documents])
 
   // Partition documents into Ready (unexported) and History (exported)
   const readyDocs = documents.filter(d => !d.last_exported_at)
@@ -186,6 +264,37 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
     }
   }
 
+  async function handleReprocess(docId: string) {
+    setReprocessingIds(prev => new Set(prev).add(docId))
+    setReprocessError(null)
+    try {
+      const { error } = await supabase.functions.invoke('reprocess-document', {
+        body: { eob_document_id: docId },
+      })
+      if (error) {
+        let msg = error.message
+        try {
+          const errorBody = await (error as any).context?.json?.()
+          if (errorBody?.error) {
+            msg = errorBody.error
+            if (errorBody?.details) msg += `: ${errorBody.details}`
+          }
+        } catch { /* ignore */ }
+        setReprocessError(msg || 'Failed to reprocess document')
+      } else {
+        router.refresh()
+      }
+    } catch (err: any) {
+      setReprocessError(err.message || 'Unexpected error during reprocess')
+    } finally {
+      setReprocessingIds(prev => {
+        const next = new Set(prev)
+        next.delete(docId)
+        return next
+      })
+    }
+  }
+
   // Clear selection when switching tabs
   function switchTab(tab: 'ready' | 'history') {
     setActiveTab(tab)
@@ -232,13 +341,26 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
             )}
           </td>
         )}
-        <td className="px-6 py-4 text-sm font-medium text-gray-900 max-w-xs truncate">
-          <span>{doc.file_name || doc.id.substring(0, 8)}</span>
-          {doc.has_found_revenue && (
-            <span className="ml-2 inline-flex items-center rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-green-600/20 ring-inset">
-              Found Revenue
-            </span>
-          )}
+        <td className="px-6 py-4 text-sm font-medium text-gray-900 max-w-xs">
+          <span className="truncate block">{doc.file_name || doc.id.substring(0, 8)}</span>
+          <span className="flex items-center gap-1.5 flex-wrap mt-0.5">
+            {doc.has_found_revenue && (
+              <span className="inline-flex items-center rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-green-600/20 ring-inset">
+                Found Revenue
+              </span>
+            )}
+            {doc.pages_capped && doc.pages_actual && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-amber-500/20 ring-inset"
+                title={`First ${doc.total_pages} of ${doc.pages_actual} pages processed — upgrade plan to process full document`}
+              >
+                <svg className="h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                </svg>
+                Partial ({doc.total_pages}/{doc.pages_actual} pg)
+              </span>
+            )}
+          </span>
         </td>
         <td className="px-6 py-4">
           <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${
@@ -260,12 +382,34 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
           }
         </td>
         <td className="px-6 py-4 text-sm">
-          <Link
-            href={`/documents/${doc.id}`}
-            className="text-blue-600 hover:text-blue-500 font-medium"
-          >
-            View →
-          </Link>
+          <div className="flex items-center gap-3">
+            <Link
+              href={`/documents/${doc.id}`}
+              className="text-blue-600 hover:text-blue-500 font-medium"
+            >
+              View →
+            </Link>
+            {doc.status === 'failed' && (
+              <button
+                onClick={() => handleReprocess(doc.id)}
+                disabled={reprocessingIds.has(doc.id)}
+                className="inline-flex items-center rounded px-2 py-1 text-xs font-medium bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Re-extract this document from Google Drive"
+              >
+                {reprocessingIds.has(doc.id) ? (
+                  <>
+                    <svg className="mr-1 h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Reprocessing…
+                  </>
+                ) : (
+                  <>↺ Reprocess</>
+                )}
+              </button>
+            )}
+          </div>
         </td>
       </tr>
     )
@@ -273,6 +417,14 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
 
   return (
     <div>
+      {/* ── Sticky page header ─────────────────────────────────────────
+          -mx-8 px-8 extends the bg-white across the full main-area width
+          (counteracts the parent p-8 padding) so scrolled content is
+          fully covered. z-10 sits above table rows. pb-2 leaves a small
+          gap below the tabs / processing indicator.
+      ─────────────────────────────────────────────────────────────── */}
+      <div ref={stickyHeaderRef} className="sticky top-0 z-10 -mx-8 px-8 bg-white pb-2">
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -357,17 +509,72 @@ export default function DocumentsClient({ documents, practiceId }: Props) {
         </nav>
       </div>
 
+      {/* Active-processing indicator — shown when any doc is queued/processing */}
+      {(() => {
+        const activeStatuses = new Set(['queued', 'processing', 'pending'])
+        const activeDocs = documents.filter(d => activeStatuses.has(d.status))
+        if (activeDocs.length === 0) return null
+        return (
+          <div className="mt-4 flex items-center gap-2 rounded-md bg-blue-50 border border-blue-200 px-4 py-2.5 text-sm text-blue-700">
+            <svg className="h-4 w-4 animate-spin shrink-0" viewBox="0 0 24 24" fill="none">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            <span>
+              {activeDocs.length === 1
+                ? `Processing ${activeDocs[0].file_name || 'document'}…`
+                : `Processing ${activeDocs.length} documents…`
+              }
+              {' '}Page will refresh automatically every 8 seconds.
+            </span>
+          </div>
+        )
+      })()}
+
+      </div>{/* /sticky page header */}
+
+      {/* Toast notifications for completed/failed transitions */}
+      {notifications.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {notifications.map(n => (
+            <div
+              key={n.id}
+              className={`flex items-center justify-between rounded-md border px-4 py-2.5 text-sm ${
+                n.type === 'success'
+                  ? 'bg-green-50 border-green-200 text-green-800'
+                  : 'bg-red-50 border-red-200 text-red-800'
+              }`}
+            >
+              <span>{n.msg}</span>
+              <button
+                onClick={() => setNotifications(prev => prev.filter(x => x.id !== n.id))}
+                className="ml-4 text-current opacity-50 hover:opacity-100"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {downloadError && (
         <div className="mt-4 rounded-md bg-red-50 border border-red-200 p-4">
           <p className="text-sm text-red-700">{downloadError}</p>
         </div>
       )}
+      {reprocessError && (
+        <div className="mt-4 rounded-md bg-red-50 border border-red-200 p-4">
+          <p className="text-sm text-red-700">Reprocess failed: {reprocessError}</p>
+        </div>
+      )}
 
       {/* Ready Tab — flat table with checkboxes */}
+      {/* overflow-x-clip preserves rounded corners without creating a scroll container,
+          which is what overflow-hidden does and what prevents sticky <thead> from working. */}
       {activeTab === 'ready' && (
-        <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="mt-4 overflow-x-clip rounded-xl border border-gray-200 bg-white shadow-sm">
           <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+            <thead className="bg-gray-50 sticky z-[9]" style={{ top: theadTop }}>
               <tr>
                 <th className="px-4 py-3 text-left">
                   <input

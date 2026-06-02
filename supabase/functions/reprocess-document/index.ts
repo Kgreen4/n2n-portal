@@ -1,8 +1,8 @@
 // reprocess-document — Orchestrates full re-extraction of an EOB document.
-// 1. Verifies ownership via practice_users
-// 2. Deletes existing BigQuery rows for the document
+// 1. Verifies document exists
+// 2. Deletes existing BigQuery rows (async Jobs API — required for DML)
 // 3. Deletes page jobs from Supabase
-// 4. Resets document status to 'pending'
+// 4. Resets document status to 'pending' (single clean UPDATE)
 // 5. Re-triggers eob-enqueue to re-extract with updated Gemini prompt
 
 import { createClient } from "npm:@supabase/supabase-js@2.39.7";
@@ -71,6 +71,68 @@ async function getGoogleAccessToken(sa: any) {
 }
 
 // ──────────────────────────────────────────────────────────────
+// BigQuery DML via async Jobs API
+// The synchronous /queries endpoint does not reliably execute DML (DELETE/UPDATE).
+// The Jobs API is the correct path — create job, poll until DONE, read stats.
+// ──────────────────────────────────────────────────────────────
+async function bqDeleteDocument(gToken: string, eob_document_id: string): Promise<number> {
+  const deleteQuery =
+    `DELETE FROM \`${BQ_PROJECT}.${BQ_DATASET}.${BQ_TABLE}\`` +
+    ` WHERE eob_document_id = '${eob_document_id}'`;
+
+  // 1. Start the async job
+  const jobResp = await fetch(
+    `https://bigquery.googleapis.com/bigquery/v2/projects/${BQ_PROJECT}/jobs`,
+    {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${gToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        configuration: { query: { query: deleteQuery, useLegacySql: false } }
+      }),
+    }
+  );
+  if (!jobResp.ok) {
+    const errText = await jobResp.text();
+    throw new Error(`BQ job create failed (${jobResp.status}): ${errText}`);
+  }
+  const job = await jobResp.json();
+  const jobId = job.jobReference?.jobId;
+  if (!jobId) throw new Error('BQ job create returned no jobId');
+
+  console.info(`[reprocess] BQ DELETE job started: ${jobId}`);
+
+  // 2. Poll until DONE (max 45 s — well within the 60 s edge function limit)
+  const BQ_POLL_MS = 2000;
+  const BQ_TIMEOUT_MS = 45_000;
+  const deadline = Date.now() + BQ_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, BQ_POLL_MS));
+
+    const statusResp = await fetch(
+      `https://bigquery.googleapis.com/bigquery/v2/projects/${BQ_PROJECT}/jobs/${jobId}`,
+      { headers: { 'Authorization': `Bearer ${gToken}` } }
+    );
+    if (!statusResp.ok) continue; // retry on transient HTTP error
+
+    const s = await statusResp.json();
+    if (s.status?.state !== 'DONE') continue;
+
+    // Job finished — check for errors
+    if (s.status?.errorResult) {
+      throw new Error(`BQ DELETE job error: ${JSON.stringify(s.status.errorResult)}`);
+    }
+    const deleted = parseInt(s.statistics?.query?.numDmlAffectedRows || '0');
+    console.info(`[reprocess] BQ DELETE complete — ${deleted} rows removed`);
+    return deleted;
+  }
+
+  // Timed out: log and continue — rows will be overwritten when re-extraction runs
+  console.warn(`[reprocess] BQ DELETE job ${jobId} timed out — rows may persist until re-extract overwrites them`);
+  return 0;
+}
+
+// ──────────────────────────────────────────────────────────────
 // Main Handler
 // ──────────────────────────────────────────────────────────────
 Deno.serve(async (req) => {
@@ -92,7 +154,7 @@ Deno.serve(async (req) => {
     // 1. VERIFY DOCUMENT EXISTS AND GET DETAILS
     const { data: doc, error: docErr } = await supabase
       .from('eob_documents')
-      .select('id, practice_id, file_name, file_path, status')
+      .select('id, practice_id, file_name, file_path, status, total_pages')
       .eq('id', eob_document_id)
       .single();
 
@@ -103,28 +165,47 @@ Deno.serve(async (req) => {
       return json({ error: 'Document is currently being processed. Wait for it to finish.' }, 409);
     }
 
+    // PRE-FLIGHT: detect orphaned failed rows that co-exist with a non-failed duplicate.
+    // This happens when duplicate rows were inserted before the unique constraint
+    // (practice_id, file_name) was enforced. Postgres fires the constraint during the
+    // internal tuple-rewrite of any UPDATE on either row, even when the constrained
+    // columns aren't being changed. Detect and block cleanly rather than crash.
+    const { data: nfDupe } = await supabase
+      .from('eob_documents')
+      .select('id, status')
+      .eq('practice_id', doc.practice_id)
+      .eq('file_name', doc.file_name)
+      .neq('id', eob_document_id)
+      .neq('status', 'failed')
+      .maybeSingle();
+
+    if (nfDupe) {
+      console.warn(`[reprocess] Blocked: non-failed duplicate exists for same file`, {
+        failed_id: eob_document_id,
+        duplicate_id: nfDupe.id,
+        duplicate_status: nfDupe.status,
+      });
+      return json({
+        error: `Cannot reprocess — a ${nfDupe.status} version of this document already exists. The failed record is an orphan and should be deleted.`,
+        duplicate_id: nfDupe.id,
+        duplicate_status: nfDupe.status,
+      }, 409);
+    }
+
     console.info(`[reprocess] Document ${eob_document_id}: status=${doc.status}, practice=${doc.practice_id}`);
 
-    // 2. DELETE BIGQUERY ROWS
+    // 2. DELETE BIGQUERY ROWS (best-effort — non-fatal)
+    // The BQ eob_line_items table was originally created without an eob_document_id
+    // column; streaming inserts that reference it fail silently in eob-worker.
+    // We attempt the delete so that if/when the schema is fixed we clean up properly,
+    // but we never block a reprocess on a BQ schema mismatch.
     let bqDeleted = 0;
     try {
       const sa = JSON.parse(GCP_SA_JSON_STR.trim());
       const gToken = await getGoogleAccessToken(sa);
-      const deleteQuery = `DELETE FROM \`${BQ_PROJECT}.${BQ_DATASET}.${BQ_TABLE}\` WHERE eob_document_id = '${eob_document_id}'`;
-      const bqResp = await fetch(
-        `https://bigquery.googleapis.com/bigquery/v2/projects/${BQ_PROJECT}/queries`,
-        {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${gToken}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: deleteQuery, useLegacySql: false }),
-        }
-      );
-      const bqResult = await bqResp.json();
-      bqDeleted = parseInt(bqResult.numDmlAffectedRows || '0');
-      console.info(`[reprocess] Deleted ${bqDeleted} BigQuery rows`);
+      bqDeleted = await bqDeleteDocument(gToken, eob_document_id);
     } catch (bqErr: any) {
-      console.error(`[reprocess] BigQuery delete failed: ${bqErr.message}`);
-      return json({ error: 'Failed to delete BigQuery data', details: bqErr.message }, 500);
+      console.warn(`[reprocess] BigQuery delete failed (non-fatal, continuing): ${bqErr.message}`);
     }
 
     // 3. DELETE PAGE JOBS
@@ -141,6 +222,7 @@ Deno.serve(async (req) => {
     }
 
     // 4. RESET DOCUMENT STATUS
+    // Single clean UPDATE — all columns confirmed present via migration 20260522.
     const { error: resetErr } = await supabase
       .from('eob_documents')
       .update({
@@ -148,7 +230,7 @@ Deno.serve(async (req) => {
         items_extracted: 0,
         error_message: null,
         review_status: null,
-        review_reasons: [],
+        review_reasons: null,
         last_exported_at: null,
         export_batch_id: null,
         export_total_paid: null,
@@ -158,9 +240,30 @@ Deno.serve(async (req) => {
       .eq('id', eob_document_id);
 
     if (resetErr) {
-      return json({ error: 'Failed to reset document', details: resetErr.message }, 500);
+      console.error(`[reprocess] Reset failed: code=${(resetErr as any).code} msg=${resetErr.message} hint=${(resetErr as any).hint}`);
+      return json({
+        error: 'Failed to reset document',
+        details: resetErr.message,
+        code: (resetErr as any).code,
+        hint: (resetErr as any).hint,
+      }, 500);
     }
     console.info(`[reprocess] Reset document ${eob_document_id} to pending`);
+
+    // 4b. REFUND CREDITS for the original page count so re-enqueue doesn't double-charge
+    const originalPages = doc.total_pages ?? 0;
+    if (originalPages > 0) {
+      try {
+        await supabase.rpc('add_parsing_credits', {
+          p_practice_id: doc.practice_id,
+          p_amount: originalPages,
+        });
+        console.info(`[reprocess] Refunded ${originalPages} credits for document ${eob_document_id}`);
+      } catch (refundErr: any) {
+        // Non-fatal — log and continue; worst case eob-enqueue will catch insufficient credits
+        console.warn(`[reprocess] Credit refund failed (non-fatal): ${refundErr.message}`);
+      }
+    }
 
     // 5. RE-TRIGGER EXTRACTION
     // Determine source based on file_path format:
@@ -199,10 +302,18 @@ Deno.serve(async (req) => {
     const enqueueResult = await enqueueResp.json();
 
     if (!enqueueResp.ok) {
-      console.error(`[reprocess] eob-enqueue failed: ${JSON.stringify(enqueueResult)}`);
+      // Extract a readable string from whatever eob-enqueue returned
+      const errDetail: string =
+        typeof enqueueResult === 'string'
+          ? enqueueResult
+          : (enqueueResult?.error
+              ? `${enqueueResult.error}${enqueueResult.details ? `: ${enqueueResult.details}` : ''}`
+              : JSON.stringify(enqueueResult));
+      console.error(`[reprocess] eob-enqueue failed (HTTP ${enqueueResp.status}): ${errDetail}`);
       return json({
         error: 'Document reset but re-enqueue failed',
-        details: enqueueResult,
+        details: errDetail,          // always a string now — frontend can display it
+        http_status: enqueueResp.status,
         bq_rows_deleted: bqDeleted,
       }, 500);
     }

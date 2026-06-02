@@ -23,6 +23,9 @@ export default function ReconciliationPage() {
   const [deposits, setDeposits] = useState<BankDeposit[]>([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState<'all' | 'matched' | 'discrepancy' | 'unmatched'>('all')
+  const [rematching, setRematching] = useState(false)
+  const [rematchResult, setRematchResult] = useState<string | null>(null)
+  const [practiceId, setPracticeId] = useState<string | null>(null)
 
   useEffect(() => {
     async function load() {
@@ -37,6 +40,8 @@ export default function ReconciliationPage() {
 
       if (!link) return
 
+      setPracticeId(link.practice_id)
+
       const { data } = await supabase
         .from('bank_deposits')
         .select('*')
@@ -49,6 +54,44 @@ export default function ReconciliationPage() {
     }
     load()
   }, [supabase])
+
+  async function handleRematch() {
+    if (!practiceId || rematching) return
+    setRematching(true)
+    setRematchResult(null)
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      const resp = await fetch(
+        `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/rematch-deposits`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${session?.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ practice_id: practiceId }),
+        }
+      )
+      const result = await resp.json()
+      if (!resp.ok) throw new Error(result.error || 'Rematch failed')
+      const msg = result.updated === 0
+        ? `No changes — ${result.unchanged ?? 0} deposits already current`
+        : `Updated ${result.updated} deposit${result.updated !== 1 ? 's' : ''}: ${result.matched} matched, ${result.discrepancies} discrepancies`
+      setRematchResult(msg)
+      // Reload deposits to show updated values
+      const { data } = await supabase
+        .from('bank_deposits')
+        .select('*')
+        .eq('practice_id', practiceId)
+        .order('deposit_date', { ascending: false })
+        .order('created_at', { ascending: false })
+      setDeposits(data || [])
+    } catch (err: any) {
+      setRematchResult(`Error: ${err.message}`)
+    } finally {
+      setRematching(false)
+    }
+  }
 
   const matchedCount = deposits.filter(d => d.match_status === 'matched').length
   const discrepancyCount = deposits.filter(d => d.match_status === 'discrepancy').length
@@ -86,15 +129,45 @@ export default function ReconciliationPage() {
             Match bank deposits against EOB payment check totals.
           </p>
         </div>
-        <Link
-          href="/settings"
-          className="inline-flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-          </svg>
-          Upload CSV
-        </Link>
+        <div className="flex items-center gap-3">
+          {rematchResult && (
+            <span className={`text-xs font-medium px-3 py-1.5 rounded-lg ${
+              rematchResult.startsWith('Error')
+                ? 'bg-red-50 text-red-700 border border-red-200'
+                : 'bg-blue-50 text-blue-700 border border-blue-200'
+            }`}>
+              {rematchResult}
+            </span>
+          )}
+          {deposits.length > 0 && (
+            <button
+              onClick={handleRematch}
+              disabled={rematching}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              {rematching ? (
+                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              ) : (
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                </svg>
+              )}
+              {rematching ? 'Refreshing…' : 'Refresh Matching'}
+            </button>
+          )}
+          <Link
+            href="/settings"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+            </svg>
+            Upload CSV
+          </Link>
+        </div>
       </div>
 
       {/* Summary Cards */}

@@ -5,6 +5,31 @@
 import { createClient } from "npm:@supabase/supabase-js@2.39.7";
 import { getCorsHeaders, corsResponse } from "../_shared/cors.ts";
 
+// ── Hybrid PDF Mode: unpdf for digital-native text extraction ─────────────────
+// unpdf is edge-compatible and works without canvas or fs.
+// We import dynamically at module load so a failure never crashes the worker —
+// pages fall back to base64-PDF vision mode automatically.
+// See: https://github.com/unjs/unpdf
+type PdfExtractFn = (buf: Uint8Array, opts?: { mergePages?: boolean }) => Promise<{ totalPages: number; text: string | string[] }>;
+let pdfExtractText: PdfExtractFn | null = null;
+try {
+  const mod = await import('npm:unpdf@0.11.0');
+  pdfExtractText = mod.extractText ?? null;
+  if (pdfExtractText) {
+    console.info('[eob-worker] unpdf loaded — hybrid PDF text extraction enabled');
+  }
+} catch (_importErr) {
+  console.warn('[eob-worker] unpdf not available — all pages will use vision mode');
+}
+// Threshold: pages with fewer "meaningful" characters fall back to vision mode.
+// Typical digital-native EOB page yields 500-2000 chars; scanned yields <50.
+const DIGITAL_NATIVE_MIN_CHARS = 150;
+// Numeric density guard: if >35% of meaningful chars are digits, the page is a
+// financial claim grid (amounts, DOS dates, claim IDs packed in columns). unpdf
+// loses the column alignment, producing a number stream Gemini can't parse.
+// Force VISION mode so Gemini sees the actual visual table structure.
+const FINANCIAL_GRID_DIGIT_RATIO = 0.35;
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const GCP_SA_JSON_STR = Deno.env.get('GCP_SA_JSON')!;
@@ -189,10 +214,36 @@ function deduplicateItems(items: any[]): any[] {
   // Group by composite key, keep the highest-quality row per group
   const groups = new Map<string, any>();
   for (const item of items) {
-    // Skip summary_total rows — they're kept as-is, never merged with detail lines
+    // Deduplicate summary_total rows by paid_amount — Gemini sometimes creates
+    // multiple rows for the same check (one with the correct insurance payer + check#,
+    // and a spurious duplicate without a check# or using the practice name as payer).
+    // Group by normalized paid_amount; keep the highest-quality row (which will be the
+    // one with a non-null remark_code / check number, scored higher by quality()).
     if (item.line_type === 'summary_total') {
-      // Use a unique key so summary rows never collide
-      groups.set(`__summary_${crypto.randomUUID()}`, item);
+      // Key on BOTH amount AND check/EFT number (remark_code) so that two checks
+      // in the same PDF with the same dollar amount are NOT collapsed into one row.
+      // A bare amount-only key caused multi-check PDFs with equal amounts to merge,
+      // losing a check entry and widening the reconciliation gap artificially.
+      const summaryAmt = String(parseCurrency(item.paid_amount) ?? item.paid_amount ?? '__noamt');
+      const summaryChk = String(item.remark_code ?? '__nochk').trim();
+      const summaryKey = `__summary_${summaryAmt}_${summaryChk}`;
+      const existing = groups.get(summaryKey);
+      if (!existing) {
+        groups.set(summaryKey, item);
+      } else {
+        const [winner, donor] = quality(item) >= quality(existing) ? [item, existing] : [existing, item];
+        const merged = { ...winner };
+        for (const [field, val] of Object.entries(donor)) {
+          if ((merged[field] === null || merged[field] === undefined || merged[field] === '') &&
+              val !== null && val !== undefined && val !== '') {
+            merged[field] = val;
+          }
+        }
+        const winnerConf = parseInt(winner.confidence_score) || 0;
+        const donorConf = parseInt(donor.confidence_score) || 0;
+        merged.confidence_score = Math.max(winnerConf, donorConf);
+        groups.set(summaryKey, merged);
+      }
       continue;
     }
 
@@ -289,7 +340,7 @@ FIRST — Identify the document type for this page:
 - COVER PAGE: Contains only headers, instructions, or administrative info with no extractable data
 
 Return a JSON object with an 'items' array. Each item must include these fields (use null if not found):
-- line_type: "medical_service" for standard claims, "incentive_bonus" for MIPS/quality bonuses, "adjustment" for payment adjustments, "summary_total" for check/payment totals, "roster_summary" for provider summary roster aggregate pages (see IMPORTANT — Provider Summary Roster Pages below)
+- line_type: "medical_service" for standard claims, "incentive_bonus" for MIPS/quality bonuses, "adjustment" for payment adjustments, "summary_total" for check/payment totals
 - patient_name: Full name of the patient
 - member_id: Member/subscriber ID number
 - date_of_service: Date service was provided (format: YYYY-MM-DD)
@@ -305,7 +356,7 @@ Return a JSON object with an 'items' array. Each item must include these fields 
 - claim_status: Status of the claim. Look for explicit labels like "Paid", "Denied", "Adjusted", "Partially Paid", "Processed", or similar text. If no explicit status text is printed on the EOB, INFER the status from the financial fields: if paid_amount > 0 and paid_amount >= allowed_amount use "Paid"; if paid_amount > 0 but paid_amount < allowed_amount use "Partially Paid"; if paid_amount = 0 or null use "Denied"; if adjustment_amount > 0 and paid_amount > 0 use "Adjusted". For MIPS bonuses, use "Incentive Paid". For summary totals, use "Summary". NEVER return null for claim_status on medical_service lines — always infer if not explicitly shown.
 - claim_number: The payer's claim control number / ICN (Internal Claim Number). This is the reference number assigned by the insurance company to this specific claim. Often printed as "Claim #", "ICN", "DCN", "Claim Reference", or "Reference #" on the EOB. Use null if not visible.
 - payment_date: Date the check or EFT was issued (format: YYYY-MM-DD). Usually printed on the check stub, payment summary, or in the page header as "Payment Date", "Check Date", or "Date Issued". Apply the same date to all items on the page if it appears only in the header. Use null if not visible on this page.
-- payer_name: Name of the insurance company / payer issuing this payment. Look in page headers, footers, letterhead, or the "From" / "Payer" section. Apply to all items on the page. Use null if not visible.
+- payer_name: Name of the insurance company / payer issuing this payment. Look in page headers, footers, letterhead, or the "From" / "Payer" section. Apply to all items on the page. Use null if not visible. CRITICAL: payer_name is ALWAYS the insurance company (e.g., "BlueCross BlueShield of Arizona", "Aetna", "UnitedHealthcare"). It is NEVER the medical practice, physician group, clinic, or hospital that is receiving the payment. If the document shows a "Pay to:", "Payee:", "Remit to:", or "Provider:" field with the practice/clinic name, that is the check RECIPIENT — ignore it for payer_name.
 - payer_id: Payer identifier number (if visible). Sometimes shown as "Payer ID", "Plan ID", or near the payer name. Use null if not visible.
 - adjustment_amount: For adjustment or denial lines, the TOTAL dollar amount of the adjustment (numeric, no $ sign). This is typically billed_amount minus paid_amount, or the specific denied/adjusted/contractual amount shown on the line. Use null for fully paid lines or if no adjustment amount is shown.
 - deductible_amount: The portion of patient responsibility attributed to the deductible (numeric, no $ sign). On many EOBs this appears in a "Deductible" or "Ded" column, or within a combined "Not Covered Ded-Coin-Inst" breakdown. Use null if not broken out separately on the EOB.
@@ -328,13 +379,21 @@ IMPORTANT — MIPS/Bonus Pages:
 - If the page shows a summary of multiple claims with incentive adjustments, extract each claim as a separate line item.
 
 IMPORTANT — Summary/Check Pages:
-- If the page shows a check total, EFT total, or provider payment summary, extract ONE summary_total item per check or EFT payment.
+- If the page shows a check total, EFT total, or provider payment summary, extract EXACTLY ONE summary_total item per check or EFT payment. Do NOT create multiple summary_total rows for the same check.
 - Set paid_amount to the total check/EFT amount.
-- Set remark_code to the check number or EFT trace number (e.g., "CHK-12345" or "EFT-98765").
+- Set remark_code to the check number or EFT trace number (e.g., "CHK-12345" or "EFT-98765"). This is the most important field on the summary page — look carefully for it.
+- Set payer_name to the insurance company name (e.g., "BlueCross BlueShield of Arizona"). NEVER use the medical practice or provider name as payer_name, even if the check is made out to the practice. The "Pay to" / "Payee" / "Remit to" field shows who is RECEIVING the check — do not create a separate summary_total row for the payee.
 - Set payment_date to the check/EFT issue date if visible.
-- CRITICAL — when to emit summary_total: A "summary_total" row is ONLY correct when this page is a true check stub or payment-summary page — meaning it shows a check number / EFT trace / payment total but does NOT contain individual CPT/HCPCS procedure codes or service-line breakdowns. If the page has CPT/HCPCS codes or individual claim-service rows (e.g., BCBS Payment Detail pages, MCO claim-detail grids), it is a DETAIL page. Extract ONLY "medical_service" rows from it — NEVER emit a "summary_total". Any "Total", "Total Paid", or grand-total line printed at the bottom of a detail page is a page footer — omit it entirely.
-- A true check-stub page may additionally list the claims it covers at a high level (patient names + amounts, no CPT codes). In that case extract those rows as "medical_service" AND the overall check total as one "summary_total". But the presence of CPT codes anywhere on the page immediately reclassifies it as a detail page where no summary_total is allowed.
+- If the page lists both individual claim lines AND a total, extract BOTH: the individual lines as "medical_service" and the total as "summary_total".
 - Do NOT double-count: the summary_total represents the check total, not an additional payment.
+
+IMPORTANT — Multi-Check Sections (single PDF containing multiple checks or EFTs):
+- A single EOB PDF may contain multiple distinct check or EFT payment sections. Each section begins with its own check number, check date, and check amount, followed by the claim lines it covers.
+- When extracting medical_service claim lines, tag EACH line with the check_number (remark_code) from the section header that immediately precedes it — NOT from the overall document header or from a different section.
+- The active check_number for any claim line is determined by the most recent check/EFT section header appearing ABOVE that line in the document. When you encounter a new section header (new check number), update the active check_number for all subsequent lines until the next section header.
+- Never inherit a check_number from a different section into another section's claim lines, even if they appear on the same page.
+- For summary_total items: create exactly ONE summary_total row per distinct check or EFT. Use that check's unique number as remark_code and that check's total as paid_amount. Do not create a single summary_total for the grand total across all checks unless there is no per-check breakdown.
+- Example: if page 2 has "Check #0231499940 — $71.20" followed by claims A and B, then page 6 has "Check #0231499945 — $97.56" followed by claim C, then claim C's remark_code must be "0231499945" and the summary_total for claim C's section must also use "0231499945" — not "0231499940".
 
 IMPORTANT — Subtotal / Per-Claim Totals (DO NOT extract):
 - Many EOBs print a subtotal box below individual claim lines showing "Benefits Paid", "Total Paid", "Claim Total", or a bare dollar amount. These subtotal boxes merely restate the paid_amount from the detail line above. Do NOT extract these as separate items.
@@ -357,20 +416,70 @@ IMPORTANT — Legend / Footnote Code Explanations:
   • CO suffix → the amount relates to contractual_adjustment
 - When you see a "Patient Resp" or "Patient Responsibility" column on the EOB, map that value to the patient_responsibility field.
 
-IMPORTANT — Provider Summary Roster Pages:
-- Some payers (e.g. BCBS) print aggregate Provider Summary Roster pages at the END of a payment block. These pages are a high-level recap and contain ONLY: Claim #, Amount Paid, and Patient Responsibility — with NO dates of service, NO CPT/HCPCS procedure codes, NO billed amounts, and NO allowed amounts.
-- Distinguishing features: a narrow table with only 3–4 columns (Claim #, Amount Paid, Patient Responsibility, and sometimes Rendering Provider or NPI); no service-date column; often labeled "Provider Summary", "Summary Roster", "Provider Roster", or similar at the top of the page.
-- For EVERY row on a Provider Summary Roster page, set line_type to "roster_summary".
-- Extract: claim_number, paid_amount, patient_responsibility, rendering_provider_npi (if present), payer_name (from header). Set cpt_code, date_of_service, billed_amount, allowed_amount, and all other fields to null.
-- Do NOT emit a summary_total row for the grand total line on a roster page. Omit any page-level total rows entirely.
-- CRITICAL: NEVER set line_type to "medical_service" for a roster page row, even though it looks like a claim row. The definitive indicator of a roster page is the complete absence of CPT/HCPCS codes and dates of service across all rows on the page.
-- The frontend cross-references roster_summary rows against the detail medical_service rows already extracted from earlier pages. Roster rows that match an existing detail row are used for validation only (dropped from totals). Roster rows with NO matching detail row are promoted as backfill to plug revenue gaps. Correct tagging here is essential for accurate reconciliation.
+IMPORTANT — BCBS of Arizona "Payment Detail" Pages (check-stub → detail-page pairs):
+Large BCBS of Arizona EOBs commonly use a two-page pattern for each payment:
+  PAGE A — Check Stub: shows the check or EFT number, payment date, and check total. Extract as summary_total with remark_code = check/EFT number.
+  PAGE B — Payment Detail: immediately follows the check stub and lists every claim paid by that check in a compact table — typically: Patient Name | Claim # (ICN) | Date of Service | Billed | Allowed | Paid | Remark Codes. This page often DOES NOT repeat the check number and DOES NOT show CPT codes — it summarises at the claim level.
+
+CRITICAL RULES for Payment Detail pages:
+- Extract EVERY row in the table as a separate medical_service item, even when no CPT code is visible. Set cpt_code to null — do NOT skip the row.
+- Do NOT return {"items": []} for a page that shows a table of patients, claim numbers, dates, and dollar amounts. That IS claim data and MUST be extracted.
+- A large dollar amount per row ($1,000+) does not make a row a "summary_total" — it is still a medical_service row if it represents a specific claim.
+- The absence of a check number on the detail page is expected — it appeared on the preceding check stub page. Extract claim rows without it.
+- If the page shows a per-claim roster without individual CPT/service-line breakdowns, extract one medical_service item per claim row (one row per patient/claim, not per service line).
+- NEVER extract a summary_total row from a Payment Detail page. The "Total", "Total Paid", or "Grand Total" line that sometimes appears at the bottom of a detail page is a page footer — omit it entirely. Only Check Stub pages produce summary_total rows. If you extract the grand total from a detail page as summary_total, the same check amount will be counted twice (once from the stub, once from the detail) and the deposit total will be wrong.
+
+CRITICAL — BCBS "Section-Delimited" Remittance Pages (multi-claim pages with horizontal separators):
+Some BCBS payment detail pages organize multiple claims into SECTIONS separated by horizontal lines or rules. Each section covers one claim and has this structure:
+  ─────────────────────────────────────────────────────────
+  Claim # [XXXXXXX]  |  Patient: [Name]  |  DOS: [Date]  |  Amount Paid: $XX.XX
+    [CPT code]  [Date]  Billed: $YY.YY  Allowed: $ZZ.ZZ  Paid: $AA.AA  Remarks: [codes]
+    [CPT code]  [Date]  Billed: $YY.YY  Allowed: $ZZ.ZZ  Paid: $BB.BB  Remarks: [codes]
+  Total Paid:  $XX.XX   ← same dollar amount as "Amount Paid" in the section header above
+  ─────────────────────────────────────────────────────────
+  [next claim section begins here]
+
+CRITICAL RULES for section-delimited pages:
+1. EXTRACT CPT SERVICE LINES — Each CPT/service row inside a section is a separate medical_service item. Use the Claim # and patient name from that section's header for every row in that section.
+2. DO NOT DOUBLE-COUNT — "Amount Paid: $XX.XX" in the section HEADER and "Total Paid: $XX.XX" at the section FOOTER are THE SAME dollar amount printed twice for readability. They are not separate payments. DO NOT extract the section footer "Total Paid" or "Total" as a medical_service row — doing so would count the claim amount twice.
+3. DO NOT extract the section header "Amount Paid" as its own separate medical_service row when individual CPT service lines are present inside the section. The header is a summary label only.
+4. CHOOSE ONE LEVEL PER SECTION: If individual CPT service rows are visible inside the section (each with a "Paid" column value), extract those CPT rows. If NO individual CPT rows are visible (section shows claim-level summary only with no CPT breakdown), extract exactly ONE medical_service row for the section using the "Amount Paid" value and the Claim # as claim_number.
+5. PAID AMOUNTS ON CPT ROWS — For each CPT row, the paid_amount is the value in the "Paid" column on that specific row. Extract it as-is, even if it is $0.00. The sum of all CPT-row paid_amounts within a section should equal the section's "Amount Paid" / "Total Paid" — if they do not sum correctly, prefer the CPT-level values over the section total.
+6. PAGE GRAND TOTAL — Some pages show a grand total at the very bottom summing all sections (e.g., "Page Total: $XXX.XX" or "Total for this page: $XXX.XX"). Omit it entirely. It is a page-level footer, not a claim row, and must not be extracted as either medical_service or summary_total.
+7. ZERO PAID ROWS — Include CPT service lines where the "Paid" column is $0.00 as medical_service rows with paid_amount = 0. Do not skip them.
+
+IMPORTANT — MCO / Managed Care Remittance Formats (Mercy Care, Aetna, UnitedHealthcare, Humana, etc.):
+Many Managed Care Organizations use a compact grid-style remittance layout that differs significantly from standard BCBS-style EOBs. Follow these rules when you encounter MCO-style documents:
+
+1. GRID-STYLE CLAIM TABLES: MCO remittances often pack multiple claims into a dense columnar grid. Each row in the grid is a separate claim and must be extracted as a separate medical_service item. Common column headers include: "Patient Name", "Claim Number", "Date of Service", "DOS", "Proc", "Billed", "Allowed", "Paid", "Patient Resp", "Adj Reason", "Remark". Map each column to the appropriate field. Do NOT skip rows because they appear compressed — extract every claim row.
+
+2. TWO TYPES OF MCO PAGES — CLAIM-DETAIL vs. CHECK STUB:
+   MCO documents contain two distinct page types for each physical payment. You MUST distinguish them:
+
+   TYPE A — CLAIM-DETAIL PAGE: Contains a grid/table of individual medical service rows for different patients or claims (multiple rows with patient names, CPT codes, dates of service, billed/allowed/paid amounts per claim line). These pages show the breakdown of HOW the check total was calculated. Rule: Extract ONLY medical_service items from these pages. Do NOT emit a summary_total row, even if an EFT trace number or check number appears somewhere on the page as a header or reference.
+
+   TYPE B — CHECK STUB / COVER PAGE: Contains only a payment summary — a check or EFT number, a total payment amount, a payment date, and possibly a list of patient names with their per-patient subtotals — but NO CPT codes and NO individual service-level claim rows. Rule: Extract EXACTLY ONE summary_total item from these pages. Set remark_code = the official check or EFT number. Set paid_amount = the total check amount (NOT a per-patient subtotal). Set payment_date = the check date.
+
+   NEVER emit a summary_total on a Type A page. The authoritative check total comes from the Type B check stub page only.
+
+3. EFT TRACE NUMBERS ON CLAIM-DETAIL PAGES: A Type A claim-detail page may display an EFT trace number (typically a 7-digit number, e.g., "7901273") at the top as a reference header. This trace number is NOT a check — it is a reference that links the claim rows on this page to their associated payment. Do NOT extract this trace number as a summary_total. Extract only the medical_service rows below it.
+
+4. DEDICATED CHECK STUB PAGES (Type B): When a page shows ONLY payment totals with no CPT codes or individual claim service rows, this is the authoritative check stub. Extract ONE summary_total item. If the page shows both a "Check #" (or official check number) and an "EFT Trace #" for the same payment, use the Check # as remark_code. If only a trace # is present, use it with an "EFT-" prefix.
+
+5. PER-PATIENT SUBTOTALS ON CHECK STUB PAGES: A Type B check stub page may list each patient's name alongside their share of the check total. These per-patient amounts are subtotals — do NOT extract them individually as summary_total items. Extract EXACTLY ONE summary_total with the full check total amount.
+
+6. MCO ADJUSTMENT CODES: MCO remittances may use adjustment reason codes formatted as plain numbers (e.g., "45", "97", "1") without the standard "CO-" / "PR-" prefix. These are still CARC codes. When you see bare numeric codes like "45", "97", "4", "16", "18", "22", treat them as their CARC equivalents (CO-45, CO-97, CO-4, CO-16, CO-18, CO-22) and include them in remark_code. Map their standard descriptions to remark_description.
+
+7. PROVIDER GROUPINGS: Some MCO EOBs group claims by rendering provider or by provider NPI, with the provider name appearing as a section header above a block of claim rows. Apply that provider name and NPI to all claim rows in that section — treat it like a page header for NPI/provider assignment purposes (same "Header Memory" rule above).
+
+8. MERCY CARE / ARIZONA-SPECIFIC MCO: Mercy Care remittances may show the member's Mercy Care ID (a long numeric string starting with the state prefix) in a "Member ID" column. Use that as member_id. The "Auth #" or "Auth Number" column is NOT the claim_number — that is a prior authorization number. Use the "Claim #" or "Reference #" column for claim_number.
 
 Other instructions:
 - Extract EVERY line item on the page, do not skip any
 - If a field is not present, set it to null
 - Return amounts as numbers without dollar signs or commas
 - If the page has absolutely no extractable data (blank page, signature-only page), return: {"items": []}`;
+
 
 // ──────────────────────────────────────────────────────────────
 // Main Worker Handler
@@ -406,19 +515,70 @@ Deno.serve(async (req) => {
     const filePath = `${job.eob_document_id}/page-${pageStr}.pdf`;
     const { data: fileBlob, error: dlErr } = await supabase.storage.from('eob-pages').download(filePath);
     if (dlErr) throw new Error(`Download failed: ${dlErr.message}`);
-    const base64PDF = uint8ToBase64(new Uint8Array(await fileBlob.arrayBuffer()));
-    console.info(`[eob-worker] Downloaded page ${job.page_number} for doc ${job.eob_document_id}`);
+    // Store raw bytes for dual use: text extraction attempt + base64 vision fallback
+    const pdfBytes = new Uint8Array(await fileBlob.arrayBuffer());
+    const base64PDF = uint8ToBase64(pdfBytes);   // always computed; used only in vision mode
+    console.info(`[eob-worker] Downloaded page ${job.page_number} for doc ${job.eob_document_id} (${pdfBytes.length} bytes)`);
+
+    // STEP 1.5: DETECT DIGITAL-NATIVE vs SCANNED PAGE (hybrid mode)
+    // If unpdf successfully extracts meaningful text, we send text to Gemini instead of
+    // the raw base64 PDF — dramatically reducing token cost for digital-native EOBs
+    // (Mercy Care, Aetna, most BCBS). Scanned pages fall back to vision automatically.
+    let pageTextContent: string | null = null;
+    let extractionMode: 'text' | 'vision' = 'vision';
+
+    if (pdfExtractText) {
+      try {
+        const result = await pdfExtractText(pdfBytes, { mergePages: true });
+        const rawText = typeof result.text === 'string'
+          ? result.text
+          : (result.text as string[]).join('\n');
+
+        // Count meaningful characters (letters, digits, common EOB symbols)
+        const meaningfulChars = (rawText.match(/[a-zA-Z0-9$.,\-\/:()|]/g) || []).length;
+        const digitChars = (rawText.match(/\d/g) || []).length;
+        const digitDensity = meaningfulChars > 0 ? digitChars / meaningfulChars : 0;
+        const isFinancialGrid = digitDensity > FINANCIAL_GRID_DIGIT_RATIO;
+
+        if (meaningfulChars >= DIGITAL_NATIVE_MIN_CHARS && !isFinancialGrid) {
+          // Digital-native prose page (low digit density) — text extraction is reliable
+          pageTextContent = rawText.trim();
+          extractionMode = 'text';
+          console.info(`[eob-worker] page ${job.page_number}: digital-native prose (${meaningfulChars} chars, ${Math.round(digitDensity * 100)}% digits) → TEXT mode`);
+        } else if (isFinancialGrid) {
+          // Financial claim grid: unpdf loses column alignment → Gemini can't map amounts.
+          // Always use VISION so Gemini sees the visual table structure.
+          console.info(`[eob-worker] page ${job.page_number}: financial grid (${Math.round(digitDensity * 100)}% digits, ${meaningfulChars} chars) → VISION mode (column layout preserved)`);
+        } else {
+          console.info(`[eob-worker] page ${job.page_number}: scanned/sparse (${meaningfulChars} chars) → VISION mode`);
+        }
+      } catch (pdfErr: any) {
+        // Non-fatal: any extraction error falls through to vision
+        console.warn(`[eob-worker] PDF text extraction failed, using vision: ${pdfErr.message}`);
+      }
+    }
 
     // STEP 2: AUTHENTICATE to GCP
     const gToken = await getGoogleAccessToken(sa);
 
     // STEP 3: CALL GEMINI 2.0 FLASH (Vertex AI) — per-page extraction with retry
+    // TEXT MODE: send extracted text inline → far fewer tokens, lower cost
+    // VISION MODE: send raw base64 PDF → handles scanned / image-based pages
     const VERTEX_URL = `https://us-central1-aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/us-central1/publishers/google/models/gemini-2.0-flash-001:generateContent`;
+
+    const geminiParts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> =
+      extractionMode === 'text' && pageTextContent
+        ? [
+            { text: GEMINI_PROMPT },
+            { text: `\n\nEOB PAGE TEXT (extracted from digital PDF — treat this as the complete page content):\n\`\`\`\n${pageTextContent}\n\`\`\`` }
+          ]
+        : [
+            { text: GEMINI_PROMPT },
+            { inlineData: { mimeType: 'application/pdf', data: base64PDF } }
+          ];
+
     const geminiBody = JSON.stringify({
-      contents: [{ "role": "user", "parts": [
-        { "text": GEMINI_PROMPT },
-        { "inlineData": { "mimeType": "application/pdf", "data": base64PDF } }
-      ]}],
+      contents: [{ "role": "user", "parts": geminiParts }],
       generationConfig: { "responseMimeType": "application/json", "maxOutputTokens": 8192 }
     });
 
@@ -506,7 +666,7 @@ Deno.serve(async (req) => {
     }
 
     const rawExtracted = parsed.items || parsed.line_items || [];
-    console.info(`[eob-worker] Gemini extracted ${rawExtracted.length} raw line items from page ${job.page_number}`);
+    console.info(`[eob-worker] Gemini extracted ${rawExtracted.length} raw line items from page ${job.page_number} [${extractionMode} mode]`);
 
     // STEP 3B: DEDUPLICATE — merge rows with same composite key
     // Gemini sometimes extracts the same service line twice (once from summary, once from detail).
@@ -585,35 +745,34 @@ Deno.serve(async (req) => {
         }
       }));
 
-      const bqResp = await fetch(BQ_INSERT_URL, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${gToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ rows }),
-      });
+      try {
+        const bqResp = await fetch(BQ_INSERT_URL, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${gToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ rows }),
+        });
 
-      const bqResult = await bqResp.json();
+        const bqResult = await bqResp.json();
 
-      if (!bqResp.ok) {
-        throw new Error(`BigQuery insert failed (HTTP ${bqResp.status}): ${JSON.stringify(bqResult)}`);
+        if (!bqResp.ok) {
+          console.warn(`[eob-worker] BigQuery insert failed (HTTP ${bqResp.status}) — non-fatal, Supabase still receives data: ${JSON.stringify(bqResult)}`);
+        } else if (bqResult.insertErrors && bqResult.insertErrors.length > 0) {
+          console.warn(`[eob-worker] BigQuery partial insert errors (non-fatal, likely schema mismatch): ${JSON.stringify(bqResult.insertErrors[0])}`);
+        } else {
+          console.info(`[eob-worker] Inserted ${rows.length} rows into BigQuery for page ${job.page_number}`);
+        }
+      } catch (bqEx: any) {
+        console.warn(`[eob-worker] BigQuery insert exception (non-fatal): ${bqEx.message}`);
       }
-
-      if (bqResult.insertErrors && bqResult.insertErrors.length > 0) {
-        console.error('[eob-worker] BigQuery partial insert errors:', JSON.stringify(bqResult.insertErrors));
-        throw new Error(`BigQuery insert had ${bqResult.insertErrors.length} row errors: ${JSON.stringify(bqResult.insertErrors[0])}`);
-      }
-
-      console.info(`[eob-worker] Inserted ${rows.length} rows into BigQuery for page ${job.page_number}`);
     }
 
     // STEP 4c: PERSIST TO SUPABASE eob_line_items (for in-app reporting)
-    // Dual-write: BigQuery is source of truth for Looker; Supabase drives the portal Reports page.
-    // Non-fatal: BQ success is what matters; Supabase failure logs a warning and continues.
     if (extracted.length > 0) {
       try {
-        // Delete existing rows for this doc+page first (idempotent re-runs)
+        // Delete existing rows first for idempotency on re-runs
         await supabase
           .from('eob_line_items')
           .delete()
@@ -701,7 +860,8 @@ Deno.serve(async (req) => {
       status: 'succeeded',
       count: extracted.length,
       page_number: job.page_number,
-      eob_document_id: job.eob_document_id
+      eob_document_id: job.eob_document_id,
+      extraction_mode: extractionMode   // 'text' | 'vision' — for cost analysis
     }), { status: 200 });
 
   } catch (err) {

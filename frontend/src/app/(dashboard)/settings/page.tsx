@@ -25,12 +25,29 @@ export default function SettingsPage() {
   const [csvUploading, setCsvUploading] = useState(false)
   const [csvResult, setCsvResult] = useState<{ success: boolean; message: string } | null>(null)
 
+  // Scan folder state
+  const [scanning, setScanning] = useState(false)
+  const [scanDate, setScanDate] = useState<string>(new Date().toISOString().split('T')[0])
+  const [includeCompleted, setIncludeCompleted] = useState(false)
+  const [scanResult, setScanResult] = useState<{
+    folder_name: string | null
+    after_date: string | null
+    found: number
+    skipped_completed: number
+    already_processed: number
+    triggered: number
+    errors: number
+  } | null>(null)
+  const [scanError, setScanError] = useState<string | null>(null)
+
   // Form fields
   const [folderId, setFolderId] = useState('')
   const [folderName, setFolderName] = useState('')
   const [interval, setInterval] = useState(5)
   const [autoMove, setAutoMove] = useState(true)
   const [watcherEnabled, setWatcherEnabled] = useState(false)
+  const [resolving, setResolving] = useState(false)
+  const [resolveError, setResolveError] = useState<string | null>(null)
 
   // Load practice ID and settings
   useEffect(() => {
@@ -87,6 +104,48 @@ export default function SettingsPage() {
     if (!error) {
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
+    }
+  }
+
+  const handleResolveFolderName = async () => {
+    const id = folderId.trim()
+    if (!id) return
+    setResolving(true)
+    setResolveError(null)
+    try {
+      const { data, error } = await supabase.functions.invoke('resolve-drive-folder', {
+        body: { folder_id: id },
+      })
+      if (error) throw new Error(error.message)
+      if (data?.name) {
+        setFolderName(data.name)
+      } else if (data?.error) {
+        setResolveError(data.error)
+      }
+    } catch (err: any) {
+      setResolveError(err.message || 'Could not resolve folder name')
+    } finally {
+      setResolving(false)
+    }
+  }
+
+  const handleScanFolder = async () => {
+    if (!practiceId) return
+    setScanning(true)
+    setScanResult(null)
+    setScanError(null)
+
+    try {
+      const body: Record<string, unknown> = { practice_id: practiceId }
+      if (scanDate) body.after_date = scanDate
+      if (includeCompleted) body.include_completed = true
+      const { data, error } = await supabase.functions.invoke('scan-drive-folder', { body })
+      if (error) throw new Error(error.message)
+      setScanResult(data)
+    } catch (err: any) {
+      setScanError(err.message || 'Scan failed')
+    } finally {
+      setScanning(false)
     }
   }
 
@@ -151,16 +210,37 @@ export default function SettingsPage() {
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Google Drive Folder ID
             </label>
-            <input
-              type="text"
-              value={folderId}
-              onChange={e => setFolderId(e.target.value)}
-              placeholder="e.g. 1A2B3C4D5E6F7G8H9I0J"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-            />
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={folderId}
+                onChange={e => { setFolderId(e.target.value); setResolveError(null) }}
+                placeholder="e.g. 1A2B3C4D5E6F7G8H9I0J"
+                className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-base text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
+              <button
+                type="button"
+                onClick={handleResolveFolderName}
+                disabled={resolving || !folderId.trim()}
+                title="Look up folder name from Google Drive"
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+              >
+                {resolving ? (
+                  <span className="h-4 w-4 animate-spin border-2 border-gray-400 border-t-transparent rounded-full inline-block" />
+                ) : (
+                  <svg className="h-4 w-4 text-gray-500" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+                  </svg>
+                )}
+                Lookup
+              </button>
+            </div>
             <p className="mt-1 text-xs text-gray-400">
-              Find this in your Google Drive folder URL after /folders/
+              Paste the ID from the Drive URL (after /folders/) then click <strong>Lookup</strong> to auto-fill the name.
             </p>
+            {resolveError && (
+              <p className="mt-1 text-xs text-red-600">⚠ {resolveError} — check that the service account has access to this folder.</p>
+            )}
           </div>
 
           <div>
@@ -171,7 +251,7 @@ export default function SettingsPage() {
               type="text"
               value={folderName}
               onChange={e => setFolderName(e.target.value)}
-              placeholder="e.g. EOB Inbox"
+              placeholder="Auto-filled by Lookup, or type manually"
               className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
             />
           </div>
@@ -237,6 +317,111 @@ export default function SettingsPage() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Scan & Process Folder */}
+      <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-6 space-y-4">
+        <div className="flex items-center gap-3">
+          <svg className="w-6 h-6 text-indigo-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+          </svg>
+          <h2 className="text-lg font-semibold text-gray-900">Scan & Process Folder</h2>
+        </div>
+        <p className="text-sm text-gray-500">
+          Scan the configured Drive folder for unprocessed PDFs and trigger extraction.
+          By default, files with <span className="font-mono text-xs bg-gray-100 px-1 rounded">COMPLETED</span> in
+          the name are skipped — use the override below for catch-up runs.
+        </p>
+
+        <div className="space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-medium text-gray-600">Only files created on or after</label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={scanDate}
+                  onChange={e => setScanDate(e.target.value)}
+                  className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-900 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                />
+                <button
+                  onClick={() => setScanDate('')}
+                  className="text-xs text-gray-400 hover:text-gray-600 underline"
+                >
+                  Clear (scan all)
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <label className="flex items-center gap-2 cursor-pointer w-fit">
+            <input
+              type="checkbox"
+              checked={includeCompleted}
+              onChange={e => setIncludeCompleted(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+            />
+            <span className="text-sm text-gray-700">
+              Include <span className="font-mono text-xs bg-gray-100 px-1 rounded">COMPLETED</span> files
+              <span className="ml-1 text-gray-400 text-xs">(catch-up run — duplicates are still skipped)</span>
+            </span>
+          </label>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleScanFolder}
+              disabled={scanning || !folderId}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              {scanning ? (
+                <>
+                  <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                  Scanning…
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+                  </svg>
+                  Scan &amp; Process Folder
+                </>
+              )}
+            </button>
+            {!folderId && (
+              <p className="text-xs text-gray-400">Save a folder ID above to enable scanning.</p>
+            )}
+          </div>
+        </div>
+
+        {scanResult && (
+          <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4 text-sm space-y-1">
+            <p className="font-medium text-indigo-900">
+              Scan complete{scanResult.folder_name ? ` — ${scanResult.folder_name}` : ''}
+              {scanResult.after_date && (
+                <span className="font-normal text-indigo-600"> · files from {scanResult.after_date} onward</span>
+              )}
+            </p>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-indigo-700">
+              <span>{scanResult.found} PDF{scanResult.found !== 1 ? 's' : ''} found</span>
+              {scanResult.skipped_completed > 0 && (
+                <span className="text-amber-600">{scanResult.skipped_completed} COMPLETED skipped</span>
+              )}
+              {scanResult.already_processed > 0 && (
+                <span className="text-gray-500">{scanResult.already_processed} already processed</span>
+              )}
+              <span className="text-green-700 font-medium">{scanResult.triggered} triggered ✓</span>
+              {scanResult.errors > 0 && (
+                <span className="text-red-600">{scanResult.errors} error{scanResult.errors !== 1 ? 's' : ''}</span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {scanError && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+            {scanError}
+          </div>
+        )}
       </div>
 
       {/* Bank Reconciliation CSV Upload */}

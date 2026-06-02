@@ -118,6 +118,15 @@ Deno.serve(async (req) => {
     // with spaces, #, etc. Fall back to deriving from storage path (GCS callers)
     const file_name = original_file_name || file_path!.split("/").pop();
 
+    // Skip files already processed externally (e.g. AZHS marks done files with "COMPLETED")
+    // bypass_completed_guard=true is set by scan-drive-folder on catch-up runs — the filename
+    // has already been normalized (COMPLETED stripped) before reaching here.
+    const bypass_completed_guard = body?.bypass_completed_guard === true;
+    if (!bypass_completed_guard && file_name && file_name.toUpperCase().includes("COMPLETED")) {
+      console.info("[trigger-eob-parser] skipping COMPLETED file:", file_name);
+      return json({ skipped: true, reason: "COMPLETED file", file_name });
+    }
+
     console.info("[trigger-eob-parser] start", {
       practice_id,
       source: has_storage ? "supabase_storage" : has_gdrive ? "google_drive" : "gcs",
@@ -125,18 +134,19 @@ Deno.serve(async (req) => {
     });
 
     // ──────────────────────────────────────────────────────────────
-    // 1) Duplicate detection — block re-upload of same file
-    //    (allows re-upload only if previous attempt failed)
+    // 1) Duplicate detection — check for ANY existing record.
+    //    Non-failed  → block with 409 (already in-flight or done).
+    //    Failed      → reset in-place; avoids violating the
+    //                  (practice_id, file_name) unique constraint.
     // ──────────────────────────────────────────────────────────────
     const { data: existing } = await supabase
       .from("eob_documents")
       .select("id, status, created_at")
       .eq("practice_id", practice_id)
       .eq("file_name", file_name)
-      .neq("status", "failed")
-      .maybeSingle();
+      .maybeSingle();  // intentionally includes failed records
 
-    if (existing) {
+    if (existing && existing.status !== "failed") {
       console.warn("[trigger-eob-parser] duplicate upload blocked:", { file_name, existing_id: existing.id, status: existing.status });
 
       // Log duplicate event for dashboard activity feed
@@ -195,28 +205,56 @@ Deno.serve(async (req) => {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // 2) Create eob_documents entry (status: 'pending')
+    // 2) Create or reset eob_documents entry (status: 'pending')
+    //    • existing failed record → UPDATE in-place (reuse its ID)
+    //    • no record              → INSERT fresh row
     //    eob-enqueue will advance to 'queued' → 'processing'
     // ──────────────────────────────────────────────────────────────
-    const { data: docData, error: docError } = await supabase
-      .from("eob_documents")
-      .insert({
-        practice_id,
-        file_path,
-        file_name,
-        status: "pending",
-        ...(uploaded_by && { uploaded_by }),
-      })
-      .select()
-      .single();
+    let eob_document_id: string;
 
-    if (docError) {
-      console.error("[trigger-eob-parser] document creation error:", docError);
-      return json({ error: "Failed to create document", details: docError.message }, 500);
+    if (existing) {
+      // Failed record exists — reset it rather than inserting a duplicate
+      console.info("[trigger-eob-parser] resetting failed document for reprocessing:", { id: existing.id, file_name });
+      const { error: resetErr } = await supabase
+        .from("eob_documents")
+        .update({
+          status: "pending",
+          file_path,
+          error_message: null,
+          items_extracted: 0,
+          ...(uploaded_by && { uploaded_by }),
+        })
+        .eq("id", existing.id);
+
+      if (resetErr) {
+        console.error("[trigger-eob-parser] failed to reset document:", resetErr);
+        return json({ error: "Failed to reset document", details: resetErr.message }, 500);
+      }
+
+      eob_document_id = existing.id;
+      console.info("[trigger-eob-parser] reset eob_document", { eob_document_id });
+    } else {
+      // Truly new document — INSERT fresh record
+      const { data: docData, error: docError } = await supabase
+        .from("eob_documents")
+        .insert({
+          practice_id,
+          file_path,
+          file_name,
+          status: "pending",
+          ...(uploaded_by && { uploaded_by }),
+        })
+        .select()
+        .single();
+
+      if (docError) {
+        console.error("[trigger-eob-parser] document creation error:", docError);
+        return json({ error: "Failed to create document", details: docError.message }, 500);
+      }
+
+      eob_document_id = docData.id;
+      console.info("[trigger-eob-parser] created eob_document", { eob_document_id });
     }
-
-    const eob_document_id = docData.id;
-    console.info("[trigger-eob-parser] created eob_document", { eob_document_id });
 
     // ──────────────────────────────────────────────────────────────
     // 3) Create processing log — audit trail for when PDF was
