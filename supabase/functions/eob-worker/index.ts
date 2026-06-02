@@ -332,7 +332,8 @@ IMPORTANT — Summary/Check Pages:
 - Set paid_amount to the total check/EFT amount.
 - Set remark_code to the check number or EFT trace number (e.g., "CHK-12345" or "EFT-98765").
 - Set payment_date to the check/EFT issue date if visible.
-- If the page lists both individual claim lines AND a total, extract BOTH: the individual lines as "medical_service" and the total as "summary_total".
+- CRITICAL — when to emit summary_total: A "summary_total" row is ONLY correct when this page is a true check stub or payment-summary page — meaning it shows a check number / EFT trace / payment total but does NOT contain individual CPT/HCPCS procedure codes or service-line breakdowns. If the page has CPT/HCPCS codes or individual claim-service rows (e.g., BCBS Payment Detail pages, MCO claim-detail grids), it is a DETAIL page. Extract ONLY "medical_service" rows from it — NEVER emit a "summary_total". Any "Total", "Total Paid", or grand-total line printed at the bottom of a detail page is a page footer — omit it entirely.
+- A true check-stub page may additionally list the claims it covers at a high level (patient names + amounts, no CPT codes). In that case extract those rows as "medical_service" AND the overall check total as one "summary_total". But the presence of CPT codes anywhere on the page immediately reclassifies it as a detail page where no summary_total is allowed.
 - Do NOT double-count: the summary_total represents the check total, not an additional payment.
 
 IMPORTANT — Subtotal / Per-Claim Totals (DO NOT extract):
