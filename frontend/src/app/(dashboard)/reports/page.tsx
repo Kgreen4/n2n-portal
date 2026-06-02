@@ -865,8 +865,25 @@ export default function ReportsPage() {
                               >
                                 ⚠ Failed — Retry
                               </button>
+                            ) : dbStatus === 'completed' || dbStatus === 'needs_review' ? (
+                              // Extraction finished but gap persists — show status + re-run option
+                              <div className="inline-flex flex-col items-end gap-1">
+                                <span className="inline-flex items-center gap-1 text-xs font-medium text-green-700">
+                                  <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                                  </svg>
+                                  Extracted
+                                </span>
+                                <button
+                                  onClick={() => handleReprocess(row.docId!)}
+                                  className="text-[10px] text-gray-400 hover:text-amber-700 underline underline-offset-2"
+                                  title="Re-extract this document again"
+                                >
+                                  re-run
+                                </button>
+                              </div>
                             ) : (
-                              // Idle (completed, needs_review, or no status yet)
+                              // No status yet — offer initial reprocess
                               <button
                                 onClick={() => handleReprocess(row.docId!)}
                                 className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 shadow-sm transition-colors"
