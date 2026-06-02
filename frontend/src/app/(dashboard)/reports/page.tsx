@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 
 type Period = '7d' | '30d' | '90d' | 'all'
@@ -134,6 +134,9 @@ export default function ReportsPage() {
   const [reprocessingDocs, setReprocessingDocs] = useState<Set<string>>(new Set())
   const [reprocessedDocs, setReprocessedDocs] = useState<Set<string>>(new Set())
   const [reprocessError, setReprocessError] = useState<string | null>(null)
+  // Live processing_status from eob_documents — polled while any doc is in-flight
+  const [docStatuses, setDocStatuses] = useState<Map<string, string>>(new Map())
+  const prevDocStatusesRef = useRef<Map<string, string>>(new Map())
 
   useEffect(() => {
     let cancelled = false
@@ -179,6 +182,72 @@ export default function ReportsPage() {
   // refreshKey is intentionally included: incrementing it re-runs load() after a reprocess
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period, refreshKey])
+
+  // ── Live document-status polling ──────────────────────────────────────────
+  // After every items reload, fetch processing_status for all docs present in
+  // the data, then poll every 5 s while any doc is queued or processing.
+  // When a doc transitions to finished, increment refreshKey so the gap table
+  // re-derives from the freshly extracted line items.
+  useEffect(() => {
+    // Reset transition tracker on every items reload to avoid false re-triggers
+    prevDocStatusesRef.current = new Map()
+
+    const docIds = Array.from(new Set(
+      items.map(i => i.eob_document_id).filter((id): id is string => !!id)
+    ))
+    if (docIds.length === 0) {
+      setDocStatuses(new Map())
+      return
+    }
+
+    let cancelled = false
+    let pollTimer: ReturnType<typeof setTimeout> | null = null
+
+    async function fetchStatuses() {
+      if (cancelled) return
+      const { data } = await supabase
+        .from('eob_documents')
+        .select('id, processing_status')
+        .in('id', docIds)
+      if (cancelled || !data) return
+
+      const newMap = new Map<string, string>()
+      for (const row of data) newMap.set(row.id, row.processing_status ?? '')
+
+      // Detect transitions from in-progress → finished so we can reload line items
+      let anyJustFinished = false
+      for (const [id, status] of newMap) {
+        const prev = prevDocStatusesRef.current.get(id) ?? ''
+        if ((prev === 'queued' || prev === 'processing') &&
+            status !== 'queued' && status !== 'processing') {
+          anyJustFinished = true
+        }
+      }
+
+      setDocStatuses(newMap)
+      prevDocStatusesRef.current = newMap
+
+      if (anyJustFinished) {
+        // Reload line items — the items useEffect will restart this poll cycle
+        setRefreshKey(k => k + 1)
+        return
+      }
+
+      const anyInProgress = data.some(
+        r => r.processing_status === 'queued' || r.processing_status === 'processing'
+      )
+      if (anyInProgress) {
+        pollTimer = setTimeout(fetchStatuses, 5000)
+      }
+    }
+
+    fetchStatuses()
+    return () => {
+      cancelled = true
+      if (pollTimer) clearTimeout(pollTimer)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items])
 
   // ── Aggregations ──────────────────────────────────────────────
   //
@@ -742,8 +811,14 @@ export default function ReportsPage() {
                   </thead>
                   <tbody className="divide-y divide-gray-50">
                     {docGapRows.map((row, idx) => {
-                      const isReprocessing = row.docId ? reprocessingDocs.has(row.docId) : false
-                      const wasReprocessed = row.docId ? reprocessedDocs.has(row.docId) : false
+                      // isSubmitting — API call is in-flight (instant local feedback)
+                      const isSubmitting   = row.docId ? reprocessingDocs.has(row.docId) : false
+                      // wasJustQueued — API returned success but DB status not yet polled
+                      const wasJustQueued  = row.docId ? reprocessedDocs.has(row.docId) : false
+                      // Live DB status — authoritative once the first poll fires
+                      const dbStatus       = row.docId ? (docStatuses.get(row.docId) ?? '') : ''
+                      const isQueuedDB     = dbStatus === 'queued'
+                      const isProcessingDB = dbStatus === 'processing'
                       return (
                         <tr key={idx} className="hover:bg-amber-50/40">
                           <td className="px-5 py-2.5 text-gray-800 max-w-[320px] truncate" title={row.sourceDoc}>
@@ -755,31 +830,49 @@ export default function ReportsPage() {
                           <td className="px-5 py-2.5 text-right">
                             {!row.docId ? (
                               <span className="text-gray-300 text-xs">—</span>
-                            ) : wasReprocessed && !isReprocessing ? (
-                              <span className="inline-flex items-center gap-1 text-xs font-medium text-green-700">
-                                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" strokeWidth="2.5" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                            ) : isSubmitting ? (
+                              // API call in-flight — instant spinner before DB confirms
+                              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-500">
+                                <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                </svg>
+                                Submitting…
+                              </span>
+                            ) : isProcessingDB ? (
+                              // DB confirmed actively processing
+                              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-700">
+                                <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                </svg>
+                                Processing…
+                              </span>
+                            ) : isQueuedDB || wasJustQueued ? (
+                              // DB confirmed queued (or just submitted locally)
+                              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700">
+                                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
                                 </svg>
                                 Queued
                               </span>
-                            ) : (
+                            ) : dbStatus === 'failed' ? (
+                              // Processing failed — offer retry
                               <button
                                 onClick={() => handleReprocess(row.docId!)}
-                                disabled={isReprocessing}
-                                className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm transition-colors"
+                                className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium bg-white border border-red-300 text-red-700 hover:bg-red-50 shadow-sm transition-colors"
+                                title="Processing failed — click to retry"
+                              >
+                                ⚠ Failed — Retry
+                              </button>
+                            ) : (
+                              // Idle (completed, needs_review, or no status yet)
+                              <button
+                                onClick={() => handleReprocess(row.docId!)}
+                                className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 shadow-sm transition-colors"
                                 title="Re-extract this document to close the gap"
                               >
-                                {isReprocessing ? (
-                                  <>
-                                    <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
-                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                                    </svg>
-                                    Reprocessing…
-                                  </>
-                                ) : (
-                                  <>↺ Reprocess</>
-                                )}
+                                ↺ Reprocess
                               </button>
                             )}
                           </td>
