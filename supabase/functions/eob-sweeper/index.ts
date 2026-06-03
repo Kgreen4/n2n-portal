@@ -136,7 +136,7 @@ Deno.serve(async (req) => {
         if (totalJobs === 0) continue; // No page jobs yet — not orphaned, maybe still enqueueing
 
         const terminalJobs = pageJobs.filter(j =>
-          j.status === 'succeeded' || j.status === 'failed'
+          j.status === 'succeeded' || j.status === 'failed' || j.status === 'dead'
         ).length;
         const succeededJobs = pageJobs.filter(j => j.status === 'succeeded').length;
         const totalItems = pageJobs
