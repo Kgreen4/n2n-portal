@@ -564,7 +564,9 @@ Deno.serve(async (req) => {
     // STEP 3: CALL GEMINI 2.0 FLASH (Vertex AI) — per-page extraction with retry
     // TEXT MODE: send extracted text inline → far fewer tokens, lower cost
     // VISION MODE: send raw base64 PDF → handles scanned / image-based pages
-    const VERTEX_URL = `https://us-central1-aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/us-central1/publishers/google/models/gemini-2.0-flash-001:generateContent`;
+    // NOTE: Use the unversioned alias (no -001 suffix) so deployment is not
+    // affected by Google deprecating a pinned snapshot version.
+    const VERTEX_URL = `https://us-central1-aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/us-central1/publishers/google/models/gemini-2.0-flash:generateContent`;
 
     const geminiParts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> =
       extractionMode === 'text' && pageTextContent
