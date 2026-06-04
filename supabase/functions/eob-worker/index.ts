@@ -564,9 +564,10 @@ Deno.serve(async (req) => {
     // STEP 3: CALL GEMINI 2.0 FLASH (Vertex AI) — per-page extraction with retry
     // TEXT MODE: send extracted text inline → far fewer tokens, lower cost
     // VISION MODE: send raw base64 PDF → handles scanned / image-based pages
-    // NOTE: Use the unversioned alias (no -001 suffix) so deployment is not
-    // affected by Google deprecating a pinned snapshot version.
-    const VERTEX_URL = `https://us-central1-aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/us-central1/publishers/google/models/gemini-2.0-flash:generateContent`;
+    // NOTE: gemini-2.0-flash was deprecated in cardio-metrics-dev on 2026-06-03.
+    // Using gemini-3.5-flash — the current general-purpose multimodal Flash model
+    // available in this GCP project (confirmed via Vertex AI Model Garden).
+    const VERTEX_URL = `https://us-central1-aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/us-central1/publishers/google/models/gemini-3.5-flash:generateContent`;
 
     const geminiParts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> =
       extractionMode === 'text' && pageTextContent
