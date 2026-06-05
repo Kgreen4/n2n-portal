@@ -561,13 +561,15 @@ Deno.serve(async (req) => {
     // STEP 2: AUTHENTICATE to GCP
     const gToken = await getGoogleAccessToken(sa);
 
-    // STEP 3: CALL GEMINI 2.0 FLASH (Vertex AI) — per-page extraction with retry
+    // STEP 3: CALL GEMINI (Vertex AI) — per-page extraction with retry
     // TEXT MODE: send extracted text inline → far fewer tokens, lower cost
     // VISION MODE: send raw base64 PDF → handles scanned / image-based pages
     // NOTE: gemini-2.0-flash was deprecated in cardio-metrics-dev on 2026-06-03.
-    // Using gemini-3.5-flash — the current general-purpose multimodal Flash model
-    // available in this GCP project (confirmed via Vertex AI Model Garden).
-    const VERTEX_URL = `https://us-central1-aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/us-central1/publishers/google/models/gemini-3.5-flash:generateContent`;
+    // NOTE: gemini-3.x models ONLY work via the global endpoint (not us-central1).
+    //   Using a regional endpoint (us-central1) for Gemini 3.x returns:
+    //   "Publisher Model ... was not found or your project does not have access to it."
+    //   Fix: base URL must be aiplatform.googleapis.com with locations/global.
+    const VERTEX_URL = `https://aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/global/publishers/google/models/gemini-3.5-flash:generateContent`;
 
     const geminiParts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> =
       extractionMode === 'text' && pageTextContent
