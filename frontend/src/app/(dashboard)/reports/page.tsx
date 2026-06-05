@@ -469,9 +469,15 @@ export default function ReportsPage() {
         const itemB = globalCheckMap.get(keyB)
         if (!itemA || !itemB) continue                                 // already collapsed
         if (itemA.eob_document_id !== itemB.eob_document_id) continue  // different docs
-        if (!/^\d+$/.test(keyA) || !/^\d+$/.test(keyB)) continue       // non-numeric
-        if (Math.abs(keyA.length - keyB.length) > 2) continue          // length mismatch
-        const dist = levenshtein(keyA, keyB)
+        // Sanitize before numeric test: OCR sometimes injects non-digit chars
+        // (e.g. "?" for a misread digit, as in "00025888?2" → "000258882").
+        // Strip them so the purely-numeric guard and Levenshtein distance both
+        // operate on the clean digit string rather than rejecting the entry.
+        const keyAClean = keyA.replace(/[^a-zA-Z0-9]/g, '')
+        const keyBClean = keyB.replace(/[^a-zA-Z0-9]/g, '')
+        if (!/^\d+$/.test(keyAClean) || !/^\d+$/.test(keyBClean)) continue   // non-numeric
+        if (Math.abs(keyAClean.length - keyBClean.length) > 2) continue       // length mismatch
+        const dist = levenshtein(keyAClean, keyBClean)
         if (dist > 2) continue
         // Collapse: drop the lower-amount entry as the OCR phantom
         const amtA = itemA.paid_amount ?? 0
@@ -524,9 +530,13 @@ export default function ReportsPage() {
         const itemA = perDocCheckMap.get(keyA)
         const itemB = perDocCheckMap.get(keyB)
         if (!itemA || !itemB) continue                                  // already collapsed
-        if (!/^\d+$/.test(checkA) || !/^\d+$/.test(checkB)) continue   // non-numeric
-        if (Math.abs(checkA.length - checkB.length) > 2) continue       // length mismatch
-        const dist = levenshtein(checkA, checkB)
+        // Same OCR sanitization as the global pass above — strip non-alphanumeric
+        // chars before the numeric guard so "00025888?2" collapses with "0002588872".
+        const checkAClean = checkA.replace(/[^a-zA-Z0-9]/g, '')
+        const checkBClean = checkB.replace(/[^a-zA-Z0-9]/g, '')
+        if (!/^\d+$/.test(checkAClean) || !/^\d+$/.test(checkBClean)) continue   // non-numeric
+        if (Math.abs(checkAClean.length - checkBClean.length) > 2) continue       // length mismatch
+        const dist = levenshtein(checkAClean, checkBClean)
         if (dist > 2) continue
         const amtA = itemA.paid_amount ?? 0
         const amtB = itemB.paid_amount ?? 0
