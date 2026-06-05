@@ -561,10 +561,15 @@ Deno.serve(async (req) => {
     // STEP 2: AUTHENTICATE to GCP
     const gToken = await getGoogleAccessToken(sa);
 
-    // STEP 3: CALL GEMINI 2.0 FLASH (Vertex AI) — per-page extraction with retry
+    // STEP 3: CALL GEMINI (Vertex AI) — per-page extraction with retry
     // TEXT MODE: send extracted text inline → far fewer tokens, lower cost
     // VISION MODE: send raw base64 PDF → handles scanned / image-based pages
-    const VERTEX_URL = `https://us-central1-aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/us-central1/publishers/google/models/gemini-2.0-flash-001:generateContent`;
+    // NOTE: gemini-2.0-flash was deprecated in cardio-metrics-dev on 2026-06-03.
+    // NOTE: gemini-3.x models ONLY work via the global endpoint (not us-central1).
+    //   Using a regional endpoint (us-central1) for Gemini 3.x returns:
+    //   "Publisher Model ... was not found or your project does not have access to it."
+    //   Fix: base URL must be aiplatform.googleapis.com with locations/global.
+    const VERTEX_URL = `https://aiplatform.googleapis.com/v1/projects/${sa.project_id}/locations/global/publishers/google/models/gemini-3.5-flash:generateContent`;
 
     const geminiParts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> =
       extractionMode === 'text' && pageTextContent
@@ -585,33 +590,56 @@ Deno.serve(async (req) => {
     let aiResp!: Response;
     let aiData: any;
 
-    for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
-      aiResp = await fetch(VERTEX_URL, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${gToken}`, 'Content-Type': 'application/json' },
-        body: geminiBody
-      });
-      aiData = await aiResp.json();
+    // Hard 120 s budget across all Gemini attempts (well inside the 150 s Pro edge-function limit).
+    // If Gemini hangs and the fetch never resolves, aborting here lets the catch block run
+    // and call fail_eob_page_job — which marks the job "retryable" so the sweeper picks it up.
+    // Without this, Deno kills the function at 150 s and the catch block may never execute,
+    // leaving the page job stuck in "queued" forever.
+    const GEMINI_TOTAL_TIMEOUT_MS = 120_000;
+    const geminiController = new AbortController();
+    const geminiTotalTimer = setTimeout(
+      () => geminiController.abort(new Error(`Gemini total timeout exceeded (${GEMINI_TOTAL_TIMEOUT_MS / 1000}s)`)),
+      GEMINI_TOTAL_TIMEOUT_MS
+    );
 
-      if (aiResp.ok && !aiData.error) break;  // success
+    try {
+      for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
+        aiResp = await fetch(VERTEX_URL, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${gToken}`, 'Content-Type': 'application/json' },
+          body: geminiBody,
+          signal: geminiController.signal,
+        });
+        aiData = await aiResp.json();
 
-      const isRetryable = aiResp.status === 429 || aiResp.status === 503;
-      const errMsg = aiData.error?.message || `Gemini HTTP ${aiResp.status}`;
+        if (aiResp.ok && !aiData.error) break;  // success
 
-      if (!isRetryable || attempt === GEMINI_MAX_RETRIES) {
-        console.error(`[eob-worker] Gemini API error for page ${job.page_number}: ${errMsg}`);
-        throw new Error(`Gemini API error: ${errMsg}`);
+        const isRetryable = aiResp.status === 429 || aiResp.status === 503;
+        const errMsg = aiData.error?.message || `Gemini HTTP ${aiResp.status}`;
+
+        if (!isRetryable || attempt === GEMINI_MAX_RETRIES) {
+          console.error(`[eob-worker] Gemini API error for page ${job.page_number}: ${errMsg}`);
+          throw new Error(`Gemini API error: ${errMsg}`);
+        }
+
+        // Exponential backoff, respecting Retry-After header if present
+        const retryAfterHeader = aiResp.headers.get('Retry-After');
+        const retryAfterMs = retryAfterHeader ? parseInt(retryAfterHeader, 10) * 1000 : 0;
+        const backoffMs = Math.max(
+          GEMINI_RETRY_BASE_MS * Math.pow(GEMINI_RETRY_MULTIPLIER, attempt),
+          retryAfterMs
+        );
+        console.warn(`[eob-worker] Gemini ${aiResp.status} on page ${job.page_number} (attempt ${attempt + 1}/${GEMINI_MAX_RETRIES + 1}), retrying in ${backoffMs / 1000}s...`);
+        await sleep(backoffMs);
       }
-
-      // Exponential backoff, respecting Retry-After header if present
-      const retryAfterHeader = aiResp.headers.get('Retry-After');
-      const retryAfterMs = retryAfterHeader ? parseInt(retryAfterHeader, 10) * 1000 : 0;
-      const backoffMs = Math.max(
-        GEMINI_RETRY_BASE_MS * Math.pow(GEMINI_RETRY_MULTIPLIER, attempt),
-        retryAfterMs
-      );
-      console.warn(`[eob-worker] Gemini ${aiResp.status} on page ${job.page_number} (attempt ${attempt + 1}/${GEMINI_MAX_RETRIES + 1}), retrying in ${backoffMs / 1000}s...`);
-      await sleep(backoffMs);
+    } catch (fetchErr: any) {
+      // Re-throw with a clear label so the outer catch → fail_eob_page_job path fires.
+      // DOMException name "AbortError" means our 120 s timer fired.
+      const isAbort = fetchErr?.name === 'AbortError' || geminiController.signal.aborted;
+      const label = isAbort ? 'Gemini timeout (120s)' : 'Gemini fetch error';
+      throw new Error(`${label}: ${fetchErr.message}`);
+    } finally {
+      clearTimeout(geminiTotalTimer);
     }
 
     // Handle empty/blocked Gemini responses (cover pages, blank pages)
