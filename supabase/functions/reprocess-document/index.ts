@@ -1,6 +1,8 @@
 // reprocess-document — Orchestrates full re-extraction of an EOB document.
+// 0. Auth guard — requires valid user JWT or service role key
 // 1. Verifies document exists
 // 2. Deletes existing BigQuery rows (async Jobs API — required for DML)
+// 2b. Deletes existing Supabase eob_line_items rows (prevents stacked duplicates on multi-run)
 // 3. Deletes page jobs from Supabase
 // 4. Resets document status to 'pending' (single clean UPDATE)
 // 5. Re-triggers eob-enqueue to re-extract with updated Gemini prompt
@@ -10,6 +12,7 @@ import { getCorsHeaders, corsResponse } from "../_shared/cors.ts";
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY');
 const GCP_SA_JSON_STR = Deno.env.get('GCP_SA_JSON')!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -145,6 +148,37 @@ Deno.serve(async (req) => {
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
     });
 
+  // ── 0. AUTH GUARD ──────────────────────────────────────────
+  // Requires either a valid user JWT (from the frontend via supabase.functions.invoke)
+  // or the service role key (for any future server-to-server calls).
+  // Deployed with --no-verify-jwt so the Supabase gateway does not block the request,
+  // but we enforce auth at the application level here.
+  const authHeader = req.headers.get('Authorization');
+  if (!authHeader) {
+    return json({ error: 'Unauthorized' }, 401);
+  }
+
+  const token = authHeader.replace('Bearer ', '');
+  if (token !== SUPABASE_SERVICE_ROLE_KEY) {
+    // Not the service role key — validate as a user JWT via the anon-key client
+    if (!SUPABASE_ANON_KEY) {
+      console.error('[reprocess] SUPABASE_ANON_KEY not set — cannot validate user JWT');
+      return json({ error: 'Unauthorized' }, 401);
+    }
+    const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const { data: { user }, error: authError } = await authClient.auth.getUser();
+    if (authError || !user) {
+      console.error(`[reprocess] Auth failed: ${authError?.message ?? 'no user'}`);
+      return json({ error: 'Unauthorized' }, 401);
+    }
+    console.info(`[reprocess] Authenticated user: ${user.id}`);
+  } else {
+    console.info('[reprocess] Authenticated via service role key');
+  }
+  // ── END AUTH GUARD ─────────────────────────────────────────
+
   try {
     const { eob_document_id } = await req.json();
     if (!eob_document_id) return json({ error: 'eob_document_id is required' }, 400);
@@ -206,6 +240,20 @@ Deno.serve(async (req) => {
       bqDeleted = await bqDeleteDocument(gToken, eob_document_id);
     } catch (bqErr: any) {
       console.warn(`[reprocess] BigQuery delete failed (non-fatal, continuing): ${bqErr.message}`);
+    }
+
+    // 2b. DELETE SUPABASE LINE ITEMS
+    // CRITICAL: without this, each reprocess appends new rows on top of old ones,
+    // inflating extractedPaid in the Reports reconciliation gap 2-3x per run.
+    const { error: liErr } = await supabase
+      .from('eob_line_items')
+      .delete()
+      .eq('eob_document_id', eob_document_id);
+
+    if (liErr) {
+      console.warn(`[reprocess] Supabase line items delete failed (non-fatal): ${liErr.message}`);
+    } else {
+      console.info(`[reprocess] Deleted Supabase eob_line_items for document ${eob_document_id}`);
     }
 
     // 3. DELETE PAGE JOBS
