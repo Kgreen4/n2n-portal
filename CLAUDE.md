@@ -1,6 +1,6 @@
 # N2N Analytics — Project Brief
 # Repo-level project memory. Updated at end of each session.
-# Last updated: 2026-06-02
+# Last updated: 2026-06-05
 
 ---
 
@@ -12,7 +12,7 @@ with a live paying client.
 
 **Owner:** Keith Green — CPA, MBA, Data Engineer, Founder N2N Analytics
 **Stack:** Next.js 14 · Supabase (Postgres + Edge Functions + Storage) ·
-           Google BigQuery · Vertex AI (Gemini 2.0 Flash) · Vercel · Stripe ·
+           Google BigQuery · Vertex AI (Gemini 3.5 Flash — global endpoint) · Vercel · Stripe ·
            n8n (Render.com)
 **Architecture reference:** `docs/N2N_Portal_Architecture.md` — read in full
                             before touching any code.
@@ -89,6 +89,9 @@ to delete; the 8 objects listed above are NOT.
 | `ingest-uploads` | GCW Analytics | ✅ Deployed |
 | `get-practice-summary` | N2N Portal | ✅ Deployed + tested · all 8 KPIs verified |
 | `eob-enqueue` | N2N Portal | ✅ Deployed · waitUntil fix — workers no longer abandoned on large docs |
+| `eob-worker` | N2N Portal | ✅ Deployed 2026-06-05 · Gemini global endpoint · BCBS section-delimiter · retryable enum fix |
+| `eob-sweeper` | N2N Portal | ✅ Deployed 2026-06-05 · retryable enum fix |
+| `reprocess-document` | N2N Portal | ✅ Deployed · BQ delete + full re-extraction from original file path |
 | `trigger-eob-parser` | N2N Portal | ✅ Deployed · COMPLETED guard + bypass_completed_guard flag |
 | `scan-drive-folder` | N2N Portal | ✅ Deployed `--no-verify-jwt` · per-trigger 6s timeout for large batches |
 
@@ -257,8 +260,18 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
 - [x] Fix Reports reconciliation gap Action column — live DB polling replaces ephemeral state;
       shows Submitting/Processing/Queued/Failed/Reprocess based on eob_documents.processing_status;
       persists across page reloads; auto-refreshes line items when processing completes (2026-06-02)
-- [ ] Verify reconciliation gaps closed after reprocessing (BCBS OF AZ_EOB'S $9,364 · BCBS OF AZ_MULTIPLE $3,918 · MERCY CARE $158) ⬅ CHECK AFTER REPROCESS COMPLETES
-- [ ] Merge open MRs: `fix/bcbs-section-delimited-double-count`, `fix/reports-processing-status-indicator`, `fix/bcbs-phantom-deposit-prompt`
+- [x] Merge open MRs: `fix/bcbs-section-delimited-double-count`, `fix/reports-processing-status-indicator`, `fix/bcbs-phantom-deposit-prompt`, `fix/retryable-enum-sweeper` — all merged into main ✅
+- [x] Deploy eob-worker (Gemini global endpoint + BCBS section-delimiter fix) ✅
+- [x] Deploy eob-sweeper (retryable enum fix) ✅
+- [x] Fix OCR check-number sanitization — strip non-alnum before Levenshtein dedup (closes $159.95 phantom duplicate on BCBS EOB'S) · branch `fix/ocr-check-sanitize-non-alnum` merged + deployed ✅
+- [x] Investigate BCBS OF AZ_EOB'S gap ($4,720.98) — root causes identified:
+      1. OCR phantom duplicate `00025888?2` / `0002588872` ($159.95) — fixed by OCR sanitize above
+      2. Thin-row dedup over-removing claims (~$2,676) — improves after section-delimiter fix
+      3. True extraction gap (~$2,044) from 0-item pages — improves with new Gemini model + BCBS fix
+- [ ] Verify reconciliation gaps closed after reprocessing (2026-06-05 reprocess in-flight) ⬅ CHECK REPORTS PAGE
+      · BCBS OF AZ_EOB'S_MULTIPLE PAYMENTS (ccdbe216) — was $4,720.98 gap
+      · BCBS OF AZ_MULTIPLE EOB'S_PAYMENTS (c4a94f14) — was $620.84 gap
+      · MERCY CARE_EOB'S_MULTIPLE PAYMENTS (49d0d52b) — was $583.79 gap
 - [ ] Resolve duplicate AZHS practice — confirm if `aa000001` (no user) should be
       deleted or if Keith's user should be linked to it ⬅ CLARIFY WITH KEITH
 - [ ] Configure n8n eob-sweeper trigger (credential ID not set) — recovery for stuck jobs
@@ -279,11 +292,15 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
 - AZHS duplicate practice: two rows in `practices` / `practice_settings` for AZHS.
   Active practice is "AZHS-test" (`45204f7a`). Seeded "Arizona Heart Specialists"
   (`aa000001`) has no user link — confirm with Keith before cleaning up.
-- Reconciliation gaps under investigation — all 3 gap docs reprocessed 2026-06-02:
-  · BCBS OF AZ_EOB'S_MULTIPLE PAYMENTS (ccdbe216) — gap was $9,364.82; reprocessed to close roster_summary tagging gap
-  · BCBS OF AZ_MULTIPLE EOB'S_PAYMENTS (c4a94f14) — gap was $3,918.26; reprocessed
-  · MERCY CARE_EOB'S_MULTIPLE PAYMENTS (a7ded716) — gap was $158.39; reprocessed
-  Verify on Reports page after processing completes. If BCBS OF AZ_EOB'S gap remains large, may need deeper investigation into pages that failed extraction.
+- Reconciliation gaps — reprocessed 2026-06-05 with fixed eob-worker (Gemini global endpoint +
+  BCBS section-delimiter + OCR check sanitize). Awaiting results on Reports page:
+  · BCBS OF AZ_EOB'S_MULTIPLE PAYMENTS (ccdbe216) — prior gap $4,720.98; multi-causal
+    (phantom duplicate, thin-row dedup over-removal, true extraction gap on 0-item pages)
+  · BCBS OF AZ_MULTIPLE EOB'S_PAYMENTS (c4a94f14) — prior gap $620.84
+  · MERCY CARE_EOB'S_MULTIPLE PAYMENTS (49d0d52b) — prior gap $583.79
+- Gemini model: switched to `gemini-3.5-flash` via global endpoint
+  (`aiplatform.googleapis.com/v1/projects/.../locations/global/...`) — `us-central1` was
+  throwing "Publisher Model not found". All page workers now use global endpoint.
 
 ---
 
