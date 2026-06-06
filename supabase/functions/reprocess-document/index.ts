@@ -3,6 +3,7 @@
 // 1. Verifies document exists
 // 2. Deletes existing BigQuery rows (async Jobs API — required for DML)
 // 2b. Deletes existing Supabase eob_line_items rows (prevents stacked duplicates on multi-run)
+// 2c. Deletes existing Supabase eob_payments rows (check-level hierarchy — reset for re-ingestion)
 // 3. Deletes page jobs from Supabase
 // 4. Resets document status to 'pending' (single clean UPDATE)
 // 5. Re-triggers eob-enqueue to re-extract with updated Gemini prompt
@@ -254,6 +255,20 @@ Deno.serve(async (req) => {
       console.warn(`[reprocess] Supabase line items delete failed (non-fatal): ${liErr.message}`);
     } else {
       console.info(`[reprocess] Deleted Supabase eob_line_items for document ${eob_document_id}`);
+    }
+
+    // 2c. DELETE SUPABASE eob_payments (check-level hierarchy)
+    // These are upserted fresh during re-ingestion; stale rows cause check-level
+    // gaps to persist in the Reports page even after a successful reprocess.
+    const { error: pmtErr } = await supabase
+      .from('eob_payments')
+      .delete()
+      .eq('eob_document_id', eob_document_id);
+
+    if (pmtErr) {
+      console.warn(`[reprocess] eob_payments delete failed (non-fatal): ${pmtErr.message}`);
+    } else {
+      console.info(`[reprocess] Deleted eob_payments for document ${eob_document_id}`);
     }
 
     // 3. DELETE PAGE JOBS

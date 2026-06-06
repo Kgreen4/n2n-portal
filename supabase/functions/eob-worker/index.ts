@@ -220,12 +220,12 @@ function deduplicateItems(items: any[]): any[] {
     // Group by normalized paid_amount; keep the highest-quality row (which will be the
     // one with a non-null remark_code / check number, scored higher by quality()).
     if (item.line_type === 'summary_total') {
-      // Key on BOTH amount AND check/EFT number (remark_code) so that two checks
-      // in the same PDF with the same dollar amount are NOT collapsed into one row.
-      // A bare amount-only key caused multi-check PDFs with equal amounts to merge,
-      // losing a check entry and widening the reconciliation gap artificially.
+      // Key on BOTH amount AND check/EFT number so that two checks with the same
+      // dollar amount in the same PDF are NOT collapsed into one row.
+      // Prefer new 'check_number' field (populated by hierarchical prompt);
+      // fall back to 'remark_code' for backward compat with pre-hierarchy responses.
       const summaryAmt = String(parseCurrency(item.paid_amount) ?? item.paid_amount ?? '__noamt');
-      const summaryChk = String(item.remark_code ?? '__nochk').trim();
+      const summaryChk = String(item.check_number ?? item.remark_code ?? '__nochk').trim();
       const summaryKey = `__summary_${summaryAmt}_${summaryChk}`;
       const existing = groups.get(summaryKey);
       if (!existing) {
@@ -339,7 +339,11 @@ FIRST — Identify the document type for this page:
 - SUMMARY/CHECK PAGE: Contains check-level totals, payment summaries, or provider-level payment totals. These pages show the total amount paid via a check or EFT, often with a check number.
 - COVER PAGE: Contains only headers, instructions, or administrative info with no extractable data
 
-Return a JSON object with an 'items' array. Each item must include these fields (use null if not found):
+Return a JSON object with two top-level keys:
+- 'items' — an array of all line items extracted from this page (fields listed below)
+- 'payments' — an array of all distinct checks or EFT payments found on this page (see PAYMENTS ARRAY section below)
+
+Each item in 'items' must include these fields (use null if not found):
 - line_type: "medical_service" for standard claims, "incentive_bonus" for MIPS/quality bonuses, "adjustment" for payment adjustments, "summary_total" for check/payment totals
 - patient_name: Full name of the patient
 - member_id: Member/subscriber ID number
@@ -351,13 +355,14 @@ Return a JSON object with an 'items' array. Each item must include these fields 
 - paid_amount: Amount paid by the insurance company (numeric, no $ sign). For MIPS bonuses, this is the bonus/incentive amount. For summary totals, this is the check/EFT total amount
 - patient_responsibility: Amount the patient owes (numeric, no $ sign)
 - rendering_provider_npi: NPI number of the rendering provider
-- remark_code: ALL CARC/RARC remark/reason codes for this line, comma-separated if multiple (e.g., "CO-45", "PR-1, OA-23", "B19-PR, PXN-PR"). Extract EVERY code shown for the line, not just the first one. Common code prefixes: CO = Contractual Obligation, PR = Patient Responsibility, OA = Other Adjustment. If a code appears with a group prefix (e.g., "B19-PR" means group B19 with PR responsibility), keep the full code as printed. For summary totals, use the check number or EFT trace number if available
+- remark_code: ALL CARC/RARC remark/reason codes for this line, comma-separated if multiple (e.g., "CO-45", "PR-1, OA-23", "B19-PR, PXN-PR"). Extract EVERY code shown for the line, not just the first one. Common code prefixes: CO = Contractual Obligation, PR = Patient Responsibility, OA = Other Adjustment. If a code appears with a group prefix (e.g., "B19-PR" means group B19 with PR responsibility), keep the full code as printed. For summary totals, use null — the check/EFT number is now captured in the dedicated 'check_number' field and the 'payments' array
 - remark_reason: Text explanation for the remark, adjustment, or denial. For MIPS bonuses, include the Claim ID here if available. For summary totals, include the payer name or payment method
 - claim_status: Status of the claim. Look for explicit labels like "Paid", "Denied", "Adjusted", "Partially Paid", "Processed", or similar text. If no explicit status text is printed on the EOB, INFER the status from the financial fields: if paid_amount > 0 and paid_amount >= allowed_amount use "Paid"; if paid_amount > 0 but paid_amount < allowed_amount use "Partially Paid"; if paid_amount = 0 or null use "Denied"; if adjustment_amount > 0 and paid_amount > 0 use "Adjusted". For MIPS bonuses, use "Incentive Paid". For summary totals, use "Summary". NEVER return null for claim_status on medical_service lines — always infer if not explicitly shown.
 - claim_number: The payer's claim control number / ICN (Internal Claim Number). This is the reference number assigned by the insurance company to this specific claim. Often printed as "Claim #", "ICN", "DCN", "Claim Reference", or "Reference #" on the EOB. Use null if not visible.
 - payment_date: Date the check or EFT was issued (format: YYYY-MM-DD). Usually printed on the check stub, payment summary, or in the page header as "Payment Date", "Check Date", or "Date Issued". Apply the same date to all items on the page if it appears only in the header. Use null if not visible on this page.
 - payer_name: Name of the insurance company / payer issuing this payment. Look in page headers, footers, letterhead, or the "From" / "Payer" section. Apply to all items on the page. Use null if not visible. CRITICAL: payer_name is ALWAYS the insurance company (e.g., "BlueCross BlueShield of Arizona", "Aetna", "UnitedHealthcare"). It is NEVER the medical practice, physician group, clinic, or hospital that is receiving the payment. If the document shows a "Pay to:", "Payee:", "Remit to:", or "Provider:" field with the practice/clinic name, that is the check RECIPIENT — ignore it for payer_name.
 - payer_id: Payer identifier number (if visible). Sometimes shown as "Payer ID", "Plan ID", or near the payer name. Use null if not visible.
+- check_number: The check number or EFT trace number from the section or page header that governs this specific line item. For medical_service lines: the check/EFT number of the payment section that contains this claim (set by the nearest preceding section or page header). For summary_total lines: that check's own number. Populate on EVERY item where a check number is visible. Use null only when no governing check/EFT number is determinable for this item.
 - adjustment_amount: For adjustment or denial lines, the TOTAL dollar amount of the adjustment (numeric, no $ sign). This is typically billed_amount minus paid_amount, or the specific denied/adjusted/contractual amount shown on the line. Use null for fully paid lines or if no adjustment amount is shown.
 - deductible_amount: The portion of patient responsibility attributed to the deductible (numeric, no $ sign). On many EOBs this appears in a "Deductible" or "Ded" column, or within a combined "Not Covered Ded-Coin-Inst" breakdown. Use null if not broken out separately on the EOB.
 - coinsurance_amount: The portion of patient responsibility attributed to coinsurance (numeric, no $ sign). Often shown as "Coinsurance", "Coins", "Co-Ins" column, or within the combined "Not Covered Ded-Coin-Inst" breakdown. Use null if not broken out separately.
@@ -381,7 +386,8 @@ IMPORTANT — MIPS/Bonus Pages:
 IMPORTANT — Summary/Check Pages:
 - If the page shows a check total, EFT total, or provider payment summary, extract EXACTLY ONE summary_total item per check or EFT payment. Do NOT create multiple summary_total rows for the same check.
 - Set paid_amount to the total check/EFT amount.
-- Set remark_code to the check number or EFT trace number (e.g., "CHK-12345" or "EFT-98765"). This is the most important field on the summary page — look carefully for it.
+- Set check_number to the check number or EFT trace number (e.g., "12345" or "EFT-98765"). This is the most important field on the summary page — look carefully for it. Also add an entry to the 'payments' array for this check.
+- Set remark_code to any CARC/RARC adjustment codes shown on this summary page, or null if none.
 - Set payer_name to the insurance company name (e.g., "BlueCross BlueShield of Arizona"). NEVER use the medical practice or provider name as payer_name, even if the check is made out to the practice. The "Pay to" / "Payee" / "Remit to" field shows who is RECEIVING the check — do not create a separate summary_total row for the payee.
 - Set payment_date to the check/EFT issue date if visible.
 - If the page lists both individual claim lines AND a total, extract BOTH: the individual lines as "medical_service" and the total as "summary_total".
@@ -389,11 +395,11 @@ IMPORTANT — Summary/Check Pages:
 
 IMPORTANT — Multi-Check Sections (single PDF containing multiple checks or EFTs):
 - A single EOB PDF may contain multiple distinct check or EFT payment sections. Each section begins with its own check number, check date, and check amount, followed by the claim lines it covers.
-- When extracting medical_service claim lines, tag EACH line with the check_number (remark_code) from the section header that immediately precedes it — NOT from the overall document header or from a different section.
-- The active check_number for any claim line is determined by the most recent check/EFT section header appearing ABOVE that line in the document. When you encounter a new section header (new check number), update the active check_number for all subsequent lines until the next section header.
+- When extracting medical_service claim lines, populate the check_number field of EACH line with the check or EFT number from the section header that immediately precedes it — NOT from the overall document header or from a different section.
+- The active check_number for any claim line is determined by the most recent check/EFT section header appearing ABOVE that line in the document. When you encounter a new section header (new check number), update the check_number field for all subsequent lines until the next section header.
 - Never inherit a check_number from a different section into another section's claim lines, even if they appear on the same page.
-- For summary_total items: create exactly ONE summary_total row per distinct check or EFT. Use that check's unique number as remark_code and that check's total as paid_amount. Do not create a single summary_total for the grand total across all checks unless there is no per-check breakdown.
-- Example: if page 2 has "Check #0231499940 — $71.20" followed by claims A and B, then page 6 has "Check #0231499945 — $97.56" followed by claim C, then claim C's remark_code must be "0231499945" and the summary_total for claim C's section must also use "0231499945" — not "0231499940".
+- For summary_total items: create exactly ONE summary_total row per distinct check or EFT. Set check_number to that check's number and paid_amount to that check's total. Also add an entry to the 'payments' array for each distinct check/EFT. Do not create a single summary_total for the grand total across all checks unless there is no per-check breakdown.
+- Example: if page 2 has "Check #0231499940 — $71.20" followed by claims A and B, then page 6 has "Check #0231499945 — $97.56" followed by claim C, then claim C's check_number must be "0231499945" and the summary_total for claim C's section must also have check_number "0231499945" — not "0231499940". The payments[] array must have entries for both checks: {check_number:"0231499940", check_amount:71.20, ...} and {check_number:"0231499945", check_amount:97.56, ...}.
 
 IMPORTANT — Subtotal / Per-Claim Totals (DO NOT extract):
 - Many EOBs print a subtotal box below individual claim lines showing "Benefits Paid", "Total Paid", "Claim Total", or a bare dollar amount. These subtotal boxes merely restate the paid_amount from the detail line above. Do NOT extract these as separate items.
@@ -474,11 +480,25 @@ Many Managed Care Organizations use a compact grid-style remittance layout that 
 
 8. MERCY CARE / ARIZONA-SPECIFIC MCO: Mercy Care remittances may show the member's Mercy Care ID (a long numeric string starting with the state prefix) in a "Member ID" column. Use that as member_id. The "Auth #" or "Auth Number" column is NOT the claim_number — that is a prior authorization number. Use the "Claim #" or "Reference #" column for claim_number.
 
+PAYMENTS ARRAY — Return exactly one entry per distinct check or EFT found on this page:
+Each 'payments' entry must have these fields:
+- check_number: The check number or EFT trace number (required — the primary identifier for this payment)
+- payment_date: Issue date (YYYY-MM-DD, or null)
+- payer_name: Insurance company name (or null)
+- payer_id: Payer identifier number (or null)
+- check_amount: Total check/EFT dollar amount (numeric, no $ sign)
+
+Rules for 'payments':
+- Include an entry for every unique check or EFT found on this page (from check stubs, section headers, or payment summaries)
+- If this page has NO check/EFT information (e.g., a pure claim-detail page without an associated check stub), return an empty array: []
+- Never include per-patient subtotals or per-claim amounts as payments entries — only whole check/EFT totals
+- If the same check appears on multiple pages of the document, include it on every page where it is visible — the system handles deduplication at the document level
+
 Other instructions:
 - Extract EVERY line item on the page, do not skip any
 - If a field is not present, set it to null
 - Return amounts as numbers without dollar signs or commas
-- If the page has absolutely no extractable data (blank page, signature-only page), return: {"items": []}`;
+- If the page has absolutely no extractable data (blank page, signature-only page), return: {"items": [], "payments": []}`;
 
 
 // ──────────────────────────────────────────────────────────────
@@ -694,7 +714,9 @@ Deno.serve(async (req) => {
     }
 
     const rawExtracted = parsed.items || parsed.line_items || [];
-    console.info(`[eob-worker] Gemini extracted ${rawExtracted.length} raw line items from page ${job.page_number} [${extractionMode} mode]`);
+    // Hierarchical model: check/EFT register extracted by Gemini alongside items[]
+    const rawPayments: any[] = parsed.payments || [];
+    console.info(`[eob-worker] Gemini extracted ${rawExtracted.length} raw line items, ${rawPayments.length} payments from page ${job.page_number} [${extractionMode} mode]`);
 
     // STEP 3B: DEDUPLICATE — merge rows with same composite key
     // Gemini sometimes extracts the same service line twice (once from summary, once from detail).
@@ -797,6 +819,59 @@ Deno.serve(async (req) => {
       }
     }
 
+    // STEP 4b: UPSERT eob_payments — authoritative check/EFT register
+    // Build from Gemini's payments[] response; fall back to summary_total items
+    // for backward compat with pre-hierarchy documents or pages Gemini missed.
+    const paymentsList: any[] = rawPayments.length > 0
+      ? rawPayments
+      : extracted
+          .filter((it: any) => it.line_type === 'summary_total' && parseCurrency(it.paid_amount) !== null)
+          .map((it: any) => ({
+            check_number: it.check_number || it.remark_code || null,
+            payment_date: it.payment_date || null,
+            payer_name: it.payer_name || null,
+            payer_id: it.payer_id || null,
+            check_amount: parseCurrency(it.paid_amount),
+          }));
+
+    // checkNum → eob_payments UUID — used to stamp eob_payment_id on service lines
+    const checkPaymentIdMap = new Map<string, string>();
+
+    if (paymentsList.length > 0) {
+      try {
+        for (const pmt of paymentsList) {
+          const checkNum = pmt.check_number ? String(pmt.check_number).trim() : null;
+          if (!checkNum) continue;   // No check number → can't upsert
+
+          const pmtRow = {
+            eob_document_id: job.eob_document_id,
+            practice_id: practice_id,
+            check_number: checkNum,
+            payment_date: formatBQDate(pmt.payment_date) || null,
+            payer_name: pmt.payer_name || null,
+            payer_id: pmt.payer_id || null,
+            check_amount: parseCurrency(pmt.check_amount) ?? parseCurrency(pmt.paid_amount) ?? null,
+            page_number: job.page_number,
+          };
+
+          const { data: pmtData, error: pmtErr } = await supabase
+            .from('eob_payments')
+            .upsert(pmtRow, { onConflict: 'eob_document_id,check_number' })
+            .select('id')
+            .single();
+
+          if (pmtErr) {
+            console.warn(`[eob-worker] eob_payments upsert failed for check ${checkNum}: ${pmtErr.message}`);
+          } else if (pmtData?.id) {
+            checkPaymentIdMap.set(checkNum, pmtData.id);
+            console.info(`[eob-worker] eob_payments upserted check ${checkNum} → ${pmtData.id}`);
+          }
+        }
+      } catch (pmtEx: any) {
+        console.warn(`[eob-worker] eob_payments upsert block exception (non-fatal): ${pmtEx.message}`);
+      }
+    }
+
     // STEP 4c: PERSIST TO SUPABASE eob_line_items (for in-app reporting)
     if (extracted.length > 0) {
       try {
@@ -838,6 +913,12 @@ Deno.serve(async (req) => {
           contractual_adjustment: parseCurrency(it.contractual_adjustment),
           non_covered_amount: parseCurrency(it.non_covered_amount),
           confidence_score: parseInt(it.confidence_score) || null,
+          // Hierarchical model fields (populated for documents processed after the
+          // 20260605_eob_payments_hierarchy migration; null for legacy documents)
+          source_check_number: it.check_number ? String(it.check_number).trim() : null,
+          eob_payment_id: it.check_number
+            ? (checkPaymentIdMap.get(String(it.check_number).trim()) ?? null)
+            : null,
         }));
 
         const { error: sbErr } = await supabase
