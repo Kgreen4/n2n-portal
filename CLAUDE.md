@@ -1,6 +1,6 @@
 # N2N Analytics — Project Brief
 # Repo-level project memory. Updated at end of each session.
-# Last updated: 2026-06-05
+# Last updated: 2026-06-06
 
 ---
 
@@ -89,9 +89,9 @@ to delete; the 8 objects listed above are NOT.
 | `ingest-uploads` | GCW Analytics | ✅ Deployed |
 | `get-practice-summary` | N2N Portal | ✅ Deployed + tested · all 8 KPIs verified |
 | `eob-enqueue` | N2N Portal | ✅ Deployed · waitUntil fix — workers no longer abandoned on large docs |
-| `eob-worker` | N2N Portal | ✅ Deployed 2026-06-05 · Gemini global endpoint · BCBS section-delimiter · retryable enum fix |
+| `eob-worker` | N2N Portal | ✅ Deployed 2026-06-06 · hierarchical model · dual-array Gemini prompt · two-stage upsert (eob_payments → stamp eob_payment_id) |
 | `eob-sweeper` | N2N Portal | ✅ Deployed 2026-06-05 · retryable enum fix |
-| `reprocess-document` | N2N Portal | ✅ Deployed · BQ delete + full re-extraction from original file path |
+| `reprocess-document` | N2N Portal | ✅ Deployed 2026-06-06 · step 2c deletes eob_payments before re-enqueue |
 | `trigger-eob-parser` | N2N Portal | ✅ Deployed · COMPLETED guard + bypass_completed_guard flag |
 | `scan-drive-folder` | N2N Portal | ✅ Deployed `--no-verify-jwt` · per-trigger 6s timeout for large batches |
 
@@ -279,6 +279,12 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
 - [ ] Sign BAA with Supabase
 - [ ] Sign BAA with Dr. Ravi (Keith's responsibility)
 - [x] Rotate Supabase service role key ✅
+- [x] Hierarchical EOB model — 4-part refactor complete (2026-06-06):
+      1. Schema: `eob_payments` table + `eob_payment_id` FK on `eob_line_items` — migration applied ✅
+      2. eob-worker: dual-array Gemini prompt + two-stage ingestion (upsert payments → stamp IDs) ✅
+      3. reprocess-document: step 2c deletes `eob_payments` on reprocess ✅
+      4. Reports page: check-level gap section + `legacyDocGapRows` fallback ✅
+      Branch: `feature/hierarchical-eob-model` — MR open for review
 
 ---
 
@@ -301,6 +307,12 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
 - Gemini model: switched to `gemini-3.5-flash` via global endpoint
   (`aiplatform.googleapis.com/v1/projects/.../locations/global/...`) — `us-central1` was
   throwing "Publisher Model not found". All page workers now use global endpoint.
+- Hierarchical EOB model (2026-06-06): `eob_payments` table and `eob_payment_id` FK on
+  `eob_line_items` are live in production DB. `eob-worker` and `reprocess-document` deployed.
+  Reports page shows check-level gap section for new documents, legacy doc-level section
+  for old documents. Branch `feature/hierarchical-eob-model` awaiting merge review.
+  Next step: reprocess AZHS/GCW docs to populate `eob_payments` rows and verify check-level
+  reconciliation closes the remaining gaps.
 
 ---
 
