@@ -28,11 +28,35 @@ interface LineItem {
   claim_number: string | null
   payer_name: string | null
   remark_code: string | null
+  source_check_number: string | null
+  eob_payment_id: string | null
   remark_reason: string | null
   remark_description: string | null
   payment_date: string | null
   confidence_score: number | null
   created_at: string
+}
+
+interface EobPayment {
+  id: string
+  eob_document_id: string
+  practice_id: string
+  check_number: string | null
+  payment_date: string | null
+  payer_name: string | null
+  payer_id: string | null
+  check_amount: number | null
+}
+
+interface CheckGapRow {
+  checkNumber: string
+  paymentDate: string | null
+  payerName: string | null
+  checkAmount: number
+  extractedPaid: number
+  gap: number
+  sourceDoc: string
+  docId: string
 }
 
 interface PayerRow {
@@ -137,6 +161,7 @@ export default function ReportsPage() {
   // Live status from eob_documents — polled while any doc is in-flight
   const [docStatuses, setDocStatuses] = useState<Map<string, string>>(new Map())
   const prevDocStatusesRef = useRef<Map<string, string>>(new Map())
+  const [eobPayments, setEobPayments] = useState<EobPayment[]>([])
 
   useEffect(() => {
     let cancelled = false
@@ -174,6 +199,23 @@ export default function ReportsPage() {
       if (cancelled) return
       if (err) { setError(err.message); setLoading(false); return }
       setItems(data ?? [])
+
+      // Load eob_payments for check-level gap analysis (hierarchical ingestion path)
+      {
+        let pq = supabase
+          .from('eob_payments')
+          .select('*')
+          .eq('practice_id', link.practice_id)
+          .order('created_at', { ascending: false })
+          .limit(500)
+        if (period !== 'all') {
+          const days = period === '7d' ? 7 : period === '30d' ? 30 : 90
+          pq = pq.gte('created_at', new Date(Date.now() - days * 86400_000).toISOString())
+        }
+        const { data: pmtData } = await pq
+        if (!cancelled) setEobPayments(pmtData ?? [])
+      }
+
       setLoading(false)
     }
 
@@ -433,7 +475,7 @@ export default function ReportsPage() {
   // check number, keep the one with the highest amount; tie-break on non-null payer name.
   const globalCheckMap = new Map<string, LineItem>()
   for (const i of datedDepositItems) {
-    const checkNum = normalizeCheckNum(i.remark_code)
+    const checkNum = normalizeCheckNum(i.source_check_number || i.remark_code)
     if (!checkNum) continue  // no check number — handled below in nullCheckItems
     const existing = globalCheckMap.get(checkNum)
     if (!existing) {
@@ -502,7 +544,7 @@ export default function ReportsPage() {
   // same check number string.
   const perDocCheckMap = new Map<string, LineItem>()
   for (const i of datedDepositItems) {
-    const checkNum = normalizeCheckNum(i.remark_code)
+    const checkNum = normalizeCheckNum(i.source_check_number || i.remark_code)
     const doc = i.file_name || ''
     if (!checkNum) continue
     const key = `${doc}||${checkNum}`
@@ -547,12 +589,12 @@ export default function ReportsPage() {
   }
 
   // Null-check# rows that have a date (rare; can't dedup without a key — keep all)
-  const nullCheckItems = datedDepositItems.filter(i => !normalizeCheckNum(i.remark_code))
+  const nullCheckItems = datedDepositItems.filter(i => !normalizeCheckNum(i.source_check_number || i.remark_code))
 
   const depositItems = [...globalCheckMap.values(), ...nullCheckItems]
   const depositMap = new Map<string, DepositRow>()
   for (const i of depositItems) {
-    const checkNum = normalizeCheckNum(i.remark_code) || '(Unknown)'
+    const checkNum = normalizeCheckNum(i.source_check_number || i.remark_code) || '(Unknown)'
     const payer = normalizePayer(i.payer_name)
     const key = `${payer}||${checkNum}`
     const row = depositMap.get(key)
@@ -587,6 +629,14 @@ export default function ReportsPage() {
   for (const item of items) {
     if (item.file_name && item.eob_document_id && !fileNameToDocId.has(item.file_name)) {
       fileNameToDocId.set(item.file_name, item.eob_document_id)
+    }
+  }
+
+  // Reverse lookup: eob_document_id → file_name (needed for check-level gap sourceDoc)
+  const docIdToFileName = new Map<string, string>()
+  for (const item of items) {
+    if (item.eob_document_id && item.file_name && !docIdToFileName.has(item.eob_document_id)) {
+      docIdToFileName.set(item.eob_document_id, item.file_name)
     }
   }
 
@@ -625,6 +675,45 @@ export default function ReportsPage() {
       .filter(r => Math.abs(r.gap) > 1)
       .sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap))
   })()
+
+  // Check-level gap: for each eob_payment row, compare its check_amount to the sum of
+  // extracted claim lines that carry matching eob_payment_id (hierarchical ingestion path).
+  // Documents that were ingested before the hierarchical model produce no eob_payments rows
+  // and fall through to legacyDocGapRows below.
+  const checkGapRows: CheckGapRow[] = (() => {
+    const paidByPaymentId = new Map<string, number>()
+    for (const item of medicalItems) {
+      if (!item.eob_payment_id) continue
+      paidByPaymentId.set(
+        item.eob_payment_id,
+        (paidByPaymentId.get(item.eob_payment_id) ?? 0) + (item.paid_amount ?? 0)
+      )
+    }
+    return eobPayments
+      .filter(p => (p.check_amount ?? 0) > 0)
+      .map(p => {
+        const extractedPaid = paidByPaymentId.get(p.id) ?? 0
+        const checkAmount = p.check_amount ?? 0
+        return {
+          checkNumber: p.check_number ?? '(Unknown)',
+          paymentDate: p.payment_date,
+          payerName: p.payer_name,
+          checkAmount,
+          extractedPaid,
+          gap: checkAmount - extractedPaid,
+          sourceDoc: docIdToFileName.get(p.eob_document_id) ?? '(unknown)',
+          docId: p.eob_document_id,
+        }
+      })
+      .filter(r => Math.abs(r.gap) > 1)
+      .sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap))
+  })()
+
+  // Legacy fallback: document-level gap for docs that predate the hierarchical model
+  const docsWithCheckCoverage = new Set(eobPayments.map(p => p.eob_document_id))
+  const legacyDocGapRows = docGapRows.filter(
+    r => !r.docId || !docsWithCheckCoverage.has(r.docId)
+  )
 
   // Filtered + paginated items for the table (exclude summary_total rows — those appear in Deposit Summary;
   // exclude roster_summary rows — aggregate roster pages are cross-referenced into medicalItems above)
@@ -771,13 +860,12 @@ export default function ReportsPage() {
             </div>
           </div>
 
-          {/* ── Reconciliation Gap Analysis ───────────────────────────
-              Shown prominently between KPIs and the itemised Deposit Summary.
-              Each row identifies a source document where the remittance cover-page
-              check total doesn't match the sum of extracted claim lines, and
-              exposes a one-click Reprocess action to re-extract and close the gap.
-          ──────────────────────────────────────────────────────────── */}
-          {docGapRows.length > 0 && (
+          {/* ── Check-Level Reconciliation Gap (hierarchical ingestion path) ──
+              Shown when eob_payments rows exist for the practice. Each row is one
+              check/EFT whose extracted claim total doesn't match the check amount.
+              Provides check-level precision vs. the legacy document-level fallback.
+          ──────────────────────────────────────────────────────────────────── */}
+          {checkGapRows.length > 0 && (
             <div className="mt-6 rounded-xl border border-amber-200 bg-white shadow-sm overflow-hidden">
               <div className="border-b border-amber-200 px-5 py-4 bg-amber-50 flex items-start justify-between gap-4">
                 <div>
@@ -785,16 +873,156 @@ export default function ReportsPage() {
                     <svg className="h-4 w-4 text-amber-600 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
                     </svg>
-                    Reconciliation Gap — {fmtDec(Math.abs(depositTotal - totalPaid))}
+                    Check-Level Reconciliation Gap — {fmtDec(checkGapRows.reduce((s, r) => s + Math.abs(r.gap), 0))}
                   </h2>
                   <p className="mt-0.5 text-xs text-amber-700">
-                    {docGapRows.length} document{docGapRows.length !== 1 ? 's' : ''} where the remittance check total
+                    {checkGapRows.length} check{checkGapRows.length !== 1 ? 's' : ''} where the remittance check amount
+                    doesn&apos;t match the sum of extracted claim lines linked to that check.
+                    Reprocess the source document to close the gap.
+                  </p>
+                </div>
+                <span className="shrink-0 inline-flex items-center rounded-full bg-amber-100 border border-amber-200 px-2.5 py-0.5 text-xs font-semibold text-amber-800">
+                  {checkGapRows.length} check{checkGapRows.length !== 1 ? 's' : ''}
+                </span>
+              </div>
+
+              {reprocessError && (
+                <div className="border-b border-red-100 bg-red-50 px-5 py-2.5 text-xs text-red-700 flex items-center gap-2">
+                  <svg className="h-3.5 w-3.5 shrink-0 text-red-500" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9.303 3.376c.866 1.5-.217 3.374-1.948 3.374H4.645c-1.73 0-2.813-1.874-1.948-3.374L10.051 3.378c.866-1.5 3.032-1.5 3.898 0l7.354 12.748zM12 15.75h.007v.008H12v-.008z" />
+                  </svg>
+                  {reprocessError}
+                  <button onClick={() => setReprocessError(null)} className="ml-auto text-red-400 hover:text-red-600">✕</button>
+                </div>
+              )}
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left bg-gray-50 border-b border-gray-100">
+                      <th className="px-5 py-2.5 text-xs font-medium text-gray-500">Check / EFT #</th>
+                      <th className="px-5 py-2.5 text-xs font-medium text-gray-500">Payer</th>
+                      <th className="px-5 py-2.5 text-xs font-medium text-gray-500">Check Date</th>
+                      <th className="px-5 py-2.5 text-xs font-medium text-gray-500">Source Document</th>
+                      <th className="px-5 py-2.5 text-xs font-medium text-gray-500 text-right">Check Amount</th>
+                      <th className="px-5 py-2.5 text-xs font-medium text-gray-500 text-right">Extracted Paid</th>
+                      <th className="px-5 py-2.5 text-xs font-medium text-amber-600 text-right">Gap</th>
+                      <th className="px-5 py-2.5 text-xs font-medium text-gray-500 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {checkGapRows.map((row, idx) => {
+                      const isSubmitting   = reprocessingDocs.has(row.docId)
+                      const wasJustQueued  = reprocessedDocs.has(row.docId)
+                      const dbStatus       = docStatuses.get(row.docId) ?? ''
+                      const isQueuedDB     = dbStatus === 'queued'
+                      const isProcessingDB = dbStatus === 'processing'
+                      return (
+                        <tr key={idx} className="hover:bg-amber-50/40">
+                          <td className="px-5 py-2.5 font-mono text-blue-700">{row.checkNumber}</td>
+                          <td className="px-5 py-2.5 text-gray-600 max-w-[160px] truncate" title={row.payerName ?? ''}>
+                            {row.payerName || <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">
+                            {fmtDate(row.paymentDate) || <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-5 py-2.5 text-gray-400 max-w-[200px] truncate" title={row.sourceDoc}>
+                            {row.sourceDoc || '(unknown)'}
+                          </td>
+                          <td className="px-5 py-2.5 text-right text-gray-600">{fmtDec(row.checkAmount)}</td>
+                          <td className="px-5 py-2.5 text-right text-gray-600">{fmtDec(row.extractedPaid)}</td>
+                          <td className="px-5 py-2.5 text-right font-semibold text-amber-700">{fmtDec(row.gap)}</td>
+                          <td className="px-5 py-2.5 text-right">
+                            {isSubmitting ? (
+                              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-500">
+                                <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                </svg>
+                                Submitting…
+                              </span>
+                            ) : isProcessingDB ? (
+                              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-700">
+                                <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                </svg>
+                                Processing…
+                              </span>
+                            ) : dbStatus === 'completed' || dbStatus === 'needs_review' ? (
+                              <div className="inline-flex flex-col items-end gap-1">
+                                <span className="inline-flex items-center gap-1 text-xs font-medium text-green-700">
+                                  <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                                  </svg>
+                                  Extracted
+                                </span>
+                                <button
+                                  onClick={() => handleReprocess(row.docId)}
+                                  className="text-[10px] text-gray-400 hover:text-amber-700 underline underline-offset-2"
+                                  title="Re-extract this document again"
+                                >
+                                  re-run
+                                </button>
+                              </div>
+                            ) : dbStatus === 'failed' ? (
+                              <button
+                                onClick={() => handleReprocess(row.docId)}
+                                className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium bg-white border border-red-300 text-red-700 hover:bg-red-50 shadow-sm transition-colors"
+                                title="Processing failed — click to retry"
+                              >
+                                ⚠ Failed — Retry
+                              </button>
+                            ) : isQueuedDB || wasJustQueued ? (
+                              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700">
+                                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                                Queued
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => handleReprocess(row.docId)}
+                                className="inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 shadow-sm transition-colors"
+                                title="Re-extract this document to close the gap"
+                              >
+                                ↺ Reprocess
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* ── Reconciliation Gap Analysis (legacy — document level) ────────
+              Shown for documents that predate the hierarchical ingestion model.
+              Each row identifies a source document where the remittance cover-page
+              check total doesn't match the sum of extracted claim lines, and
+              exposes a one-click Reprocess action to re-extract and close the gap.
+          ──────────────────────────────────────────────────────────── */}
+          {legacyDocGapRows.length > 0 && (
+            <div className="mt-6 rounded-xl border border-amber-200 bg-white shadow-sm overflow-hidden">
+              <div className="border-b border-amber-200 px-5 py-4 bg-amber-50 flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-sm font-semibold text-amber-900 flex items-center gap-1.5">
+                    <svg className="h-4 w-4 text-amber-600 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                    </svg>
+                    Reconciliation Gap — {fmtDec(legacyDocGapRows.reduce((s, r) => s + Math.abs(r.gap), 0))}
+                  </h2>
+                  <p className="mt-0.5 text-xs text-amber-700">
+                    {legacyDocGapRows.length} document{legacyDocGapRows.length !== 1 ? 's' : ''} where the remittance check total
                     doesn&apos;t match the sum of extracted claim lines. Reprocess to close the gap, or investigate
                     if the document has no individual claim lines (e.g. a check-only stub with no EOB pages).
                   </p>
                 </div>
                 <span className="shrink-0 inline-flex items-center rounded-full bg-amber-100 border border-amber-200 px-2.5 py-0.5 text-xs font-semibold text-amber-800">
-                  {docGapRows.length} file{docGapRows.length !== 1 ? 's' : ''}
+                  {legacyDocGapRows.length} file{legacyDocGapRows.length !== 1 ? 's' : ''}
                 </span>
               </div>
 
@@ -820,7 +1048,7 @@ export default function ReportsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
-                    {docGapRows.map((row, idx) => {
+                    {legacyDocGapRows.map((row, idx) => {
                       // isSubmitting — API call is in-flight (instant local feedback)
                       const isSubmitting   = row.docId ? reprocessingDocs.has(row.docId) : false
                       // wasJustQueued — API returned success but DB status not yet polled
