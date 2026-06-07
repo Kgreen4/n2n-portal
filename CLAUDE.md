@@ -285,6 +285,10 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
       3. reprocess-document: step 2c deletes `eob_payments` on reprocess ✅
       4. Reports page: check-level gap section + `legacyDocGapRows` fallback ✅
       Branch: `feature/hierarchical-eob-model` — MR open for review
+- [x] finalize-document stampPaymentIds — all service lines for BCBS ccdbe216 (224/224) and c4a94f14 (195/195) have eob_payment_id populated ✅ Reports page will now show non-zero extracted_paid
+- [x] Gemini Summary Roster Exclusion — eob-worker deployed 2026-06-06 · branch `fix/gemini-summary-roster-exclusion` · prevents double-counting of BCBS aggregate-only roster pages ✅
+- [ ] Reprocess BCBS MULTIPLE EOB'S (c4a94f14) to apply Summary Roster rule + fix OCR date errors (2016 vs 2026) ⬅ NEXT
+- [ ] Reprocess BCBS EOB'S MULTIPLE (ccdbe216) to clean up 16 phantom check rows ⬅ NEXT
 
 ---
 
@@ -311,6 +315,7 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
   `eob_line_items` are live in production DB. `eob-worker` and `reprocess-document` deployed.
   Reports page shows check-level gap section for new documents, legacy doc-level section
   for old documents. Branch `feature/hierarchical-eob-model` awaiting merge review.
+  All existing service lines for BCBS/Mercy Care docs now have `eob_payment_id` populated (finalize-document stampPaymentIds confirmed 100% coverage). Reports page extracted_paid is no longer $0.
   Next step: reprocess AZHS/GCW docs to populate `eob_payments` rows and verify check-level
   reconciliation closes the remaining gaps.
 
