@@ -454,6 +454,19 @@ CRITICAL RULES for section-delimited pages:
 6. PAGE GRAND TOTAL — Some pages show a grand total at the very bottom summing all sections (e.g., "Page Total: $XXX.XX" or "Total for this page: $XXX.XX"). Omit it entirely. It is a page-level footer, not a claim row, and must not be extracted as either medical_service or summary_total.
 7. ZERO PAID ROWS — Include CPT service lines where the "Paid" column is $0.00 as medical_service rows with paid_amount = 0. Do not skip them.
 
+IMPORTANT — Summary Roster Exclusion (BCBS and other payers):
+SUMMARY ROSTER EXCLUSION: Some documents include "Summary Roster" pages at the end of a check section that list claims and total amounts but DO NOT include CPT codes, dates of service, or individual service line details. DO NOT extract any rows from these summary pages. Only extract medical_service items from pages that contain detailed service lines (even if those detail lines lack CPT codes, as specified in the "Payment Detail" rule above).
+
+How to identify a Summary Roster page — ALL of the following will be true:
+- The page or section is titled "Summary", "Roster", "Summary Roster", or similar
+- Columns are limited to aggregate-level fields such as: "Claim #", "Amount Paid", "Patient Responsibility", "Total Paid", "Claim Total" — with NO "Date of Service", "CPT", "HCPCS", "Procedure", or "Billed Amount" columns
+- There are NO individual CPT/HCPCS procedure codes anywhere on the page
+- There are NO per-service-line date-of-service entries
+- The rows appear to restate claim totals already extracted from earlier detail pages in the same check section (the same claim numbers and dollar amounts appear on an earlier detail page)
+- The page occurs at the end of a payment section, after the detail pages for that check
+
+If a page meets these criteria, return {"items": [], "payments": []} for that page. Do NOT extract any medical_service rows from it — those amounts are already captured on the preceding detail pages and extracting them again will double-count the payment totals.
+
 IMPORTANT — MCO / Managed Care Remittance Formats (Mercy Care, Aetna, UnitedHealthcare, Humana, etc.):
 Many Managed Care Organizations use a compact grid-style remittance layout that differs significantly from standard BCBS-style EOBs. Follow these rules when you encounter MCO-style documents:
 
