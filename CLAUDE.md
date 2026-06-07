@@ -284,9 +284,9 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
       2. eob-worker: dual-array Gemini prompt + two-stage ingestion (upsert payments → stamp IDs) ✅
       3. reprocess-document: step 2c deletes `eob_payments` on reprocess ✅
       4. Reports page: check-level gap section + `legacyDocGapRows` fallback ✅
-      Branch: `feature/hierarchical-eob-model` — MR open for review
+      Branch: `feature/hierarchical-eob-model` — merged ✅
 - [x] finalize-document stampPaymentIds — all service lines for BCBS ccdbe216 (224/224) and c4a94f14 (195/195) have eob_payment_id populated ✅ Reports page will now show non-zero extracted_paid
-- [x] Gemini Summary Roster Exclusion — eob-worker deployed 2026-06-06 · branch `fix/gemini-summary-roster-exclusion` · prevents double-counting of BCBS aggregate-only roster pages ✅
+- [x] Gemini Summary Roster Exclusion — eob-worker deployed 2026-06-07 · branch `fix/gemini-summary-roster-exclusion` merged ✅ · prevents double-counting of BCBS aggregate-only roster pages
 - [ ] Reprocess BCBS MULTIPLE EOB'S (c4a94f14) to apply Summary Roster rule + fix OCR date errors (2016 vs 2026) ⬅ NEXT
 - [ ] Reprocess BCBS EOB'S MULTIPLE (ccdbe216) to clean up 16 phantom check rows ⬅ NEXT
 
@@ -311,13 +311,13 @@ Query `view_eob_line_items` and `view_charge_report` (not raw tables).
 - Gemini model: switched to `gemini-3.5-flash` via global endpoint
   (`aiplatform.googleapis.com/v1/projects/.../locations/global/...`) — `us-central1` was
   throwing "Publisher Model not found". All page workers now use global endpoint.
-- Hierarchical EOB model (2026-06-06): `eob_payments` table and `eob_payment_id` FK on
-  `eob_line_items` are live in production DB. `eob-worker` and `reprocess-document` deployed.
-  Reports page shows check-level gap section for new documents, legacy doc-level section
-  for old documents. Branch `feature/hierarchical-eob-model` awaiting merge review.
-  All existing service lines for BCBS/Mercy Care docs now have `eob_payment_id` populated (finalize-document stampPaymentIds confirmed 100% coverage). Reports page extracted_paid is no longer $0.
-  Next step: reprocess AZHS/GCW docs to populate `eob_payments` rows and verify check-level
-  reconciliation closes the remaining gaps.
+- Hierarchical EOB model fully merged (2026-06-06). `eob_payments` + `eob_payment_id` FK live.
+  All BCBS/Mercy Care service lines have `eob_payment_id` populated (100% coverage confirmed).
+  Reports page `extracted_paid` now shows real dollar amounts (no longer $0).
+  Summary Roster Exclusion deployed (2026-06-07) — prevents Gemini double-counting on BCBS
+  aggregate-only roster pages.
+  Next: reprocess c4a94f14 (Summary Roster + date OCR fixes) and ccdbe216 (phantom check cleanup)
+  to close reconciliation gaps. Keith initiated reprocessing at end of 2026-06-07 session.
 
 ---
 
