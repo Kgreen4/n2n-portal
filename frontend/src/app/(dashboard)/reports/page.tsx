@@ -664,14 +664,30 @@ export default function ReportsPage() {
       const doc = item.file_name || '(unknown)'
       paidByDoc.set(doc, (paidByDoc.get(doc) || 0) + (item.paid_amount || 0))
     }
+    // Same "NO EOB" blind spot as checkGapRows below: a check-stub-only legacy
+    // document's entire extraction may be a single summary_total row, which
+    // medicalItems excludes by construction. Fall back to summary_total
+    // paid_amount per document when that document has zero medical_service
+    // lines at all — safe from double-counting since the fallback only applies
+    // when medicalPaid is 0.
+    const summaryByDoc = new Map<string, number>()
+    for (const item of items) {
+      if (item.line_type !== 'summary_total') continue
+      const doc = item.file_name || '(unknown)'
+      summaryByDoc.set(doc, (summaryByDoc.get(doc) || 0) + (item.paid_amount ?? 0))
+    }
     return Array.from(depositByDoc.entries())
-      .map(([sourceDoc, depositAmount]) => ({
-        sourceDoc,
-        docId: fileNameToDocId.get(sourceDoc) || null,
-        depositAmount,
-        extractedPaid: paidByDoc.get(sourceDoc) || 0,
-        gap: depositAmount - (paidByDoc.get(sourceDoc) || 0),
-      }))
+      .map(([sourceDoc, depositAmount]) => {
+        const medicalPaid = paidByDoc.get(sourceDoc) || 0
+        const extractedPaid = medicalPaid > 0 ? medicalPaid : (summaryByDoc.get(sourceDoc) || 0)
+        return {
+          sourceDoc,
+          docId: fileNameToDocId.get(sourceDoc) || null,
+          depositAmount,
+          extractedPaid,
+          gap: depositAmount - extractedPaid,
+        }
+      })
       .filter(r => Math.abs(r.gap) > 1)
       .sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap))
   })()
@@ -689,10 +705,25 @@ export default function ReportsPage() {
         (paidByPaymentId.get(item.eob_payment_id) ?? 0) + (item.paid_amount ?? 0)
       )
     }
+    // "NO EOB" / check-stub-only payments have no medical_service detail at all —
+    // their entire extraction is a single summary_total row whose paid_amount
+    // already equals the check amount. medicalItems excludes summary_total rows
+    // by construction, so fall back to summing summary_total paid_amount per
+    // eob_payment_id. Per the eob-worker's Type A/B model, a given eob_payment_id
+    // never has both medical_service AND summary_total rows, so this can't double-count.
+    const summaryByPaymentId = new Map<string, number>()
+    for (const item of items) {
+      if (item.line_type !== 'summary_total' || !item.eob_payment_id) continue
+      summaryByPaymentId.set(
+        item.eob_payment_id,
+        (summaryByPaymentId.get(item.eob_payment_id) ?? 0) + (item.paid_amount ?? 0)
+      )
+    }
     return eobPayments
       .filter(p => (p.check_amount ?? 0) > 0)
       .map(p => {
-        const extractedPaid = paidByPaymentId.get(p.id) ?? 0
+        const medicalPaid = paidByPaymentId.get(p.id) ?? 0
+        const extractedPaid = medicalPaid > 0 ? medicalPaid : (summaryByPaymentId.get(p.id) ?? 0)
         const checkAmount = p.check_amount ?? 0
         return {
           checkNumber: p.check_number ?? '(Unknown)',
