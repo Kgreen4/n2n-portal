@@ -467,6 +467,13 @@ How to identify a Summary Roster page — ALL of the following will be true:
 
 If a page meets these criteria, return {"items": [], "payments": []} for that page. Do NOT extract any medical_service rows from it — those amounts are already captured on the preceding detail pages and extracting them again will double-count the payment totals.
 
+CRITICAL — ONE summary_total PER CHECK, EVER (cross-page rule):
+A single check or EFT has exactly ONE total, no matter how many pages its claims span. Before extracting any summary_total, ask yourself: "Has this check's total already been captured on an earlier page of this document?"
+- Check/EFT numbers can appear in slightly different forms across pages of the SAME document — e.g., with or without a leading prefix, a hyphenated segment, or leading zeros (examples: "2-1836532" on a check stub vs. "1836532" on a later page; "0002558291" vs. "2558291"). Treat these as THE SAME check, not different checks.
+- A "Total", "Total Paid", "Grand Total", or "Page Total" line on any page OTHER THAN that check's original check-stub page is a page-level footer, not a second payment. Omit it entirely — even if the dollar amount on it is DIFFERENT from the check's stub total. A different dollar amount does NOT mean it is a different check; it almost always means it is a partial page subtotal that duplicates or double-counts amounts already extracted elsewhere.
+- Real example of what NOT to do (from a prior production document, Arizona Priority Care): Page 2 was the check stub and correctly produced summary_total = $232.69 for check "2-1836532". Page 5 of the SAME document showed an unrelated footer "Total: $232.69" near a reference to check "1836532" (same check, reformatted) — this was WRONGLY extracted as a SECOND summary_total, doubling the apparent deposit to $465.38. Separately, page 9 correctly produced summary_total = $1,351.75 for check "2-1835212". Page 10 showed a page-level footer "Total: $151.75" still relating to check "2-1835212" — this was WRONGLY extracted as ANOTHER summary_total for the same check, inflating its total to $1,503.50. Both of these extra summary_total rows must be omitted.
+- When in doubt, DO NOT extract a totals line as summary_total. Omitting a duplicate is always safer than double-counting — a missing total can be added back during reconciliation, but a duplicate silently inflates the deposit total and is much harder to detect.
+
 IMPORTANT — MCO / Managed Care Remittance Formats (Mercy Care, Aetna, UnitedHealthcare, Humana, etc.):
 Many Managed Care Organizations use a compact grid-style remittance layout that differs significantly from standard BCBS-style EOBs. Follow these rules when you encounter MCO-style documents:
 
