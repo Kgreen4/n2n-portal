@@ -242,7 +242,17 @@ created with reason `late_retry_page_contradiction`. For each such entry:
 ## Financial Position Derivation (Phase 6)
 
 After all claim events are emitted, materialize one `fte_financial_positions`
-row per claim that has at least one event.
+row for **every claim** that meets either condition:
+
+1. The claim has at least one emitted `fte_claim_events` row, **or**
+2. The claim has at least one suspect or excluded observation (i.e., a row
+   in `fte_observations` that was routed to `fte_review_queue` by Rules 1–4).
+
+Omitting a position row is never acceptable. A claim with no emitted events
+but with at least one review-queued observation receives an `in_review`
+position with `billed_amount = NULL`, `paid_amount = NULL`,
+`open_balance_amount = NULL`, `reconciliation_status = 'in_review'`, and
+`position_confidence_score = 0.00`.
 
 Aggregate from `fte_claim_events` for the claim:
 
@@ -453,9 +463,10 @@ this claim.
 | `position_confidence_score` | 0.00 (no events → no confidence) |
 
 Position confidence 0.00 because there are no emitted events to derive a minimum
-from. Alternatively, omit the position row entirely and assert the claim has no
-`fte_financial_positions` row — either behavior is acceptable; document your choice
-in the README.
+from. The reconciler **must** create this position row. Omitting it is not
+acceptable. CLM-APC-2000 has three suspect/excluded observations (b1, b2, b3)
+that all reached the review queue, satisfying the Rule-2 condition for position
+materialization even with zero emitted events.
 
 ---
 
@@ -539,7 +550,34 @@ ASSERT (SELECT COUNT(*) FROM fte_claim_events
           AND event_type = 'payment_applied') = 0;
 ```
 
-**Check 11 — 96c5c357 CLM-APC-2000: position is in_review**
+**Check 11 — 96c5c357 CLM-APC-2000: position row exists with in_review status and NULL monetary fields**
+
+The position must be present — CLM-APC-2000 has no emitted events but has
+three review-queued observations, so Rule-2 requires materialization.
+
+```sql
+ASSERT EXISTS (
+  SELECT 1 FROM fte_financial_positions
+  WHERE practice_id = '96000000-0000-4000-8000-0000000000fe'
+    AND claim_id    = 'c1a90000-0000-4000-8000-000000002000'
+);
+
+ASSERT (
+  SELECT reconciliation_status FROM fte_financial_positions
+  WHERE practice_id = '96000000-0000-4000-8000-0000000000fe'
+    AND claim_id    = 'c1a90000-0000-4000-8000-000000002000'
+) = 'in_review';
+
+ASSERT (
+  SELECT billed_amount IS NULL
+     AND paid_amount IS NULL
+     AND open_balance_amount IS NULL
+     AND position_confidence_score = 0.00
+  FROM fte_financial_positions
+  WHERE practice_id = '96000000-0000-4000-8000-0000000000fe'
+    AND claim_id    = 'c1a90000-0000-4000-8000-000000002000'
+) = true;
+```
 
 **Check 12 — idempotency: calling reconciler twice gives same counts**
 
