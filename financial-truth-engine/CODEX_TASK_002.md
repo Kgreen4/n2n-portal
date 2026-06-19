@@ -281,7 +281,7 @@ Derive `reconciliation_status`:
 |------------------------------------------------------------------|--------------|
 | No events for this claim at all                                  | `in_review`  |
 | gap > 0.01                                                       | `unbalanced` |
-| gap ≤ 0.01 AND any linked payment event has status `'ambiguous'` | `ambiguous`  |
+| gap ≤ 0.01 AND any linked payment event has status `'ambiguous'` | `in_review`  |
 | gap ≤ 0.01 AND no ambiguous events                               | `balanced`   |
 
 Set `open_balance_amount`:
@@ -299,7 +299,7 @@ Set `last_reconciled_at = now()`.
 
 ## Unbalanced Position → Review Queue (Phase 7)
 
-For every position where `reconciliation_status IN ('unbalanced', 'ambiguous', 'in_review')`:
+For every position where `reconciliation_status IN ('unbalanced', 'in_review')`:
 
 Insert one `fte_review_queue` row with `reason = 'unbalanced_financial_position'`
 and a details JSONB that includes the gap amount and the reconciliation status.
@@ -386,7 +386,7 @@ The payment event is `ambiguous` because Phase 5 detects b5 as a
 | `contractual_adjustment_amount` | 209.60    |
 | `paid_amount`                 | 510.40      |
 | `open_balance_amount`         | 0           |
-| `reconciliation_status`       | `ambiguous` |
+| `reconciliation_status`       | `in_review` |
 | `position_confidence_score`   | 0.95 (min of event confidence scores) |
 
 No `short_pay_detected` event (gap = 0).
@@ -533,7 +533,7 @@ For every suspect observation (b1–b5), assert there is no `fte_event_evidence`
 row linking to that observation as `link_role = 'supports'` or `'derived_from'`.
 `link_role = 'contradicts'` is allowed for b5.
 
-**Check 6 — ccdbe216: position is ambiguous, not balanced or unbalanced**
+**Check 6 — ccdbe216: position is in_review (payment event is ambiguous), not balanced or unbalanced**
 
 **Check 7 — 96c5c357 CLM-APC-1000: payment_applied event amount = 351.89**
 
