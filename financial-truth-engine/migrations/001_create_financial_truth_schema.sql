@@ -28,6 +28,8 @@
 -- This migration intentionally references NO legacy `eob_*` table.
 -- =============================================================================
 
+begin;
+
 create extension if not exists pgcrypto;  -- gen_random_uuid()
 
 -- -----------------------------------------------------------------------------
@@ -478,7 +480,11 @@ alter table fte_contract_terms       enable row level security;
 alter table fte_review_queue         enable row level security;
 alter table fte_analysis_runs        enable row level security;
 
--- practices: a user may see practices they belong to.
+-- practices: a user may see only the practices they belong to.
+-- Intentionally NO insert/update/delete policy. Practice creation and management
+-- is handled exclusively by service_role (onboarding flow) or a future explicit
+-- admin policy. Non-BYPASSRLS users cannot modify the practices table until such
+-- a policy is added.
 create policy fte_practices_select on fte_practices
   for select using (id in (select fte_accessible_practice_ids()));
 
@@ -523,17 +529,32 @@ create policy fte_analysis_runs_rw on fte_analysis_runs
   for all using (practice_id in (select fte_accessible_practice_ids()))
   with check (practice_id in (select fte_accessible_practice_ids()));
 
--- denial_knowledge: global rows (practice_id IS NULL) are readable by everyone;
--- tenant overrides follow membership. Writes restricted to owned/global rows.
+-- denial_knowledge:
+--   SELECT: global rows (practice_id IS NULL) are readable by all tenant users;
+--           tenant-specific overrides follow practice membership.
+--   INSERT/UPDATE/DELETE: restricted to tenant-scoped rows only
+--           (practice_id IN accessible set). Global rows (practice_id IS NULL)
+--           are intentionally NOT writable by ordinary tenant users. Global
+--           denial knowledge must be seeded/updated by service_role, postgres,
+--           or a future explicit admin policy — never by tenant-level auth.
 create policy fte_denial_knowledge_select on fte_denial_knowledge
   for select using (
     practice_id is null
     or practice_id in (select fte_accessible_practice_ids())
   );
-create policy fte_denial_knowledge_write on fte_denial_knowledge
-  for all using (practice_id in (select fte_accessible_practice_ids()))
+create policy fte_denial_knowledge_tenant_insert on fte_denial_knowledge
+  for insert
   with check (practice_id in (select fte_accessible_practice_ids()));
+create policy fte_denial_knowledge_tenant_update on fte_denial_knowledge
+  for update
+  using  (practice_id in (select fte_accessible_practice_ids()))
+  with check (practice_id in (select fte_accessible_practice_ids()));
+create policy fte_denial_knowledge_tenant_delete on fte_denial_knowledge
+  for delete
+  using  (practice_id in (select fte_accessible_practice_ids()));
 
 -- =============================================================================
 -- End of migration 001.
 -- =============================================================================
+
+commit;
