@@ -94,7 +94,8 @@ create table fte_review_resolutions (
   -- ------------------------------------------------------------------
   -- Snapshot context — what was targeted at resolution time.
   -- ------------------------------------------------------------------
-  target_type             text          check (target_type in (
+  target_type             text          not null
+                            check (target_type in (
                               'observation', 'payment_event', 'position',
                               'review_entry', 'claim'
                             )),
@@ -129,7 +130,19 @@ create table fte_review_resolutions (
   metadata                jsonb         not null default '{}'::jsonb
                             check (jsonb_typeof(metadata) = 'object'),
   created_at              timestamptz   not null default now(),
-  updated_at              timestamptz   not null default now()
+  updated_at              timestamptz   not null default now(),
+
+  -- At least one stable or snapshot target beyond practice_id must be present.
+  -- Prevents orphan resolutions with no traceable subject.
+  constraint fte_review_resolutions_target_present
+    check (
+      claim_id              is not null
+      or observation_id     is not null
+      or evidence_id        is not null
+      or source_review_queue_id is not null
+      or source_claim_event_id  is not null
+      or source_position_id     is not null
+    )
 );
 
 comment on table fte_review_resolutions is

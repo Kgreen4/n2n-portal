@@ -221,8 +221,10 @@ end $$;
 -- -----------------------------------------------------------------------------
 do $$
 declare
-  missing_cols text;
-  has_target_type_check boolean;
+  missing_cols           text;
+  has_target_type_check  boolean;
+  target_type_nullable   text;
+  has_target_present     boolean;
 begin
   select string_agg(required_col, ', ' order by required_col)
     into missing_cols
@@ -259,9 +261,39 @@ begin
       'fte_review_resolutions';
   end if;
 
+  -- target_type must be NOT NULL.
+  select is_nullable
+    into target_type_nullable
+  from information_schema.columns
+  where table_schema = 'public'
+    and table_name   = 'fte_review_resolutions'
+    and column_name  = 'target_type';
+
+  if target_type_nullable <> 'NO' then
+    raise exception
+      'FAIL [RESOLUTIONS TARGET_TYPE NOTNULL]: target_type must be NOT NULL, '
+      'got is_nullable=%', target_type_nullable;
+  end if;
+
+  -- fte_review_resolutions_target_present must exist.
+  select exists (
+    select 1 from pg_constraint
+    where conname  = 'fte_review_resolutions_target_present'
+      and contype  = 'c'
+  ) into has_target_present;
+
+  if not has_target_present then
+    raise exception
+      'FAIL [RESOLUTIONS TARGET_PRESENT]: fte_review_resolutions_target_present '
+      'CHECK constraint missing — at least one of claim_id, observation_id, '
+      'evidence_id, source_review_queue_id, source_claim_event_id, '
+      'source_position_id must be non-null';
+  end if;
+
   raise notice
     'PASS [7/15] fte_review_resolutions: 22 required columns present; '
-    'target_type CHECK constraint present';
+    'target_type NOT NULL and CHECK present; '
+    'target-present CHECK (fte_review_resolutions_target_present) present';
 end $$;
 
 -- -----------------------------------------------------------------------------
@@ -362,18 +394,29 @@ begin
       v_superseded;
   end if;
 
-  -- Valid: observation-level action.
-  insert into fte_review_resolutions (practice_id, action)
-    values (v_practice, 'reject_observation');
+  -- Valid: observation-level action — volatile snapshot UUID satisfies target-present CHECK.
+  insert into fte_review_resolutions (practice_id, action, target_type, source_claim_event_id)
+    values (v_practice, 'reject_observation', 'observation', 'eeeeeeee-0000-4000-8000-0000000000ce');
 
-  -- Valid: position-level action.
-  insert into fte_review_resolutions (practice_id, action)
-    values (v_practice, 'confirm_short_pay');
+  -- Valid: position-level action — volatile snapshot UUID satisfies target-present CHECK.
+  insert into fte_review_resolutions (practice_id, action, target_type, source_position_id)
+    values (v_practice, 'confirm_short_pay', 'position', 'eeeeeeee-0000-4000-8000-0000000000c0');
 
-  -- Invalid action must be rejected by the CHECK constraint.
+  -- Missing all targets beyond practice_id — must be rejected by target-present CHECK.
   begin
-    insert into fte_review_resolutions (practice_id, action)
-      values (v_practice, 'not_a_real_action');
+    insert into fte_review_resolutions (practice_id, action, target_type)
+      values (v_practice, 'confirm_observation', 'observation');
+    raise exception
+      'FAIL [RESOLUTIONS TARGET_PRESENT BEHAVIOR]: row with no targets was accepted; '
+      'fte_review_resolutions_target_present CHECK missing or incomplete';
+  exception when check_violation then
+    null; -- expected
+  end;
+
+  -- Invalid action — include valid target_type and snapshot target so action CHECK fires.
+  begin
+    insert into fte_review_resolutions (practice_id, action, target_type, source_claim_event_id)
+      values (v_practice, 'not_a_real_action', 'observation', 'eeeeeeee-0000-4000-8000-0000000000ce');
     raise exception
       'FAIL [RESOLUTIONS ACTION CHECK]: invalid action was accepted; '
       'CHECK constraint missing or incomplete';
@@ -382,8 +425,9 @@ begin
   end;
 
   raise notice
-    'PASS [10/15] valid synthetic insert succeeded; is_superseded defaults false; '
-    'all 3 action categories accepted; invalid action rejected (check_violation)';
+    'PASS [10/15] valid synthetic inserts succeeded (all 3 action categories, with '
+    'volatile snapshot targets); is_superseded defaults false; '
+    'target-absent row rejected (check_violation); invalid action rejected (check_violation)';
 end $$;
 
 -- -----------------------------------------------------------------------------
@@ -394,10 +438,10 @@ do $$
 declare
   v_practice uuid := 'ffffffff-0000-4000-8000-0000000000aa';
 begin
-  -- Invalid target_type must be rejected.
+  -- Invalid target_type — include a snapshot target so the target_type CHECK fires cleanly.
   begin
-    insert into fte_review_resolutions (practice_id, action, target_type)
-      values (v_practice, 'confirm_observation', 'not_a_valid_type');
+    insert into fte_review_resolutions (practice_id, action, target_type, source_claim_event_id)
+      values (v_practice, 'confirm_observation', 'not_a_valid_type', 'eeeeeeee-0000-4000-8000-0000000000ce');
     raise exception
       'FAIL [RESOLUTIONS TARGET_TYPE CHECK]: invalid target_type was accepted; '
       'CHECK constraint missing or incomplete';
@@ -405,10 +449,11 @@ begin
     null; -- expected
   end;
 
-  -- Invalid non-object metadata (array) must be rejected.
+  -- Invalid non-object metadata (array) — include valid target_type and snapshot target
+  -- so the metadata CHECK fires (not NOT NULL or target-present).
   begin
-    insert into fte_review_resolutions (practice_id, action, metadata)
-      values (v_practice, 'confirm_observation', '[1,2,3]'::jsonb);
+    insert into fte_review_resolutions (practice_id, action, target_type, source_claim_event_id, metadata)
+      values (v_practice, 'confirm_observation', 'observation', 'eeeeeeee-0000-4000-8000-0000000000ce', '[1,2,3]'::jsonb);
     raise exception
       'FAIL [RESOLUTIONS METADATA CHECK]: non-object JSON metadata was accepted; '
       'check (jsonb_typeof(metadata) = ''object'') constraint missing';
