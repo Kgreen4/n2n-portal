@@ -2,12 +2,14 @@
 -- Financial Truth Engine — Schema Validation
 -- tests/validate_schema.sql
 --
--- Asserts the structural guarantees of migration 001. Self-contained:
+-- Asserts the structural guarantees of migrations 001 and 002. Self-contained:
 --   * Catalog checks (RLS, FK isolation) read system catalogs — no data needed.
 --   * Behavioral checks INSERT synthetic rows under a throwaway test practice,
 --     assert invariants, then ROLLBACK so nothing persists.
 --
--- Run AFTER applying migrations/001_create_financial_truth_schema.sql:
+-- Run AFTER applying all migrations in order:
+--     psql "$DATABASE_URL" -f migrations/001_create_financial_truth_schema.sql
+--     psql "$DATABASE_URL" -f migrations/002_add_review_resolutions.sql
 --     psql "$DATABASE_URL" -f tests/validate_schema.sql
 --
 -- Output: NOTICE lines for each passing check; any failure RAISEs EXCEPTION and
@@ -18,7 +20,7 @@
 begin;
 
 -- -----------------------------------------------------------------------------
--- Check 1: RLS is enabled on every fte_ table.
+-- Check 1: RLS is enabled on every fte_ table (including fte_review_resolutions).
 -- -----------------------------------------------------------------------------
 do $$
 declare
@@ -36,7 +38,7 @@ begin
   if missing is not null then
     raise exception 'FAIL [RLS]: RLS not enabled on: %', missing;
   end if;
-  raise notice 'PASS [1/6] RLS enabled on all fte_ tables';
+  raise notice 'PASS [1/15] RLS enabled on all fte_ tables (incl. fte_review_resolutions)';
 end $$;
 
 -- -----------------------------------------------------------------------------
@@ -59,7 +61,7 @@ begin
   if bad is not null then
     raise exception 'FAIL [ISOLATION]: fte_ tables reference non-fte_ tables: %', bad;
   end if;
-  raise notice 'PASS [2/6] no fte_ FK references any non-fte_ (eob_/other) table';
+  raise notice 'PASS [2/15] no fte_ FK references any non-fte_ (eob_/other) table';
 end $$;
 
 -- -----------------------------------------------------------------------------
@@ -78,7 +80,7 @@ begin
   if not has_constraint then
     raise exception 'FAIL [AUDIT]: fte_event_evidence audit constraint missing';
   end if;
-  raise notice 'PASS [3/6] event_evidence audit link constraint present';
+  raise notice 'PASS [3/15] event_evidence audit link constraint present';
 end $$;
 
 -- -----------------------------------------------------------------------------
@@ -114,7 +116,7 @@ begin
   if not coalesce(practice_notnull, false) then
     raise exception 'FAIL [POSITION]: fte_financial_positions.practice_id must be NOT NULL';
   end if;
-  raise notice 'PASS [4/6] financial_positions are claim-scoped (unique) and practice-scoped';
+  raise notice 'PASS [4/15] financial_positions are claim-scoped (unique) and practice-scoped';
 end $$;
 
 -- -----------------------------------------------------------------------------
@@ -181,7 +183,7 @@ begin
       values (v_practice, r, jsonb_build_object('check', r));
   end loop;
 
-  raise notice 'PASS [5/6] observation insert created 0 positions; audit link enforced; review_queue captures all 7 reasons';
+  raise notice 'PASS [5/15] observation insert created 0 positions; audit link enforced; review_queue captures all 7 reasons';
 end $$;
 
 -- -----------------------------------------------------------------------------
@@ -206,7 +208,366 @@ begin
   ) then
     raise exception 'FAIL [POSITION]: derived position not stored as claim+practice scoped';
   end if;
-  raise notice 'PASS [6/6] derived financial position is claim+practice scoped';
+  raise notice 'PASS [6/15] derived financial position is claim+practice scoped';
+end $$;
+
+-- =============================================================================
+-- Migration 002 checks — fte_review_resolutions
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- Check 7 (catalog): fte_review_resolutions exists with all 22 required columns,
+--          and the target_type CHECK constraint is present.
+-- -----------------------------------------------------------------------------
+do $$
+declare
+  missing_cols           text;
+  has_target_type_check  boolean;
+  target_type_nullable   text;
+  has_target_present     boolean;
+begin
+  select string_agg(required_col, ', ' order by required_col)
+    into missing_cols
+  from unnest(array[
+    'id', 'practice_id', 'claim_id', 'observation_id', 'evidence_id',
+    'action', 'target_type', 'target_event_type', 'target_review_reason',
+    'target_claim_number', 'source_review_queue_id', 'source_claim_event_id',
+    'source_position_id', 'resolved_by', 'resolved_at', 'notes',
+    'corrected_value', 'corrected_identifier', 'is_superseded',
+    'metadata', 'created_at', 'updated_at'
+  ]) as required_col
+  where required_col not in (
+    select column_name
+    from information_schema.columns
+    where table_schema = 'public' and table_name = 'fte_review_resolutions'
+  );
+
+  if missing_cols is not null then
+    raise exception 'FAIL [RESOLUTIONS COLS]: fte_review_resolutions missing columns: %', missing_cols;
+  end if;
+
+  -- target_type CHECK constraint must be present on the table.
+  select exists (
+    select 1 from pg_constraint con
+    join pg_class c on c.oid = con.conrelid
+    where c.relname = 'fte_review_resolutions'
+      and con.contype = 'c'
+      and pg_get_constraintdef(con.oid) like '%target_type%'
+  ) into has_target_type_check;
+
+  if not has_target_type_check then
+    raise exception
+      'FAIL [RESOLUTIONS TARGET_TYPE]: target_type CHECK constraint missing on '
+      'fte_review_resolutions';
+  end if;
+
+  -- target_type must be NOT NULL.
+  select is_nullable
+    into target_type_nullable
+  from information_schema.columns
+  where table_schema = 'public'
+    and table_name   = 'fte_review_resolutions'
+    and column_name  = 'target_type';
+
+  if target_type_nullable <> 'NO' then
+    raise exception
+      'FAIL [RESOLUTIONS TARGET_TYPE NOTNULL]: target_type must be NOT NULL, '
+      'got is_nullable=%', target_type_nullable;
+  end if;
+
+  -- fte_review_resolutions_target_present must exist.
+  select exists (
+    select 1 from pg_constraint
+    where conname  = 'fte_review_resolutions_target_present'
+      and contype  = 'c'
+  ) into has_target_present;
+
+  if not has_target_present then
+    raise exception
+      'FAIL [RESOLUTIONS TARGET_PRESENT]: fte_review_resolutions_target_present '
+      'CHECK constraint missing — at least one of claim_id, observation_id, '
+      'evidence_id, source_review_queue_id, source_claim_event_id, '
+      'source_position_id must be non-null';
+  end if;
+
+  raise notice
+    'PASS [7/15] fte_review_resolutions: 22 required columns present; '
+    'target_type NOT NULL and CHECK present; '
+    'target-present CHECK (fte_review_resolutions_target_present) present';
+end $$;
+
+-- -----------------------------------------------------------------------------
+-- Check 8 (catalog): stable FK constraints exist on practice_id, claim_id,
+--          observation_id, and evidence_id, each pointing to the correct table.
+-- -----------------------------------------------------------------------------
+do $$
+declare
+  missing_fks text;
+begin
+  select string_agg(expected.col || ' -> ' || expected.tgt, ', ' order by expected.col)
+    into missing_fks
+  from (
+    values
+      ('practice_id',    'fte_practices'),
+      ('claim_id',       'fte_claims'),
+      ('observation_id', 'fte_observations'),
+      ('evidence_id',    'fte_evidence')
+  ) as expected(col, tgt)
+  where not exists (
+    select 1
+    from pg_constraint con
+    join pg_class src on src.oid = con.conrelid
+    join pg_class tgt on tgt.oid = con.confrelid
+    join pg_attribute att on att.attrelid = con.conrelid
+                         and att.attnum = any(con.conkey)
+    where con.contype = 'f'
+      and src.relname = 'fte_review_resolutions'
+      and tgt.relname = expected.tgt
+      and att.attname = expected.col
+  );
+
+  if missing_fks is not null then
+    raise exception 'FAIL [RESOLUTIONS STABLE FK]: missing FK constraints: %', missing_fks;
+  end if;
+  raise notice 'PASS [8/15] stable FK constraints present on practice_id, claim_id, observation_id, evidence_id';
+end $$;
+
+-- -----------------------------------------------------------------------------
+-- Check 9 (catalog): no FK from fte_review_resolutions points to any volatile
+--          Phase-0 table. fte_review_queue, fte_claim_events, and
+--          fte_financial_positions are deleted and regenerated by the reconciler
+--          on every call. A hard FK to these tables would either block Phase 0's
+--          DELETE (RESTRICT) or destroy reviewer history (CASCADE).
+-- -----------------------------------------------------------------------------
+do $$
+declare
+  bad_targets text;
+begin
+  select string_agg(tgt.relname, ', ' order by tgt.relname)
+    into bad_targets
+  from pg_constraint con
+  join pg_class src on src.oid = con.conrelid
+  join pg_class tgt on tgt.oid = con.confrelid
+  where con.contype = 'f'
+    and src.relname = 'fte_review_resolutions'
+    and tgt.relname in (
+      'fte_review_queue', 'fte_claim_events', 'fte_financial_positions'
+    );
+
+  if bad_targets is not null then
+    raise exception
+      'FAIL [RESOLUTIONS VOLATILE FK]: FK constraints found pointing to volatile '
+      'Phase-0 tables (would block DELETE or cascade reviewer history): %', bad_targets;
+  end if;
+  raise notice
+    'PASS [9/15] no FK from fte_review_resolutions to fte_review_queue, '
+    'fte_claim_events, or fte_financial_positions';
+end $$;
+
+-- -----------------------------------------------------------------------------
+-- Check 10 (behavioral): a valid synthetic insert succeeds (is_superseded
+--           defaults false, all 3 action vocabulary categories are accepted).
+--           Demonstrates reviewer decisions persist inside the transaction.
+-- -----------------------------------------------------------------------------
+do $$
+declare
+  v_practice   uuid := 'ffffffff-0000-4000-8000-0000000000aa';
+  v_claim      uuid;
+  v_obs        uuid;
+  v_superseded boolean;
+begin
+  select id into v_claim from fte_claims       where practice_id = v_practice limit 1;
+  select id into v_obs   from fte_observations where practice_id = v_practice limit 1;
+
+  -- Valid: payment/event-level action — confirm is_superseded defaults false.
+  insert into fte_review_resolutions (
+    practice_id, claim_id, observation_id,
+    action, target_type, target_event_type, resolved_by
+  ) values (
+    v_practice, v_claim, v_obs,
+    'confirm_payment_event', 'payment_event', 'payment_applied', 'test_runner'
+  ) returning is_superseded into v_superseded;
+
+  if v_superseded is distinct from false then
+    raise exception
+      'FAIL [RESOLUTIONS DEFAULT]: is_superseded should default to false, got %',
+      v_superseded;
+  end if;
+
+  -- Valid: observation-level action — volatile snapshot UUID satisfies target-present CHECK.
+  insert into fte_review_resolutions (practice_id, action, target_type, source_claim_event_id)
+    values (v_practice, 'reject_observation', 'observation', 'eeeeeeee-0000-4000-8000-0000000000ce');
+
+  -- Valid: position-level action — volatile snapshot UUID satisfies target-present CHECK.
+  insert into fte_review_resolutions (practice_id, action, target_type, source_position_id)
+    values (v_practice, 'confirm_short_pay', 'position', 'eeeeeeee-0000-4000-8000-0000000000c0');
+
+  -- Missing all targets beyond practice_id — must be rejected by target-present CHECK.
+  begin
+    insert into fte_review_resolutions (practice_id, action, target_type)
+      values (v_practice, 'confirm_observation', 'observation');
+    raise exception
+      'FAIL [RESOLUTIONS TARGET_PRESENT BEHAVIOR]: row with no targets was accepted; '
+      'fte_review_resolutions_target_present CHECK missing or incomplete';
+  exception when check_violation then
+    null; -- expected
+  end;
+
+  -- Invalid action — include valid target_type and snapshot target so action CHECK fires.
+  begin
+    insert into fte_review_resolutions (practice_id, action, target_type, source_claim_event_id)
+      values (v_practice, 'not_a_real_action', 'observation', 'eeeeeeee-0000-4000-8000-0000000000ce');
+    raise exception
+      'FAIL [RESOLUTIONS ACTION CHECK]: invalid action was accepted; '
+      'CHECK constraint missing or incomplete';
+  exception when check_violation then
+    null; -- expected
+  end;
+
+  raise notice
+    'PASS [10/15] valid synthetic inserts succeeded (all 3 action categories, with '
+    'volatile snapshot targets); is_superseded defaults false; '
+    'target-absent row rejected (check_violation); invalid action rejected (check_violation)';
+end $$;
+
+-- -----------------------------------------------------------------------------
+-- Check 11 (behavioral): invalid target_type is rejected by CHECK constraint;
+--           invalid non-object metadata (JSON array) is rejected by CHECK constraint.
+-- -----------------------------------------------------------------------------
+do $$
+declare
+  v_practice uuid := 'ffffffff-0000-4000-8000-0000000000aa';
+begin
+  -- Invalid target_type — include a snapshot target so the target_type CHECK fires cleanly.
+  begin
+    insert into fte_review_resolutions (practice_id, action, target_type, source_claim_event_id)
+      values (v_practice, 'confirm_observation', 'not_a_valid_type', 'eeeeeeee-0000-4000-8000-0000000000ce');
+    raise exception
+      'FAIL [RESOLUTIONS TARGET_TYPE CHECK]: invalid target_type was accepted; '
+      'CHECK constraint missing or incomplete';
+  exception when check_violation then
+    null; -- expected
+  end;
+
+  -- Invalid non-object metadata (array) — include valid target_type and snapshot target
+  -- so the metadata CHECK fires (not NOT NULL or target-present).
+  begin
+    insert into fte_review_resolutions (practice_id, action, target_type, source_claim_event_id, metadata)
+      values (v_practice, 'confirm_observation', 'observation', 'eeeeeeee-0000-4000-8000-0000000000ce', '[1,2,3]'::jsonb);
+    raise exception
+      'FAIL [RESOLUTIONS METADATA CHECK]: non-object JSON metadata was accepted; '
+      'check (jsonb_typeof(metadata) = ''object'') constraint missing';
+  exception when check_violation then
+    null; -- expected
+  end;
+
+  raise notice
+    'PASS [11/15] invalid target_type rejected (check_violation); '
+    'invalid non-object metadata (array) rejected (check_violation)';
+end $$;
+
+-- -----------------------------------------------------------------------------
+-- Check 12 (catalog): metadata column has a jsonb_typeof(metadata) = 'object'
+--           CHECK constraint, ensuring only JSON objects are accepted.
+-- -----------------------------------------------------------------------------
+do $$
+declare
+  has_metadata_check boolean;
+begin
+  select exists (
+    select 1 from pg_constraint con
+    join pg_class c on c.oid = con.conrelid
+    where c.relname = 'fte_review_resolutions'
+      and con.contype = 'c'
+      and pg_get_constraintdef(con.oid) like '%jsonb_typeof%'
+      and pg_get_constraintdef(con.oid) like '%metadata%'
+  ) into has_metadata_check;
+
+  if not has_metadata_check then
+    raise exception
+      'FAIL [RESOLUTIONS METADATA CATALOG]: jsonb_typeof(metadata) = ''object'' '
+      'CHECK constraint not found on fte_review_resolutions';
+  end if;
+  raise notice
+    'PASS [12/15] metadata CHECK (jsonb_typeof(metadata) = ''object'') constraint '
+    'present in catalog';
+end $$;
+
+-- -----------------------------------------------------------------------------
+-- Check 13 (catalog): all 4 expected indexes exist on fte_review_resolutions,
+--           including the audit/chronological idx_fte_review_resolutions_resolved_at.
+-- -----------------------------------------------------------------------------
+do $$
+declare
+  missing_indexes text;
+begin
+  select string_agg(expected_idx, ', ' order by expected_idx)
+    into missing_indexes
+  from unnest(array[
+    'idx_fte_resolutions_practice_active',
+    'idx_fte_resolutions_claim_action',
+    'idx_fte_resolutions_observation_action',
+    'idx_fte_review_resolutions_resolved_at'
+  ]) as expected_idx
+  where expected_idx not in (
+    select indexname from pg_indexes where tablename = 'fte_review_resolutions'
+  );
+
+  if missing_indexes is not null then
+    raise exception
+      'FAIL [RESOLUTIONS INDEXES]: missing expected indexes: %', missing_indexes;
+  end if;
+  raise notice
+    'PASS [13/15] all 4 indexes present on fte_review_resolutions '
+    '(practice_active, claim_action, observation_action, resolved_at)';
+end $$;
+
+-- -----------------------------------------------------------------------------
+-- Check 14 (catalog): RLS is explicitly confirmed on fte_review_resolutions.
+--           Check 1 covers all fte_ tables generically; this check makes the
+--           coverage unambiguous for the new table.
+-- -----------------------------------------------------------------------------
+do $$
+declare
+  has_rls boolean;
+begin
+  select c.relrowsecurity
+    into has_rls
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relname = 'fte_review_resolutions';
+
+  if not coalesce(has_rls, false) then
+    raise exception
+      'FAIL [RESOLUTIONS RLS]: RLS not enabled on fte_review_resolutions';
+  end if;
+  raise notice
+    'PASS [14/15] RLS explicitly confirmed on fte_review_resolutions '
+    '(policy: fte_review_resolutions_rw)';
+end $$;
+
+-- -----------------------------------------------------------------------------
+-- Check 15 (catalog): updated_at trigger exists on fte_review_resolutions.
+-- -----------------------------------------------------------------------------
+do $$
+declare
+  has_trigger boolean;
+begin
+  select exists (
+    select 1
+    from pg_trigger t
+    join pg_class c on c.oid = t.tgrelid
+    where c.relname = 'fte_review_resolutions'
+      and t.tgname = 'trg_fte_review_resolutions_updated_at'
+      and not t.tgisinternal
+  ) into has_trigger;
+
+  if not has_trigger then
+    raise exception
+      'FAIL [RESOLUTIONS TRIGGER]: trg_fte_review_resolutions_updated_at '
+      'not found on fte_review_resolutions';
+  end if;
+  raise notice 'PASS [15/15] updated_at trigger present on fte_review_resolutions';
 end $$;
 
 -- Discard all validation inserts. Catalog checks above persist nothing.

@@ -1,7 +1,7 @@
 # Financial Truth Engine — Schema (README_SCHEMA)
 
-**Migration:** `migrations/001_create_financial_truth_schema.sql`
-**Status:** First-pass ledger foundation (Phase 2 of `NEXT_STEPS.md`)
+**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`
+**Status:** Ledger foundation + review resolutions (Phases 2 and 4 of `NEXT_STEPS.md`)
 **Scope:** Schema, RLS, indexes, comments, constraints. No UI, no extraction code, no PDF parsing.
 
 ---
@@ -37,6 +37,7 @@ tables even if temporarily deployed into the same Supabase project. The migratio
 | 4 Intelligence | `fte_denial_knowledge` | Editable CARC/RARC/payer rules. `practice_id IS NULL` = global default; non-null = override. |
 | 4 Intelligence | `fte_contract_terms` | Expected payer behavior per CPT/modifier and effective window. |
 | Review | `fte_review_queue` | Makes uncertainty explicit (low-confidence / conflicting / missing-link / unbalanced / suspected-duplicate / suspected-summary-row / late-retry-page-contradiction). |
+| Review | `fte_review_resolutions` | **Append-only** typed reviewer decisions (15-action vocabulary across 3 categories). Survives Phase 0 DELETE — hard FKs to stable entity tables only (`fte_practices`, `fte_claims`, `fte_observations`, `fte_evidence`). Volatile derived-row IDs are snapshot fields with no `REFERENCES` clause; they become stale after a reprocess — that is expected. Phase 0.5 loads non-superseded rows before reconciliation begins. |
 | Audit | `fte_analysis_runs` | Execution/audit metadata for reconciliation and ingestion runs. |
 
 ---
@@ -56,6 +57,12 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    cases live in `fte_review_queue` instead of overwriting prior records.
 6. **Tenant isolation.** RLS is enabled on all `fte_` tables before any real data; policies are
    keyed on `fte_accessible_practice_ids()`.
+7. **Reviewer decisions survive Phase 0.** `fte_review_resolutions` carries hard FKs only to
+   stable entity tables that Phase 0 never deletes. Volatile derived-row IDs
+   (`source_review_queue_id`, `source_claim_event_id`, `source_position_id`) are plain `uuid`
+   snapshot fields — no `REFERENCES` clause — and become stale after a reprocess without
+   disrupting referential integrity. `ON DELETE CASCADE` would destroy reviewer history;
+   `ON DELETE RESTRICT` would block Phase 0's DELETE. Both outcomes are prevented by design.
 
 ---
 
@@ -69,6 +76,8 @@ before exposing the schema to `anon`/`authenticated` traffic.
 - `fte_evidence`: SELECT + INSERT only (append-only; no UPDATE/DELETE policy).
 - `fte_denial_knowledge`: global rows (`practice_id IS NULL`) are readable by all; writes and
   tenant rows follow membership.
+- `fte_review_resolutions`: `FOR ALL` keyed on practice membership. `is_superseded` is the
+  only column mutated after INSERT; superseded rows are retained, never deleted.
 - All other tenant tables: `FOR ALL` read/write keyed on practice membership.
 
 Migrations, fixtures, and validation run under Supabase `service_role` / `postgres`
@@ -89,6 +98,7 @@ Migrations, fixtures, and validation run under Supabase `service_role` / `postgr
 
 ```bash
 psql "$DATABASE_URL" -f migrations/001_create_financial_truth_schema.sql
+psql "$DATABASE_URL" -f migrations/002_add_review_resolutions.sql
 psql "$DATABASE_URL" -f fixtures/synthetic_ccdbe216_failure_modes.sql   # optional
 psql "$DATABASE_URL" -f fixtures/synthetic_96c5c357_failure_modes.sql   # optional
 psql "$DATABASE_URL" -f tests/validate_schema.sql
