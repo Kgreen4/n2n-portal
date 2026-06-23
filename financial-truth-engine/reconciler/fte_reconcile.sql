@@ -44,10 +44,11 @@ DECLARE
   v_event_date    date;
   v_rq_rec        record;
   v_pos           record;
-  v_claim_count   bigint;
-  v_event_count   bigint;
-  v_review_count  bigint;
-  v_pos_count     bigint;
+  v_claim_count        bigint;
+  v_event_count        bigint;
+  v_review_count       bigint;
+  v_pos_count          bigint;
+  v_resolution_count   integer := 0;
 BEGIN
 
   -- =========================================================================
@@ -62,6 +63,28 @@ BEGIN
   DELETE FROM fte_review_queue        WHERE practice_id = p_practice_id;
   DELETE FROM fte_financial_positions WHERE practice_id = p_practice_id;
   DELETE FROM fte_claim_events        WHERE practice_id = p_practice_id;
+
+
+  -- =========================================================================
+  -- PHASE 0.5: Load active review resolutions.
+  --
+  -- Non-superseded resolutions for this practice are snapshotted into a temp
+  -- table for use by downstream phases. Zero rows is valid — empty table
+  -- means no active resolutions and all downstream phases behave unchanged.
+  --
+  -- DROP before CREATE mirrors the Phase 1 pattern for _fte_classified:
+  -- guards against duplicate-table errors when the function is called
+  -- multiple times in the same outer transaction (idempotency requirement).
+  -- =========================================================================
+  DROP TABLE IF EXISTS _fte_active_resolutions;
+
+  CREATE TEMP TABLE _fte_active_resolutions ON COMMIT DROP AS
+  SELECT *
+  FROM fte_review_resolutions
+  WHERE practice_id  = p_practice_id
+    AND is_superseded = false;
+
+  GET DIAGNOSTICS v_resolution_count = ROW_COUNT;
 
 
   -- =========================================================================
@@ -302,6 +325,7 @@ BEGIN
   FOR v_rq_rec IN (
     SELECT
       rq.id           AS rq_id,
+      rq.claim_id,
       rq.observation_id,
       obs.claim_identifier,
       obs.evidence_id AS obs_evidence_id
@@ -323,9 +347,18 @@ BEGIN
     LIMIT 1;
 
     IF v_pay_event_id IS NOT NULL THEN
-      -- a. Ambiguous: contradicting evidence means we cannot confirm this payment.
+      -- a. If an active confirm_payment_event resolution exists for this claim,
+      --    the reviewer has confirmed the original payment is correct → 'reconciled'.
+      --    Otherwise the contradiction is unresolved → 'ambiguous'.
       UPDATE fte_claim_events
-         SET reconciliation_status = 'ambiguous'
+         SET reconciliation_status = CASE
+           WHEN EXISTS (
+             SELECT 1 FROM _fte_active_resolutions
+             WHERE claim_id = v_rq_rec.claim_id
+               AND action   = 'confirm_payment_event'
+           ) THEN 'reconciled'
+           ELSE 'ambiguous'
+         END
        WHERE id = v_pay_event_id;
 
       -- b. Wire the review entry to the payment event.
@@ -530,12 +563,13 @@ BEGIN
      v_started_at, clock_timestamp());
 
   RETURN jsonb_build_object(
-    'run_id',            v_run_id,
-    'practice_id',       p_practice_id,
-    'claims_processed',  v_claim_count,
-    'events_emitted',    v_event_count,
-    'positions_derived', v_pos_count,
-    'review_entries',    v_review_count
+    'run_id',                     v_run_id,
+    'practice_id',                p_practice_id,
+    'claims_processed',           v_claim_count,
+    'events_emitted',             v_event_count,
+    'positions_derived',          v_pos_count,
+    'review_entries',             v_review_count,
+    'review_resolutions_applied', v_resolution_count
   );
 
 END;
