@@ -2,7 +2,7 @@
 
 **Status:** Execution checklist  
 **Created:** 2026-06-17  
-**Updated:** 2026-06-22
+**Updated:** 2026-06-23
 **Purpose:** Start the Financial Truth Engine cleanly while preserving the current EOB project as a reference only.
 
 ---
@@ -181,9 +181,27 @@ no production Supabase project accessed, no legacy EOB code modified.
 
 ---
 
+### Task 004E — Corrected-Value Supersession Validation ✅ Complete
+
+**Delivered:**
+- `tests/validate_corrected_value_supersession.sql` — 10-check validation suite
+  (wrapped in ROLLBACK) that proves the corrected-value supersession workflow:
+  INSERT first correction → reconcile (balanced) → UPDATE is_superseded=true →
+  INSERT second correction → reconcile (unbalanced, open_balance=$100.00) →
+  audit trail (2 rows: 1 superseded + 1 active at $1,500.00) → index still
+  enforces (third active correction raises unique_violation). No migration,
+  reconciler, fixture, or README changes required — migration 004's unique
+  partial index and Phase 0.5's `WHERE is_superseded = false` filter make
+  supersession transparent to the reconciler.
+
+**Safety:** no new schema objects, no reconciler changes, no fixture changes;
+validation-only, runs under ROLLBACK in a disposable Supabase project.
+
+---
+
 ## Current Capabilities
 
-As of Task 004C merged (2026-06-22), the FTE can:
+As of Task 004E complete (2026-06-23), the FTE can:
 
 - **Represent the full claim ledger.** Eleven tables covering practices, evidence,
   observations, claims, claim events, event-evidence audit links, financial positions,
@@ -210,9 +228,14 @@ As of Task 004C merged (2026-06-22), the FTE can:
 - **Confirm correctly-flagged observations.** `confirm_observation` suppresses the
   `fte_review_queue` entry for a correctly-classified suspect/excluded observation
   without promoting it to trusted or altering any ledger events.
+- **Replace a corrected value safely.** The supersession workflow (UPDATE old row
+  `SET is_superseded = true`, then INSERT a new row) is deterministic: Phase 0.5
+  loads only the new active correction; the unique partial index prevents a second
+  active row; superseded rows are retained for audit. Proven across 10 validation
+  checks (Task 004E).
 
-**Not yet implemented:** corrected values, extraction layer (AI observations from real
-PDFs), UI, API endpoints, Edge Functions, denial/contract intelligence.
+**Not yet implemented:** extraction layer (AI observations from real PDFs), UI,
+API endpoints, Edge Functions, denial/contract intelligence.
 
 ---
 
@@ -227,6 +250,10 @@ Apply migrations and register the reconciler before running.
 | `tests/validate_reconciler.sql` | 12 | 9-phase reconciler, event classification, short-pay detection |
 | `tests/validate_review_resolution.sql` | 7 | `confirm_payment_event` promotion to balanced/reconciled |
 | `tests/validate_observation_resolution.sql` | 12 | confirm/reject/mark_duplicate, Phase 1 suppression, ledger recalculation |
+| `tests/validate_corrected_value.sql` | 11 | `attach_corrected_value` — correction applied, balanced, idempotency, isolation, index |
+| `tests/validate_corrected_value_supersession.sql` | 10 | corrected-value supersession — replace active correction, audit trail, index enforcement |
+
+**Total numeric checks: 52** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
 manually before running the test body. The `tests/README.md` documents the run order.
@@ -476,15 +503,14 @@ Deliver:
 
 ## Immediate Next Action
 
-**Task 004D is merged and validated.**
+**Tasks 001 through 004E are complete.**
 
-Tasks 001 through 004D are complete. The schema layer (migrations 001–004),
-deterministic reconciler (9 phases + Phase 0.5), and four reviewer action
-categories (payment-event confirmation, observation confirm/reject/mark_duplicate,
-corrected-value attachment) are proven on synthetic data across 42 validation
-checks (validate_schema, validate_reconciler, validate_review_resolution,
-validate_observation_resolution, validate_corrected_value — all PASS in a
-disposable Supabase project).
+The schema layer (migrations 001–004), deterministic reconciler (9 phases +
+Phase 0.5), five reviewer action categories (payment-event confirmation,
+observation confirm/reject/mark_duplicate, corrected-value attachment and
+supersession), and corrected-value replacement ergonomics are all proven on
+synthetic data across 52 numeric validation checks across 5 suites — all PASS
+in a disposable Supabase project.
 
 The next slice should come from Phase 3 or Phase 4 of the roadmap above:
 
