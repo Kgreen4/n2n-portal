@@ -1,7 +1,7 @@
 # Financial Truth Engine — Schema (README_SCHEMA)
 
-**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`
-**Status:** Ledger foundation + review resolutions (Phases 2 and 4 of `NEXT_STEPS.md`)
+**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`
+**Status:** Ledger foundation + review resolutions + observation-level resolution constraints (Phases 2 and 4 of `NEXT_STEPS.md`, Tasks 001–004C)
 **Scope:** Schema, RLS, indexes, comments, constraints. No UI, no extraction code, no PDF parsing.
 
 ---
@@ -37,7 +37,7 @@ tables even if temporarily deployed into the same Supabase project. The migratio
 | 4 Intelligence | `fte_denial_knowledge` | Editable CARC/RARC/payer rules. `practice_id IS NULL` = global default; non-null = override. |
 | 4 Intelligence | `fte_contract_terms` | Expected payer behavior per CPT/modifier and effective window. |
 | Review | `fte_review_queue` | Makes uncertainty explicit (low-confidence / conflicting / missing-link / unbalanced / suspected-duplicate / suspected-summary-row / late-retry-page-contradiction). |
-| Review | `fte_review_resolutions` | **Append-only** typed reviewer decisions (15-action vocabulary across 3 categories). Survives Phase 0 DELETE — hard FKs to stable entity tables only (`fte_practices`, `fte_claims`, `fte_observations`, `fte_evidence`). Volatile derived-row IDs are snapshot fields with no `REFERENCES` clause; they become stale after a reprocess — that is expected. Phase 0.5 loads non-superseded rows before reconciliation begins. |
+| Review | `fte_review_resolutions` | **Append-only** typed reviewer decisions (15-action vocabulary across 3 categories). Survives Phase 0 DELETE — hard FKs to stable entity tables only (`fte_practices`, `fte_claims`, `fte_observations`, `fte_evidence`). Volatile derived-row IDs are snapshot fields with no `REFERENCES` clause; they become stale after a reprocess — that is expected. Phase 0.5 loads non-superseded rows before reconciliation begins. Migration 003 adds `target_observation_id uuid references fte_observations(id) on delete restrict` plus 5 CHECK constraints for the three observation-level actions (`confirm_observation`, `reject_observation`, `mark_duplicate`) and a partial index for reverse lookup. |
 | Audit | `fte_analysis_runs` | Execution/audit metadata for reconciliation and ingestion runs. |
 
 ---
@@ -63,6 +63,12 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    snapshot fields — no `REFERENCES` clause — and become stale after a reprocess without
    disrupting referential integrity. `ON DELETE CASCADE` would destroy reviewer history;
    `ON DELETE RESTRICT` would block Phase 0's DELETE. Both outcomes are prevented by design.
+8. **Observation-level resolution actions are shape-constrained.** Migration 003 adds 5 CHECK
+   constraints to `fte_review_resolutions`: the three observation-level actions require
+   `observation_id IS NOT NULL` and `target_type = 'observation'`; `mark_duplicate` requires
+   `target_observation_id IS NOT NULL` and `<> observation_id`; all other actions require
+   `target_observation_id IS NULL`. Phase 1 excludes suppressed observations via NOT EXISTS
+   (NULL-safe; NOT IN fails on NULLs).
 
 ---
 
@@ -97,14 +103,28 @@ Migrations, fixtures, and validation run under Supabase `service_role` / `postgr
 ## How To Apply
 
 ```bash
+# Apply schema migrations in order
 psql "$DATABASE_URL" -f migrations/001_create_financial_truth_schema.sql
 psql "$DATABASE_URL" -f migrations/002_add_review_resolutions.sql
-psql "$DATABASE_URL" -f fixtures/synthetic_ccdbe216_failure_modes.sql   # optional
-psql "$DATABASE_URL" -f fixtures/synthetic_96c5c357_failure_modes.sql   # optional
+psql "$DATABASE_URL" -f migrations/003_add_observation_resolution_target.sql
+
+# Register the reconciler
+psql "$DATABASE_URL" -f reconciler/fte_reconcile.sql
+
+# Load optional synthetic fixtures (both practices, or just one)
+psql "$DATABASE_URL" -f fixtures/synthetic_ccdbe216_failure_modes.sql
+psql "$DATABASE_URL" -f fixtures/synthetic_96c5c357_failure_modes.sql
+
+# Run validation suites (each wraps in ROLLBACK; nothing persists)
 psql "$DATABASE_URL" -f tests/validate_schema.sql
+psql "$DATABASE_URL" -f tests/validate_reconciler.sql
+psql "$DATABASE_URL" -f tests/validate_review_resolution.sql       # ccdbe216 fixture required
+psql "$DATABASE_URL" -f tests/validate_observation_resolution.sql  # ccdbe216 fixture required
 ```
 
-Use the Supabase `service_role` / `postgres` connection.
+Use the Supabase `service_role` / `postgres` connection. For the Supabase SQL Editor,
+load fixture files manually before running test bodies (the SQL Editor does not support
+`\i`). See `tests/README.md` for the complete run order.
 
 ---
 

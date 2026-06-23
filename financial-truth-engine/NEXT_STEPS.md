@@ -2,7 +2,7 @@
 
 **Status:** Execution checklist  
 **Created:** 2026-06-17  
-**Updated:** 2026-06-19  
+**Updated:** 2026-06-22
 **Purpose:** Start the Financial Truth Engine cleanly while preserving the current EOB project as a reference only.
 
 ---
@@ -83,31 +83,125 @@ no legacy EOB code modified.
 
 ---
 
-### Task 003 — TBD ⏳ Scope Before Coding
+### Task 003 — Review Queue Resolution Spec ✅ Design Spec Only
 
-**Status: planning placeholder only.**
+**Delivered:**
+- `CODEX_TASK_003.md` — design specification for append-only review resolutions.
+  Defined the `fte_review_resolutions` table concept, 15-action vocabulary grouped
+  into three categories (claim-level, payment-event-level, observation-level),
+  Phase 0.5 reconciler sub-phase design, snapshot vs. hard FK strategy, and the
+  three non-destructive review patterns (confirm, reject/suppress, correct/supersede).
 
-Do not implement Task 003 until the scope is deliberately defined in a CODEX
-task spec. Do not create SQL, migrations, Edge Functions, UI, or API code based
-on this placeholder.
+**Implementation:** deferred to Task 004 (approved and implemented separately).
 
-**Candidate directions (choose one before starting):**
+**Safety:** specification only; no schema changes, no fixtures, no data.
 
-- AI observation ingestion layer — how does a real PDF become `fte_observations`
-  rows? What is the Gemini prompt contract? How are confidence scores assigned?
-- Real evidence intake — load one real (de-identified or synthetic) EOB into
-  `fte_evidence` and `fte_observations`, then run the reconciler against it.
-- Review queue resolution — how does a human reviewer correct or confirm an
-  ambiguous/unbalanced position? What new events or reviewed-observation rows
-  does that produce?
-- Denial intelligence — seed `fte_denial_knowledge` with CARC/RARC rules;
-  detect recoverable denials from `fte_claim_events`.
+---
 
-**Before starting Task 003:**
-1. Pick one direction from the list above.
-2. Write a CODEX task spec (like `CODEX_TASK_002.md`) with explicit schema
-   changes, inputs, outputs, and a validation strategy.
-3. Get approval before writing any implementation code.
+### Task 004A/B — Append-Only Review Resolutions ✅ Merged
+
+**Delivered:**
+- `migrations/002_add_review_resolutions.sql` — adds `fte_review_resolutions` table
+  with 15-action CHECK constraint, snapshot FK strategy for Phase-0-volatile IDs
+  (`source_review_queue_id`, `source_claim_event_id`, `source_position_id` are plain
+  uuid snapshot columns with no `REFERENCES` clause), and hard FKs to stable entity
+  tables only (`fte_practices`, `fte_claims`, `fte_observations`, `fte_evidence`).
+  Append-only: Phase 0 never deletes it.
+- `reconciler/fte_reconcile.sql` (updated) — Phase 0.5 loads all non-superseded
+  `fte_review_resolutions` rows into `_fte_active_resolutions` temp table before
+  classification begins. `confirm_payment_event` resolution: Phase 5 checks
+  `_fte_active_resolutions` and promotes ambiguous payment events to `'reconciled'`
+  status, causing Phase 6 to derive `'balanced'` positions instead of `'in_review'`.
+  Return JSON reports `review_resolutions_applied` count.
+- `tests/validate_review_resolution.sql` — 7-check validation suite (wrapped in
+  ROLLBACK). Verifies baseline ambiguous state, `confirm_payment_event` promotion to
+  reconciled/balanced, idempotency, and audit trail preservation. All 7 checks passed
+  in disposable Supabase project.
+
+**Safety:** tested exclusively in a disposable Supabase project using synthetic
+fixtures; no PHI, no real practice IDs, no production Supabase project accessed.
+
+---
+
+### Task 004C — Observation-Level Review Resolutions ✅ Merged (PR #10)
+
+**Delivered:**
+- `migrations/003_add_observation_resolution_target.sql` — adds
+  `target_observation_id uuid references fte_observations(id) on delete restrict`
+  column plus 5 CHECK constraints enforcing valid shape for the three
+  observation-level actions: `confirm_observation`, `reject_observation`,
+  `mark_duplicate`. Includes partial index for reverse lookup ("which observations are
+  marked duplicate of canonical X?").
+- `reconciler/fte_reconcile.sql` (updated) — Phase 0.5 now also loads
+  `_fte_suppressed_observations` (obs IDs where `action IN ('reject_observation',
+  'mark_duplicate')`). Phase 1 excludes suppressed observations via NOT EXISTS
+  (NULL-safe; NOT IN fails on NULLs). `confirm_observation` has queue-only
+  effect: suppresses the `fte_review_queue` entry in Phase 2 without altering
+  Phase 1 classification or any ledger events/positions.
+- `tests/validate_observation_resolution.sql` — 12-check validation suite (wrapped
+  in ROLLBACK). Verifies: baseline queue=6, confirm b4 queue→5, reject b3 queue→4,
+  mark_duplicate b1→a1 queue→3, idempotency, and rejection of trusted obs a3 removes
+  `contractual_adjustment_applied` event and recalculates `open_balance_amount` to
+  $209.60 while b5 ambiguity keeps position `in_review`. All 12 checks passed in
+  disposable Supabase project.
+- `tests/README.md` (updated) — documents the four validation suites.
+- `reconciler/README.md` (updated) — documents Phase 0.5 additions.
+
+**Safety:** tested exclusively in a disposable Supabase project using synthetic
+fixtures; no PHI, no real practice IDs, no production Supabase project accessed,
+no legacy EOB code modified. PR #10 merged to main (HEAD `afef369`).
+
+---
+
+## Current Capabilities
+
+As of Task 004C merged (2026-06-22), the FTE can:
+
+- **Represent the full claim ledger.** Eleven tables covering practices, evidence,
+  observations, claims, claim events, event-evidence audit links, financial positions,
+  denial knowledge, contract terms, review queue, and analysis runs. All tenant-scoped
+  tables include `practice_id` and RLS.
+- **Run a deterministic 9-phase reconciler.** `fte_reconcile_practice(uuid)` is fully
+  idempotent: Phase 0 deletes all derived rows, Phase 0.5 loads reviewer decisions,
+  Phase 1 classifies observations (trusted / excluded / suspect), Phases 2–8 emit
+  claim events, route to review queue, derive financial positions, detect short pays,
+  and record an append-only `fte_analysis_runs` entry.
+- **Route uncertainty explicitly.** Low-confidence, conflicting, missing-link,
+  unbalanced, late-retry, duplicate, and summary-row cases go to `fte_review_queue`
+  instead of silently corrupting financial truth.
+- **Apply reviewer decisions across reruns.** `fte_review_resolutions` rows survive
+  Phase 0 and are loaded in Phase 0.5, so reconciler reruns honor past reviewer
+  decisions without manual re-entry.
+- **Resolve ambiguous payment events.** `confirm_payment_event` promotes a
+  `payment_applied` event from `'ambiguous'` to `'reconciled'`, causing the financial
+  position to re-derive as `'balanced'` on the next reconciler run.
+- **Suppress invalid or duplicate observations.** `reject_observation` and
+  `mark_duplicate` remove an observation from Phase 1 entirely — no events, no queue
+  entry — causing financial positions to recalculate without it. `mark_duplicate`
+  records the canonical observation via `target_observation_id` FK (migration 003).
+- **Confirm correctly-flagged observations.** `confirm_observation` suppresses the
+  `fte_review_queue` entry for a correctly-classified suspect/excluded observation
+  without promoting it to trusted or altering any ledger events.
+
+**Not yet implemented:** corrected values, extraction layer (AI observations from real
+PDFs), UI, API endpoints, Edge Functions, denial/contract intelligence.
+
+---
+
+## Current Validation Suites
+
+All suites run in a disposable Supabase project under `ROLLBACK` (nothing persists).
+Apply migrations and register the reconciler before running.
+
+| File | Checks | Covers |
+|---|---|---|
+| `tests/validate_schema.sql` | structure checks | 11 tables, constraints, RLS policies, indexes |
+| `tests/validate_reconciler.sql` | 12 | 9-phase reconciler, event classification, short-pay detection |
+| `tests/validate_review_resolution.sql` | 7 | `confirm_payment_event` promotion to balanced/reconciled |
+| `tests/validate_observation_resolution.sql` | 12 | confirm/reject/mark_duplicate, Phase 1 suppression, ledger recalculation |
+
+For the Supabase SQL Editor (which does not support `\i`): load each fixture file
+manually before running the test body. The `tests/README.md` documents the run order.
 
 ---
 
@@ -246,7 +340,7 @@ Goal: make uncertainty explicit instead of hiding it.
 - [x] Route low-confidence / non-trusted observations to `fte_review_queue` (implemented in reconciler Phase 2 and Phase 7).
 - [x] Route unbalanced financial positions to `fte_review_queue` (reconciler Phase 7).
 - [x] Ambiguous payment events produce `in_review` positions rather than silent mutations (reconciler Phase 5 + Phase 6).
-- [ ] Store reviewer corrections as new events or reviewed observations, not silent mutations.
+- [x] Store reviewer corrections as new events or reviewed observations, not silent mutations. (implemented via append-only `fte_review_resolutions` — Tasks 004A/B/C)
 - [ ] Build reviewer workflow for confirming or correcting ambiguous/unbalanced positions.
 
 ### Exit Criteria
@@ -354,12 +448,28 @@ Deliver:
 
 ## Immediate Next Action
 
-**Define Task 003 scope before writing any code.**
+**Define Task 004D scope before writing any code.**
 
-Tasks 001 (ledger schema + fixtures) and 002 (deterministic reconciler prototype)
-are merged and validated. The schema layer and deterministic reconciler layer are
-proven on synthetic data.
+Tasks 001 through 004C are merged and validated. The schema layer (migrations
+001–003), deterministic reconciler (9 phases + Phase 0.5), and three reviewer
+action categories (payment-event confirmation, observation confirm/reject/
+mark_duplicate) are proven on synthetic data across 31 validation checks.
 
-The next step is deliberate scoping — pick one direction from the Task 003
-candidate list above, write a CODEX task spec, and get approval before any
-implementation begins.
+The recommended next slice is **Task 004D: `attach_corrected_value`** —
+allowing a reviewer to record the authoritative value for a specific observation
+field when the AI-extracted value is wrong (e.g. `paid_amount` extracted as
+$123.23 instead of the correct $0.00). Corrected values must not mutate
+`fte_observations`; they live in `fte_review_resolutions`. Phase 1 of the
+reconciler uses the corrected value in place of the AI-extracted value when
+building `_fte_classified` for trusted observations.
+
+Scope constraints for Task 004D:
+- Synthetic fixtures only; no UI, no API, no Edge Functions
+- No bulk correction tools; no position overrides
+- One observation field type to start (e.g. `paid_amount`)
+- Write a CODEX task spec before any implementation code
+
+Before starting:
+1. Write `CODEX_TASK_004D.md` with explicit schema changes, inputs, outputs,
+   and a validation strategy.
+2. Get approval before writing any implementation code.

@@ -1,6 +1,6 @@
 # Financial Truth Engine
 
-**Status:** Separate architecture initiative  
+**Status:** Active — schema, reconciler, and review resolutions proven on synthetic data (Task 004C merged 2026-06-22)
 **Owner:** Keith Green / N2N Analytics  
 **Created:** 2026-06-16  
 **Important:** This effort is intentionally separate from the current EOB extraction project.
@@ -181,6 +181,35 @@ PDF page evidence
 ```
 
 This proves whether the ledger architecture reduces fragility before UI, reports, or broader analytics are built.
+
+---
+
+## Current Capabilities
+
+As of Task 004C (2026-06-22):
+
+- 11-table ledger schema with RLS, tenant isolation, and immutable evidence
+- Deterministic 9-phase reconciler (`fte_reconcile_practice`) — idempotent, evidence-linked
+- Phase 0.5 review resolution loading — reviewer decisions survive reruns
+- Three reviewer action categories proven on synthetic data:
+  - `confirm_payment_event` — promotes ambiguous payment events to reconciled/balanced
+  - `confirm_observation` / `reject_observation` / `mark_duplicate` — observation-level suppression
+- 31 validation checks across 4 test suites, all passing in a disposable Supabase project
+
+Not yet implemented: corrected-value attachment, AI extraction layer, UI, API, Edge Functions.
+
+---
+
+## Current Validation Suites
+
+| File | Checks | Task |
+|---|---|---|
+| `tests/validate_schema.sql` | structure | 001 |
+| `tests/validate_reconciler.sql` | 12 | 002 |
+| `tests/validate_review_resolution.sql` | 7 | 004A/B |
+| `tests/validate_observation_resolution.sql` | 12 | 004C |
+
+All suites wrap in `ROLLBACK` — nothing persists. See `tests/README.md` for run order.
 
 ---
 
