@@ -122,8 +122,8 @@ resolution INSERT to move CLM-AZ-0001 from `ambiguous`/`in_review` to
 | 1 — baseline | 3/7 | `contradicts` evidence link exists for obs b5 → `payment_applied` |
 | 3 — resolved | 4/7 | Return JSON: `review_resolutions_applied = 1`; `payment_applied = 'reconciled'` |
 | 3 — resolved | 5/7 | Position = `balanced`, `open_balance = 0.00` |
-| 3 — resolved | 6/7 | `contradicts` link preserved; resolution row intact; `run_type='reconciler'` count = 2 |
-| 4 — idempotency | 7/7 | Third call: `review_resolutions_applied = 1`, `payment_applied = 'reconciled'`, position = `balanced`, `run_type='reconciler'` count = 3 |
+| 3 — resolved | 6/7 | `contradicts` link preserved; resolution row intact; `run_type='reconciler'` analysis_runs advanced by ≥ 2 |
+| 4 — idempotency | 7/7 | Third call: `review_resolutions_applied = 1`, `payment_applied = 'reconciled'`, position = `balanced`, analysis_runs advanced by ≥ 3 |
 
 ### Key behavioral invariants verified
 
@@ -133,9 +133,11 @@ resolution INSERT to move CLM-AZ-0001 from `ambiguous`/`in_review` to
 - **Resolution row survives reprocess** — `fte_review_resolutions` is not
   touched by Phase 0; the row inserted in STEP 2 is still present after the
   second and third reconciler calls.
-- **`fte_analysis_runs` is append-only** — the run count check uses
-  `WHERE run_type = 'reconciler'` to exclude the fixture's pre-seeded
-  `run_type = 'seed_fixture'` row.
+- **`fte_analysis_runs` is append-only** — run-count assertions use delta logic:
+  a baseline count is captured at the start of the transaction (in a temp table)
+  and each check asserts that the count has advanced by at least N, not that the
+  absolute count equals N. This makes the test robust against a disposable DB
+  that already holds prior reconciler runs from earlier manual validation.
 
 ### How to run
 
