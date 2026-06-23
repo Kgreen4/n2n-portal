@@ -1,7 +1,7 @@
 # Financial Truth Engine — Schema (README_SCHEMA)
 
-**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`
-**Status:** Ledger foundation + review resolutions + observation-level resolution constraints (Phases 2 and 4 of `NEXT_STEPS.md`, Tasks 001–004C)
+**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`
+**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement (Phases 2 and 4 of `NEXT_STEPS.md`, Tasks 001–004D)
 **Scope:** Schema, RLS, indexes, comments, constraints. No UI, no extraction code, no PDF parsing.
 
 ---
@@ -37,7 +37,7 @@ tables even if temporarily deployed into the same Supabase project. The migratio
 | 4 Intelligence | `fte_denial_knowledge` | Editable CARC/RARC/payer rules. `practice_id IS NULL` = global default; non-null = override. |
 | 4 Intelligence | `fte_contract_terms` | Expected payer behavior per CPT/modifier and effective window. |
 | Review | `fte_review_queue` | Makes uncertainty explicit (low-confidence / conflicting / missing-link / unbalanced / suspected-duplicate / suspected-summary-row / late-retry-page-contradiction). |
-| Review | `fte_review_resolutions` | **Append-only** typed reviewer decisions (15-action vocabulary across 3 categories). Survives Phase 0 DELETE — hard FKs to stable entity tables only (`fte_practices`, `fte_claims`, `fte_observations`, `fte_evidence`). Volatile derived-row IDs are snapshot fields with no `REFERENCES` clause; they become stale after a reprocess — that is expected. Phase 0.5 loads non-superseded rows before reconciliation begins. Migration 003 adds `target_observation_id uuid references fte_observations(id) on delete restrict` plus 5 CHECK constraints for the three observation-level actions (`confirm_observation`, `reject_observation`, `mark_duplicate`) and a partial index for reverse lookup. |
+| Review | `fte_review_resolutions` | **Append-only** typed reviewer decisions (15-action vocabulary across 3 categories). Survives Phase 0 DELETE — hard FKs to stable entity tables only (`fte_practices`, `fte_claims`, `fte_observations`, `fte_evidence`). Volatile derived-row IDs are snapshot fields with no `REFERENCES` clause; they become stale after a reprocess — that is expected. Phase 0.5 loads non-superseded rows before reconciliation begins. Migration 003 adds `target_observation_id uuid references fte_observations(id) on delete restrict` plus 5 CHECK constraints for the three observation-level actions (`confirm_observation`, `reject_observation`, `mark_duplicate`) and a partial index for reverse lookup. Migration 004 adds 4 CHECK constraints for `attach_corrected_value` (requires `observation_id IS NOT NULL`, `target_type = 'observation'`, `corrected_value IS NOT NULL`, `corrected_value >= 0`) and `idx_fte_resolutions_single_active_correction` — `UNIQUE (practice_id, observation_id, action) WHERE is_superseded = false AND action = 'attach_corrected_value'` — enforcing at most one active corrected-value resolution per observation. To supersede: set `is_superseded = true` on the old row, then insert a new one. |
 | Audit | `fte_analysis_runs` | Execution/audit metadata for reconciliation and ingestion runs. |
 
 ---
@@ -69,6 +69,14 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    `target_observation_id IS NOT NULL` and `<> observation_id`; all other actions require
    `target_observation_id IS NULL`. Phase 1 excludes suppressed observations via NOT EXISTS
    (NULL-safe; NOT IN fails on NULLs).
+9. **Corrected-value resolutions are single-active-per-observation.** Migration 004 adds 4 CHECK
+   constraints enforcing valid shape for `attach_corrected_value` (non-null `observation_id`,
+   `target_type = 'observation'`, non-null non-negative `corrected_value`) and a unique partial
+   index `idx_fte_resolutions_single_active_correction` on
+   `(practice_id, observation_id, action) WHERE is_superseded = false AND action = 'attach_corrected_value'`.
+   This makes the `LIMIT 1` in Phase 5c's correlated subquery deterministic rather than
+   advisory. `fte_observations` rows are never mutated — the correction lives exclusively in
+   `fte_review_resolutions`.
 
 ---
 
@@ -107,6 +115,7 @@ Migrations, fixtures, and validation run under Supabase `service_role` / `postgr
 psql "$DATABASE_URL" -f migrations/001_create_financial_truth_schema.sql
 psql "$DATABASE_URL" -f migrations/002_add_review_resolutions.sql
 psql "$DATABASE_URL" -f migrations/003_add_observation_resolution_target.sql
+psql "$DATABASE_URL" -f migrations/004_corrected_value_constraints.sql
 
 # Register the reconciler
 psql "$DATABASE_URL" -f reconciler/fte_reconcile.sql
@@ -120,6 +129,7 @@ psql "$DATABASE_URL" -f tests/validate_schema.sql
 psql "$DATABASE_URL" -f tests/validate_reconciler.sql
 psql "$DATABASE_URL" -f tests/validate_review_resolution.sql       # ccdbe216 fixture required
 psql "$DATABASE_URL" -f tests/validate_observation_resolution.sql  # ccdbe216 fixture required
+psql "$DATABASE_URL" -f tests/validate_corrected_value.sql         # 96c5c357 fixture required
 ```
 
 Use the Supabase `service_role` / `postgres` connection. For the Supabase SQL Editor,

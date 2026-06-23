@@ -153,6 +153,34 @@ no legacy EOB code modified. PR #10 merged to main (HEAD `afef369`).
 
 ---
 
+### Task 004D — Corrected-Value Resolutions ✅ Merged (PR #13)
+
+**Delivered:**
+- `migrations/004_corrected_value_constraints.sql` — 4 CHECK constraints
+  enforcing valid shape for `attach_corrected_value` (`observation_id IS NOT NULL`,
+  `target_type = 'observation'`, `corrected_value IS NOT NULL`,
+  `corrected_value >= 0`) and unique partial index
+  `idx_fte_resolutions_single_active_correction` on
+  `(practice_id, observation_id, action) WHERE is_superseded = false AND action = 'attach_corrected_value'`.
+  Enforces at most one active correction per observation at the DB level.
+- `reconciler/fte_reconcile.sql` (Phase 5c updated) — correlated subquery in the
+  `FOR v_obs` SELECT list looks up any active `attach_corrected_value` resolution
+  from `_fte_active_resolutions` for each trusted payment observation.
+  `COALESCE(v_obs.corrected_amount, v_obs.amount)` uses the correction when present
+  and falls back to the extracted amount otherwise — no behaviour change when no
+  resolution exists.
+- `tests/validate_corrected_value.sql` — 11-check validation suite (wrapped in
+  ROLLBACK). Verifies: baseline payment=$351.89/open_balance=$1,248.11/queue=5,
+  correction applied payment=$1,600.00/balanced/queue=4, idempotency, isolation
+  (CLM-APC-2000 unaffected), and unique partial index rejects second active
+  correction. All 11 checks passed in disposable Supabase project.
+
+**Safety:** tested exclusively in a disposable Supabase project using synthetic
+fixtures (`synthetic_96c5c357_failure_modes.sql`); no PHI, no real practice IDs,
+no production Supabase project accessed, no legacy EOB code modified.
+
+---
+
 ## Current Capabilities
 
 As of Task 004C merged (2026-06-22), the FTE can:
@@ -448,28 +476,23 @@ Deliver:
 
 ## Immediate Next Action
 
-**Define Task 004D scope before writing any code.**
+**Task 004D is merged and validated.**
 
-Tasks 001 through 004C are merged and validated. The schema layer (migrations
-001–003), deterministic reconciler (9 phases + Phase 0.5), and three reviewer
-action categories (payment-event confirmation, observation confirm/reject/
-mark_duplicate) are proven on synthetic data across 31 validation checks.
+Tasks 001 through 004D are complete. The schema layer (migrations 001–004),
+deterministic reconciler (9 phases + Phase 0.5), and four reviewer action
+categories (payment-event confirmation, observation confirm/reject/mark_duplicate,
+corrected-value attachment) are proven on synthetic data across 42 validation
+checks (validate_schema, validate_reconciler, validate_review_resolution,
+validate_observation_resolution, validate_corrected_value — all PASS in a
+disposable Supabase project).
 
-The recommended next slice is **Task 004D: `attach_corrected_value`** —
-allowing a reviewer to record the authoritative value for a specific observation
-field when the AI-extracted value is wrong (e.g. `paid_amount` extracted as
-$123.23 instead of the correct $0.00). Corrected values must not mutate
-`fte_observations`; they live in `fte_review_resolutions`. Phase 1 of the
-reconciler uses the corrected value in place of the AI-extracted value when
-building `_fte_classified` for trusted observations.
+The next slice should come from Phase 3 or Phase 4 of the roadmap above:
 
-Scope constraints for Task 004D:
-- Synthetic fixtures only; no UI, no API, no Edge Functions
-- No bulk correction tools; no position overrides
-- One observation field type to start (e.g. `paid_amount`)
-- Write a CODEX task spec before any implementation code
+- **Phase 3** — real (de-identified or explicitly approved synthetic) EOB as
+  evidence; AI observation extraction against real evidence; plain-English
+  explanation with evidence references.
+- **Phase 4** — reviewer workflow for confirming or correcting ambiguous/
+  unbalanced positions (UI-facing, requires Phase 3 evidence first).
 
-Before starting:
-1. Write `CODEX_TASK_004D.md` with explicit schema changes, inputs, outputs,
-   and a validation strategy.
-2. Get approval before writing any implementation code.
+Before starting either: write a CODEX task spec, get Keith's approval, then
+implement. Do not start without a written spec.
