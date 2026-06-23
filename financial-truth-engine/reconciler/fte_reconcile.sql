@@ -86,6 +86,17 @@ BEGIN
 
   GET DIAGNOSTICS v_resolution_count = ROW_COUNT;
 
+  -- Suppressed observations: reject_observation and mark_duplicate remove the
+  -- observation from Phase 1 entirely — no classification, events, or queue
+  -- entry are derived from it in this reconciler run.
+  DROP TABLE IF EXISTS _fte_suppressed_observations;
+
+  CREATE TEMP TABLE _fte_suppressed_observations ON COMMIT DROP AS
+  SELECT observation_id
+  FROM _fte_active_resolutions
+  WHERE action IN ('reject_observation', 'mark_duplicate')
+    AND observation_id IS NOT NULL;
+
 
   -- =========================================================================
   -- PHASE 1: Classify every observation for this practice.
@@ -147,6 +158,11 @@ BEGIN
       END AS fm_reason
     FROM fte_observations obs
     WHERE obs.practice_id = p_practice_id
+      AND NOT EXISTS (
+        SELECT 1
+        FROM _fte_suppressed_observations so
+        WHERE so.observation_id = obs.id
+      )
   )
   SELECT
     base.*,
@@ -191,7 +207,12 @@ BEGIN
   LEFT JOIN fte_claims c
     ON  c.practice_id = p_practice_id
     AND c.claim_number = cl.claim_identifier
-  WHERE cl.classification IN ('excluded', 'suspect');
+  WHERE cl.classification IN ('excluded', 'suspect')
+    AND NOT EXISTS (
+      SELECT 1 FROM _fte_active_resolutions ar
+      WHERE ar.observation_id = cl.id
+        AND ar.action = 'confirm_observation'
+    );
 
 
   -- =========================================================================

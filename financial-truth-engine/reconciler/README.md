@@ -65,9 +65,9 @@ produces `suspected_summary_row`, even if failure_mode is also set.
 | Phase | Description |
 |-------|-------------|
 | **0** | Idempotent reset: DELETE all derived rows for the practice in FK-safe order (`fte_event_evidence` → `fte_review_queue` → `fte_financial_positions` → `fte_claim_events`). `fte_analysis_runs` is append-only and is NOT deleted. |
-| **0.5** | Load active review resolutions: snapshot non-superseded `fte_review_resolutions` rows for this practice into temp table `_fte_active_resolutions ON COMMIT DROP`. Zero rows is valid — downstream phases behave identically to the no-resolution baseline. `DROP TABLE IF EXISTS` guard (same pattern as Phase 1's `_fte_classified`) ensures idempotency across multiple calls in the same outer transaction. `GET DIAGNOSTICS` captures the row count for `review_resolutions_applied` in the return JSON. |
+| **0.5** | Load active review resolutions: snapshot non-superseded `fte_review_resolutions` rows for this practice into temp table `_fte_active_resolutions ON COMMIT DROP`. Zero rows is valid — downstream phases behave identically to the no-resolution baseline. `DROP TABLE IF EXISTS` guard (same pattern as Phase 1's `_fte_classified`) ensures idempotency across multiple calls in the same outer transaction. `GET DIAGNOSTICS` captures the row count for `review_resolutions_applied` in the return JSON. Additionally builds `_fte_suppressed_observations ON COMMIT DROP` — the set of `observation_id` values where `action IN ('reject_observation', 'mark_duplicate')`. Phase 1 uses a `NOT EXISTS` subquery against this table to exclude suppressed observations from classification entirely. |
 | **1** | Classify all observations into the temp table `_fte_classified` using the five rules above. `DROP TABLE IF EXISTS` ensures idempotency within the same outer transaction. |
-| **2** | Route EXCLUDED and SUSPECT observations to `fte_review_queue`. Summary rows with no `claim_identifier` produce review entries with `claim_id = NULL`. |
+| **2** | Route EXCLUDED and SUSPECT observations to `fte_review_queue`. Summary rows with no `claim_identifier` produce review entries with `claim_id = NULL`. A `confirm_observation` active resolution for an observation suppresses that observation's queue entry only (checked via `NOT EXISTS` on `_fte_active_resolutions`) — the observation still classifies in Phase 1 with its original rule, but no queue row is emitted. This is queue-only suppression: it does not promote an EXCLUDED observation to TRUSTED, and it does not change ledger events or positions. |
 | **3** | Emit `claim_adjudicated` events from TRUSTED `billed_amount` observations. Each event gets one `derived_from` evidence link. |
 | **4** | Emit `contractual_adjustment_applied` events from TRUSTED `contractual_adjustment` observations. `carc_code` is propagated. Each event gets one `derived_from` link. |
 | **5c** | Emit `payment_applied` events from TRUSTED `payment` observations. Each event gets two `supports` evidence links: (1) the page observation, and (2) the matching `check_payment` stub (if one exists with `metadata->>'check_number' = check_eft_identifier`). |
@@ -103,6 +103,28 @@ All checks must emit `PASS` notices and exit without an unhandled `EXCEPTION`.
 ---
 
 ## 5. How to extend
+
+**New observation-level resolution action:**
+
+When you need a new resolution action that operates on `fte_observations` (not
+on claim events or positions), follow this four-step guide:
+
+1. **Phase 1 suppression (reject from reconciliation entirely):** if the new
+   action should prevent an observation from being classified at all, add its
+   `action` value to the `action IN (...)` list in Phase 0.5's
+   `_fte_suppressed_observations` INSERT. Phase 1's `NOT EXISTS` filter will
+   then exclude it from `_fte_classified` automatically.
+2. **Phase 2 queue suppression only (classify but skip queue):** if the new
+   action should let the observation classify normally in Phase 1 but suppress
+   its queue entry, add a `NOT EXISTS (SELECT 1 FROM _fte_active_resolutions ar
+   WHERE ar.observation_id = cl.id AND ar.action = '<new_action>')` branch to
+   the Phase 2 WHERE clause (same pattern as `confirm_observation`).
+3. **Typed FK to a target entity:** if the new action records a reference to
+   another entity (similar to `mark_duplicate` → `target_observation_id`),
+   add a new nullable FK column in a new migration and add a CHECK constraint
+   that the column is NULL for all other action types.
+4. **Tests:** add a fixture resolution INSERT and corresponding assertion checks
+   to `tests/validate_observation_resolution.sql`.
 
 **New observation_type:**
 

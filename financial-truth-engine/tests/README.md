@@ -155,3 +155,67 @@ commits), then paste the body of this file starting from the `begin;` block.
 
 Seven `PASS [n/7] …` `NOTICE` lines. The outer `ROLLBACK` discards all
 reconciler output and the resolution row; fixture entity data is unaffected.
+
+---
+
+## `validate_observation_resolution.sql`
+
+Targeted validation of the three observation-level resolution actions introduced
+in Task 004C: `confirm_observation`, `reject_observation`, and `mark_duplicate`.
+Covers only the ccdbe216 fixture practice and exercises both queue-suppression
+paths and the ledger-impact path (rejecting a trusted observation).
+
+### What it asserts (10 steps, 12 checks)
+
+| Step | Check | What is verified |
+|------|-------|-----------------|
+| 1 — baseline | 1/12 | Return JSON: `review_resolutions_applied = 0` |
+| 1 — baseline | 2/12 | Queue count = 6 (5 obs entries + 1 position entry) |
+| 1 — baseline | 3/12 | b4 (`suspected_summary_row`), b1 (`suspected_duplicate`), b3 (`missing_evidence_link`) all in queue |
+| 3 — confirm b4 | 4/12 | Return JSON: `review_resolutions_applied = 1`; queue count = 5 |
+| 3 — confirm b4 | 5/12 | b4 absent from queue; b1 and b3 still present |
+| 5 — reject b3 | 6/12 | Return JSON: `review_resolutions_applied = 2`; queue count = 4 |
+| 5 — reject b3 | 7/12 | b3 and b4 absent from queue; b1 and b2 still present |
+| 7 — duplicate b1→a1 | 8/12 | Return JSON: `review_resolutions_applied = 3`; queue count = 3 |
+| 7 — duplicate b1→a1 | 9/12 | b1/b3/b4 absent from queue; `mark_duplicate` row has `target_observation_id = a1` and `is_superseded = false` |
+| 8 — idempotency | 10/12 | Fifth run: `resolutions_applied = 3`, queue = 3, `analysis_runs` advanced by ≥ 5 |
+| 10 — reject a3 | 11/12 | `review_resolutions_applied = 4`; `contractual_adjustment_applied` event count = 0 for CLM-AZ-0001; queue still = 3 |
+| 10 — reject a3 | 12/12 | `open_balance_amount = 209.60` (billed $720 − paid $510.40; adj removed); position = `in_review` (b5 ambiguity persists) |
+
+### Key behavioral invariants verified
+
+- **`confirm_observation` is queue-only** — obs b4 is classified by Phase 1 with
+  its original `suspected_summary_row` rule. Only its queue entry is suppressed;
+  no events or position changes result.
+- **`reject_observation` suppresses Phase 1 entirely** — obs b3 (EXCLUDED by
+  Rule 1) and obs a3 (TRUSTED) both disappear from `_fte_classified` on the
+  next run. No events, no queue entry, no ledger contribution.
+- **`mark_duplicate` suppresses Phase 1 identically to `reject_observation`** —
+  obs b1 is removed from Phase 1; `target_observation_id` FK records the
+  canonical observation (a1) for audit.
+- **`unbalanced_financial_position` persists from b5 ambiguity** — the b5
+  `late_retry_page_contradiction` keeps `payment_applied = 'ambiguous'` and
+  position = `in_review` throughout checks 8–12. Queue count remains 3
+  (b2 `conflicting_observations`, b5 `late_retry_page_contradiction`, position
+  `unbalanced_financial_position`) regardless of how many other resolutions
+  are active.
+- **Rejection of a trusted observation has financial consequences** — rejecting
+  a3 removes the `contractual_adjustment_applied` event, which causes
+  `open_balance_amount` to recalculate from `$0.00` to `$209.60`.
+
+### How to run
+
+```bash
+# Prerequisites: migrations 001–003 applied; reconciler/fte_reconcile.sql registered
+
+psql "$DATABASE_URL" -f tests/validate_observation_resolution.sql
+```
+
+Supabase SQL editor note: `\i` is psql-only. Paste
+`fixtures/synthetic_ccdbe216_failure_modes.sql` first (execute separately so it
+commits), then paste the body of this file starting from the `begin;` block.
+
+### Expected output
+
+Twelve `PASS [n/12] …` `NOTICE` lines. The outer `ROLLBACK` discards all
+reconciler output and all four resolution rows; fixture entity data is unaffected.
