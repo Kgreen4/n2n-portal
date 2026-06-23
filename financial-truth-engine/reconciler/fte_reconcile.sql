@@ -291,9 +291,21 @@ BEGIN
   --   (1) the page observation that reported the payment
   --   (2) the check_payment evidence stub matched by check_eft_identifier
   --       (if a matching stub exists; the INSERT is a no-op if not found)
+  --
+  -- corrected_amount: correlated subquery looks up any active
+  -- attach_corrected_value resolution for this observation.  The unique
+  -- partial index on fte_review_resolutions (migration 004) guarantees at
+  -- most one active row, making LIMIT 1 deterministic rather than advisory.
+  -- COALESCE falls back to the extracted amount when no correction exists,
+  -- so existing behaviour is unchanged when no resolution is present.
   -- =========================================================================
   FOR v_obs IN (
-    SELECT cl.*, c.id AS claim_uuid
+    SELECT cl.*, c.id AS claim_uuid,
+      (SELECT ar.corrected_value
+       FROM _fte_active_resolutions ar
+       WHERE ar.observation_id = cl.id
+         AND ar.action         = 'attach_corrected_value'
+       LIMIT 1) AS corrected_amount
     FROM _fte_classified cl
     JOIN fte_claims c
       ON  c.practice_id = p_practice_id
@@ -307,7 +319,7 @@ BEGIN
        payer_name, reason_category, confidence_score, reconciliation_status, metadata)
     VALUES
       (p_practice_id, v_obs.claim_uuid, 'payment_applied', v_obs.service_date,
-       v_obs.amount, 'paid', v_obs.payer_name,
+       COALESCE(v_obs.corrected_amount, v_obs.amount), 'paid', v_obs.payer_name,
        'payment', v_obs.confidence_score, 'reconciled', '{}')
     RETURNING id INTO v_event_id;
 

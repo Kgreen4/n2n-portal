@@ -1,6 +1,6 @@
 # Financial Truth Engine
 
-**Status:** Active — schema, reconciler, and review resolutions proven on synthetic data (Task 004C merged 2026-06-22)
+**Status:** Active — schema, reconciler, and corrected-value resolutions proven on synthetic data (Task 004D merged 2026-06-23)
 **Owner:** Keith Green / N2N Analytics  
 **Created:** 2026-06-16  
 **Important:** This effort is intentionally separate from the current EOB extraction project.
@@ -186,17 +186,18 @@ This proves whether the ledger architecture reduces fragility before UI, reports
 
 ## Current Capabilities
 
-As of Task 004C (2026-06-22):
+As of Task 004D (2026-06-23):
 
 - 11-table ledger schema with RLS, tenant isolation, and immutable evidence
 - Deterministic 9-phase reconciler (`fte_reconcile_practice`) — idempotent, evidence-linked
 - Phase 0.5 review resolution loading — reviewer decisions survive reruns
-- Three reviewer action categories proven on synthetic data:
+- Four reviewer action categories proven on synthetic data:
   - `confirm_payment_event` — promotes ambiguous payment events to reconciled/balanced
   - `confirm_observation` / `reject_observation` / `mark_duplicate` — observation-level suppression
-- 31 validation checks across 4 test suites, all passing in a disposable Supabase project
+  - `attach_corrected_value` — per-observation payment correction enforced by DB constraints (migration 004); Phase 5c uses `COALESCE(corrected_value, extracted_amount)`
+- 42 validation checks across 5 test suites, all passing in a disposable Supabase project
 
-Not yet implemented: corrected-value attachment, AI extraction layer, UI, API, Edge Functions.
+Not yet implemented: AI extraction layer, UI, API, Edge Functions.
 
 ---
 
@@ -208,6 +209,7 @@ Not yet implemented: corrected-value attachment, AI extraction layer, UI, API, E
 | `tests/validate_reconciler.sql` | 12 | 002 |
 | `tests/validate_review_resolution.sql` | 7 | 004A/B |
 | `tests/validate_observation_resolution.sql` | 12 | 004C |
+| `tests/validate_corrected_value.sql` | 11 | 004D |
 
 All suites wrap in `ROLLBACK` — nothing persists. See `tests/README.md` for run order.
 
