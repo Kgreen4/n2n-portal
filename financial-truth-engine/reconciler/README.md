@@ -308,6 +308,60 @@ row to `is_superseded = true`, then insert the new row.
 | 5: isolation | 9 | CLM-APC-2000 still queued (unaffected) |
 | 6: supersession | 10 | After `is_superseded = true`, queue row reappears; `short_pay_detected` remains present |
 
+### 5.11 Deferred: `confirm_position_balanced`
+
+`confirm_position_balanced` is listed in the migration 002 action vocabulary
+(position-level group) but is **not implemented** in the reconciler and has no
+migration constraints.
+
+**Why deferred:**
+
+`reconciliation_status = 'balanced'` currently has exactly one meaning: the
+reconciler derived a zero open balance from claim events (Phase 6 rule 4 —
+no events are ambiguous, no event is unbalanced, `open_balance_amount = 0`).
+Every `balanced` position is event-derived and mathematically verifiable.
+
+Zero-event claims (e.g., CLM-APC-2000 with all SUSPECT / retry-pending
+observations) have `NULL` monetary fields — unknown math, not zero math.
+Ambiguous-event claims that happen to balance (e.g., CLM-AZ-0001 where
+720.00 − 209.60 − 510.40 = 0.00) have unresolved contradicting evidence;
+the correct resolution is `confirm_payment_event`, which promotes the
+event to `reconciled` and lets the reconciler derive `balanced` from events.
+
+Implementing `confirm_position_balanced` as a reviewer assertion that bypasses
+event derivation would make `balanced` mean two different things:
+
+1. Reconciler-derived math proves zero open balance (current meaning).
+2. Reviewer asserted balanced without event math.
+
+Conflating them weakens the "balanced means financial truth" invariant and
+makes `fte_financial_positions.reconciliation_status` no longer self-verifying
+from events alone.
+
+**Correct paths for claims stuck `in_review`:**
+
+- **Ambiguous-event claim where math balances:** use `confirm_payment_event` —
+  promotes the event to `reconciled`, causing Phase 6 to derive `balanced`
+  from events on the next run. No position-level assertion needed.
+- **Zero-event claim (all observations SUSPECT/EXCLUDED):** correct or
+  supersede the underlying observations (`attach_corrected_value`,
+  `confirm_observation`, `reject_observation`, `mark_duplicate`) so the
+  reconciler can emit events and derive a position from evidence.
+
+**Future implementation — if reviewer-asserted balanced state is needed:**
+
+Options that preserve the invariant:
+- A new `reconciliation_status` value (`balanced_by_review`) distinct from
+  `balanced`, keeping `balanced` = event-derived.
+- A separate workflow-state field outside `reconciliation_status` that records
+  the reviewer assertion without overwriting the reconciler's math.
+- A new event type or evidence model that lets the reviewer supply the missing
+  evidence so the reconciler can derive `balanced` from events as usual.
+
+Any of these requires a new migration and reconciler phase changes. Do not
+implement by reusing `confirm_position_balanced` against the existing `balanced`
+status value without resolving the semantic collision described above.
+
 ---
 
 ## 7. How to run against fixtures

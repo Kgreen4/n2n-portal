@@ -105,6 +105,19 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    on it. The `fte_financial_positions` row retains `reconciliation_status = 'unbalanced'` and
    the correct `open_balance_amount` — financial truth is preserved.
    See `reconciler/README.md §5.6–§5.10`.
+12. **`balanced` remains event-derived.** `reconciliation_status = 'balanced'`
+   means the reconciler derived a zero open balance from claim events (Phase 6
+   rule 4). Every `balanced` position is traceable to events and verifiable from
+   the event ledger alone. Reviewer decisions may suppress workflow routing
+   (`dismiss_short_pay`, `confirm_short_pay`) or promote an ambiguous payment
+   event to `reconciled` (`confirm_payment_event`) — but no reviewer action
+   should silently rewrite a position's status to `balanced` without the
+   reconciler deriving it from events. `confirm_position_balanced` (present in
+   the migration 002 action vocabulary) is intentionally deferred: zero-event
+   claims have unknown math (NULL monetary fields), not zero math, and
+   ambiguous-event balanced claims are correctly handled by `confirm_payment_event`.
+   See `reconciler/README.md §5.11` for the deferral rationale and future
+   implementation options.
 
 ---
 
