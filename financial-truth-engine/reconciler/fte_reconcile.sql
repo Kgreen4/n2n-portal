@@ -531,6 +531,15 @@ BEGIN
   -- =========================================================================
   -- PHASE 7: Route every unbalanced or in_review position to the review
   -- queue with reason 'unbalanced_financial_position'.
+  --
+  -- dismiss_short_pay suppression: unbalanced positions are skipped when
+  -- an active dismiss_short_pay resolution exists for the claim.  The
+  -- position row in fte_financial_positions is NOT changed — it retains
+  -- reconciliation_status = 'unbalanced' and the correct open_balance_amount.
+  -- The reviewer decision lives in fte_review_resolutions; the queue entry
+  -- is simply not emitted so the claim stops reappearing in the work list.
+  --
+  -- in_review positions are always routed regardless of any resolution.
   -- =========================================================================
   INSERT INTO fte_review_queue
     (practice_id, claim_id, reason, status, details)
@@ -545,7 +554,18 @@ BEGIN
     )
   FROM fte_financial_positions fp
   WHERE fp.practice_id          = p_practice_id
-    AND fp.reconciliation_status IN ('unbalanced', 'in_review');
+    AND fp.reconciliation_status IN ('unbalanced', 'in_review')
+    AND (
+      -- Only suppress queue routing for unbalanced positions;
+      -- in_review positions always route.
+      fp.reconciliation_status <> 'unbalanced'
+      OR NOT EXISTS (
+        SELECT 1
+        FROM   _fte_active_resolutions ar
+        WHERE  ar.claim_id = fp.claim_id
+          AND  ar.action   = 'dismiss_short_pay'
+      )
+    );
 
 
   -- =========================================================================
@@ -554,6 +574,14 @@ BEGIN
   --
   -- The short_pay event is linked (derived_from) to the same evidence and
   -- observation that backs the claim_adjudicated event.
+  --
+  -- dismiss_short_pay suppression: if an active dismiss_short_pay resolution
+  -- exists for the claim, the short_pay_detected event is not emitted.
+  -- The position row retains reconciliation_status = 'unbalanced' and the
+  -- correct open_balance_amount — the math is preserved as financial truth.
+  -- Only workflow routing (this event and the Phase 7 queue entry) is
+  -- suppressed.  Superseding the dismiss_short_pay row re-enables emission
+  -- on the next reconciler run.
   -- =========================================================================
   FOR v_pos IN (
     SELECT fp.*, c.id AS claim_uuid
@@ -563,6 +591,12 @@ BEGIN
       AND fp.reconciliation_status = 'unbalanced'
       AND fp.open_balance_amount IS NOT NULL
       AND fp.open_balance_amount  > 0
+      AND NOT EXISTS (
+        SELECT 1
+        FROM   _fte_active_resolutions ar
+        WHERE  ar.claim_id = fp.claim_id
+          AND  ar.action   = 'dismiss_short_pay'
+      )
   ) LOOP
 
     -- Use the billed event's date as the short_pay event date.

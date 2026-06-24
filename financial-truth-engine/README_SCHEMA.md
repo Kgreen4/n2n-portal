@@ -1,7 +1,7 @@
 # Financial Truth Engine — Schema (README_SCHEMA)
 
-**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`
-**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement (Phases 2 and 4 of `NEXT_STEPS.md`, Tasks 001–004H)
+**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`
+**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + dismiss_short_pay position-level resolution (Tasks 001–005A)
 **Scope:** Schema, RLS, indexes, comments, constraints. No UI, no extraction code, no PDF parsing.
 
 ---
@@ -78,6 +78,18 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    rather than advisory. `fte_observations` rows are never mutated — the correction lives
    exclusively in `fte_review_resolutions`. See `reconciler/README.md §4` for the full
    correction model.
+10. **dismiss_short_pay resolutions require a stable claim anchor and position target.**
+   Migration 005 adds two CHECK constraints: `fte_review_resolutions_dismiss_shortpay_needs_claim_id`
+   (`claim_id IS NOT NULL` when `action = 'dismiss_short_pay'`) and
+   `fte_review_resolutions_dismiss_shortpay_needs_position_type` (`target_type = 'position'` when
+   `action = 'dismiss_short_pay'`). The `claim_id` anchor is required because `fte_financial_positions`
+   rows are deleted by Phase 0 — `source_position_id` becomes stale after each reprocess, while
+   `claim_id` is a hard FK to `fte_claims` (never deleted). When a non-superseded `dismiss_short_pay`
+   row exists for a claim, the reconciler suppresses Phase 7 queue routing and Phase 8
+   `short_pay_detected` event emission for that claim only. The `fte_financial_positions` row
+   retains `reconciliation_status = 'unbalanced'` and the correct `open_balance_amount` —
+   the dismissal is operational, not mathematical; financial truth is preserved.
+   See `reconciler/README.md §5`.
 
 ---
 

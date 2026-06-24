@@ -237,6 +237,54 @@ no production data, no legacy EOB project accessed.
 
 ---
 
+### Task 005A — dismiss_short_pay Position-Level Review Resolution ✅ Complete
+
+**Delivered:**
+- `migrations/005_dismiss_short_pay_constraints.sql` — two CHECK constraints
+  enforcing valid shape for `dismiss_short_pay`:
+  `fte_review_resolutions_dismiss_shortpay_needs_claim_id` (`claim_id IS NOT NULL`)
+  and `fte_review_resolutions_dismiss_shortpay_needs_position_type`
+  (`target_type = 'position'`). No new columns, no new indexes, no new action
+  vocabulary — `dismiss_short_pay` was already in the migration 002 CHECK constraint.
+- `reconciler/fte_reconcile.sql` (Phases 7 and 8 updated) — Phase 7 INSERT adds
+  `AND (fp.reconciliation_status <> 'unbalanced' OR NOT EXISTS (SELECT 1 FROM
+  _fte_active_resolutions ar WHERE ar.claim_id = fp.claim_id AND ar.action =
+  'dismiss_short_pay'))` — suppresses queue entry for dismissed unbalanced claims;
+  `in_review` positions are always routed. Phase 8 FOR loop adds `AND NOT EXISTS
+  (SELECT 1 FROM _fte_active_resolutions ar WHERE ar.claim_id = fp.claim_id AND
+  ar.action = 'dismiss_short_pay')` — suppresses `short_pay_detected` event for
+  dismissed claims. `fte_financial_positions` rows retain `reconciliation_status =
+  'unbalanced'` and correct `open_balance_amount` — the suppression is operational,
+  not mathematical; financial truth is preserved.
+- `tests/validate_dismiss_short_pay.sql` — 9-check validation suite (wrapped in
+  ROLLBACK). Verifies: baseline short_pay emitted and queue row exists (checks 1–3);
+  after dismiss: `review_resolutions_applied=1`, event suppressed, queue row absent,
+  position math preserved at `open_balance_amount=1248.11` (checks 4–7); CLM-APC-2000
+  unaffected (check 8); supersession restores both the event and queue row (check 9).
+- `tests/RUNBOOK.md` (updated) — added `validate_dismiss_short_pay.sql` to suite
+  table (9 checks), fixture dependency table (96c5c357), and Supabase manual run
+  sequence (step 11); updated total 72→81.
+- `tests/run_all_validations.sql` (updated) — added `\i tests/validate_dismiss_short_pay.sql`
+  after corrected-billed-amount suite; updated expected count 72→81.
+- `reconciler/README.md` (updated) — Phase 7/8 table entries describe dismiss_short_pay
+  suppression behavior; new §5 "Position-level resolution model" documents the
+  dismiss_short_pay design (overview, stable claim_id anchor rationale, supersession
+  workflow, migration 005 constraints, validation suite); old §5–7 renumbered to §7–9.
+- `README.md` (updated) — status line, capabilities bullet (5 categories), suite table
+  (9 suites), numeric check count 72→81.
+- `README_SCHEMA.md` (updated) — migration header, status line, new invariant #10
+  (position-level dismissal shape constraints and math-preservation guarantee).
+- `NEXT_STEPS.md` (this file) — Task 005A entry and Current Capabilities/Suites updates.
+
+**Safety:** no PHI, no real patient data, no production data, no legacy EOB DB or
+code accessed. No new `reconciliation_status` values. No new claim event types.
+No fixture files modified. No forbidden files touched. Position math is preserved
+as financial truth — the dismissal is entirely operational (queue + event suppression
+only). Tested via ROLLBACK-wrapped suite against synthetic 96c5c357 fixture in a
+disposable Supabase project.
+
+---
+
 ### Task 004G — Corrected Contractual Adjustment Support ✅ Complete
 
 **Delivered:**
