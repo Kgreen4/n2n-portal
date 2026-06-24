@@ -539,6 +539,12 @@ BEGIN
   -- The reviewer decision lives in fte_review_resolutions; the queue entry
   -- is simply not emitted so the claim stops reappearing in the work list.
   --
+  -- confirm_short_pay suppression: unbalanced positions are also skipped when
+  -- an active confirm_short_pay resolution exists for the claim.  The reviewer
+  -- has confirmed the short pay is real/actionable — it no longer needs generic
+  -- triage routing.  Unlike dismiss_short_pay, the short_pay_detected event
+  -- (Phase 8) is NOT suppressed; only the queue row is suppressed here.
+  --
   -- in_review positions are always routed regardless of any resolution.
   -- =========================================================================
   INSERT INTO fte_review_queue
@@ -557,13 +563,18 @@ BEGIN
     AND fp.reconciliation_status IN ('unbalanced', 'in_review')
     AND (
       -- Only suppress queue routing for unbalanced positions;
-      -- in_review positions always route.
+      -- in_review positions always route regardless of any resolution.
+      -- dismiss_short_pay and confirm_short_pay both suppress the generic
+      -- unbalanced-position queue row: dismiss because the reviewer has
+      -- decided not to pursue it; confirm because the reviewer has already
+      -- triaged it and confirmed the short pay is real/actionable.
+      -- Neither changes Phase 6 math or the position row itself.
       fp.reconciliation_status <> 'unbalanced'
       OR NOT EXISTS (
         SELECT 1
         FROM   _fte_active_resolutions ar
         WHERE  ar.claim_id = fp.claim_id
-          AND  ar.action   = 'dismiss_short_pay'
+          AND  ar.action   IN ('dismiss_short_pay', 'confirm_short_pay')
       )
     );
 
