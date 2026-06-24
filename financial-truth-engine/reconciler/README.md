@@ -68,9 +68,9 @@ produces `suspected_summary_row`, even if failure_mode is also set.
 | **0.5** | Load active review resolutions: snapshot non-superseded `fte_review_resolutions` rows for this practice into temp table `_fte_active_resolutions ON COMMIT DROP`. Zero rows is valid — downstream phases behave identically to the no-resolution baseline. `DROP TABLE IF EXISTS` guard (same pattern as Phase 1's `_fte_classified`) ensures idempotency across multiple calls in the same outer transaction. `GET DIAGNOSTICS` captures the row count for `review_resolutions_applied` in the return JSON. Additionally builds `_fte_suppressed_observations ON COMMIT DROP` — the set of `observation_id` values where `action IN ('reject_observation', 'mark_duplicate')`. Phase 1 uses a `NOT EXISTS` subquery against this table to exclude suppressed observations from classification entirely. |
 | **1** | Classify all observations into the temp table `_fte_classified` using the five rules above. `DROP TABLE IF EXISTS` ensures idempotency within the same outer transaction. |
 | **2** | Route EXCLUDED and SUSPECT observations to `fte_review_queue`. Summary rows with no `claim_identifier` produce review entries with `claim_id = NULL`. A `confirm_observation` active resolution for an observation suppresses that observation's queue entry only (checked via `NOT EXISTS` on `_fte_active_resolutions`) — the observation still classifies in Phase 1 with its original rule, but no queue row is emitted. This is queue-only suppression: it does not promote an EXCLUDED observation to TRUSTED, and it does not change ledger events or positions. |
-| **3** | Emit `claim_adjudicated` events from TRUSTED `billed_amount` observations. Each event gets one `derived_from` evidence link. |
-| **4** | Emit `contractual_adjustment_applied` events from TRUSTED `contractual_adjustment` observations. `carc_code` is propagated. Each event gets one `derived_from` link. |
-| **5c** | Emit `payment_applied` events from TRUSTED `payment` observations. Each event gets two `supports` evidence links: (1) the page observation, and (2) the matching `check_payment` stub (if one exists with `metadata->>'check_number' = check_eft_identifier`). |
+| **3** | Emit `claim_adjudicated` events from TRUSTED `billed_amount` observations. Each event gets one `derived_from` evidence link. A reviewer-supplied corrected billed amount is applied via `COALESCE` — see §4. |
+| **4** | Emit `contractual_adjustment_applied` events from TRUSTED `contractual_adjustment` observations. `carc_code` is propagated. Each event gets one `derived_from` link. A reviewer-supplied corrected adjustment amount is applied via `COALESCE` — see §4. |
+| **5c** | Emit `payment_applied` events from TRUSTED `payment` observations. Each event gets two `supports` evidence links: (1) the page observation, and (2) the matching `check_payment` stub (if one exists with `metadata->>'check_number' = check_eft_identifier`). A reviewer-supplied corrected payment amount is applied via `COALESCE` — see §4. |
 | **5** (late/retry) | For each `late_retry_page_contradiction` review entry that has an `observation_id`, find the `payment_applied` event for the same claim, then: **(a)** if an active `confirm_payment_event` resolution exists for the claim in `_fte_active_resolutions`, mark the event `reconciled`; otherwise mark it `ambiguous`; **(b)** wire the review entry's `claim_event_id` (unconditional); **(c)** insert a `contradicts` evidence link (unconditional — the contradiction record is always preserved even when the reviewer has confirmed the payment). If no payment event exists the loop is a no-op for that entry. |
 | **6** | Derive `fte_financial_positions` for every claim that has at least one event OR at least one review queue entry. `reconciliation_status` CASE (evaluated in priority order): (1) no events → `in_review`; (2) any linked event has `reconciliation_status = 'ambiguous'` → `in_review` — **this applies even when the math balances to zero** (gap = 0). Financial truth cannot be finalized while contradicting evidence is unresolved; the claim must go to human review. Note: `'ambiguous'` is valid on `fte_claim_events` but is **not** a valid `fte_financial_positions.reconciliation_status` value (schema CHECK forbids it) — `in_review` is the correct surrogate; (3) any unbalanced event or positive open balance → `unbalanced`; (4) else → `balanced`. `open_balance_amount` is NULL when billed is unknown; otherwise `GREATEST(0, billed − adj − paid)`. `position_confidence_score` = MIN(confidence_score) across non–short_pay events, falling back to `0.0000`. |
 | **7** | Route every `unbalanced` or `in_review` position to `fte_review_queue` with reason `unbalanced_financial_position`. |
@@ -79,7 +79,109 @@ produces `suspected_summary_row`, even if failure_mode is also set.
 
 ---
 
-## 4. How to run against fixtures
+## 4. Corrected-value correction model
+
+`attach_corrected_value` is the reviewer action that replaces an extracted
+observation amount with a verified figure. All three financial observation
+types — `billed_amount`, `contractual_adjustment`, and `payment` — share a
+single correction path backed by the same DB constraints, the same partial
+index, and the same COALESCE pattern.
+
+### 4.1 Overview
+
+When AI extraction produces an incorrect amount, the reviewer inserts a row
+into `fte_review_resolutions` with `action = 'attach_corrected_value'`,
+`observation_id` pointing to the observation being corrected, and
+`corrected_value` set to the verified amount. The reconciler picks this up in
+Phase 0.5 and applies it transparently in the relevant event-emission phase.
+The original observation is never mutated — `fte_observations` rows are
+immutable.
+
+### 4.2 Phase 0.5 loading
+
+Phase 0.5 snapshots all non-superseded `fte_review_resolutions` rows for the
+practice into the temp table `_fte_active_resolutions ON COMMIT DROP`. This
+table is created before any event-emission phase runs. Phases 3, 4, and 5c
+each query it independently with a correlated subquery.
+
+### 4.3 Correlated-subquery + COALESCE pattern
+
+Each event-emission phase (3, 4, 5c) adds a correlated subquery to its
+`FOR v_obs` cursor that selects the active correction for the observation
+being processed:
+
+```sql
+(SELECT ar.corrected_value
+ FROM _fte_active_resolutions ar
+ WHERE ar.observation_id = cl.id
+   AND ar.action         = 'attach_corrected_value'
+ LIMIT 1) AS corrected_<type>_amount
+```
+
+The emitted event amount is then:
+
+```sql
+COALESCE(v_obs.corrected_<type>_amount, v_obs.amount)
+```
+
+If no active correction exists, `COALESCE` falls back to the extracted amount
+and reconciler behavior is identical to the no-correction baseline. The
+`LIMIT 1` is deterministic because at most one active correction per
+observation is enforced by the unique partial index (see §4.6).
+
+### 4.4 Phase 6 math passthrough
+
+Phase 6 derives `fte_financial_positions` from events already in
+`fte_claim_events`. Because the corrected amount is written into the event row
+by Phases 3/4/5c, Phase 6 reads it automatically without any
+correction-aware logic. `open_balance_amount = GREATEST(0, billed − adj − paid)`
+uses whichever amounts — extracted or corrected — ended up in the event rows.
+
+### 4.5 Supersession workflow
+
+To replace an active correction:
+
+1. `UPDATE fte_review_resolutions SET is_superseded = true WHERE observation_id = '<obs_id>' AND action = 'attach_corrected_value' AND is_superseded = false;`
+2. `INSERT INTO fte_review_resolutions (..., corrected_value = <new_value>, is_superseded = false);`
+3. Rerun `fte_reconcile_practice(practice_id)`.
+
+The unique partial index permits any number of superseded (historical)
+corrections for the same observation. Only a second `is_superseded = false`
+row is rejected.
+
+### 4.6 Migration 004 DB constraints
+
+`migrations/004_corrected_value_constraints.sql` enforces correct shape at the
+database level:
+
+| Constraint | Rule |
+|---|---|
+| `fte_review_resolutions_cv_action_needs_obs_id` | `observation_id IS NOT NULL` when `action = 'attach_corrected_value'` |
+| `fte_review_resolutions_cv_action_needs_observation_type` | `target_type = 'observation'` when `action = 'attach_corrected_value'` |
+| `fte_review_resolutions_cv_action_needs_corrected_value` | `corrected_value IS NOT NULL` when `action = 'attach_corrected_value'` |
+| `fte_review_resolutions_cv_action_value_nonnegative` | `corrected_value >= 0` when `action = 'attach_corrected_value'` |
+| `idx_fte_resolutions_single_active_correction` | UNIQUE `(practice_id, observation_id, action) WHERE is_superseded = false AND action = 'attach_corrected_value'` |
+
+### 4.7 Validation suites
+
+| Suite | Checks | What it proves |
+|---|---|---|
+| `tests/validate_corrected_value.sql` | 11 | `attach_corrected_value` on a `payment` observation — correction applied, balanced, idempotency, index enforcement |
+| `tests/validate_corrected_value_supersession.sql` | 10 | Supersession — replace active correction, audit trail, index enforcement |
+| `tests/validate_corrected_contractual_adjustment.sql` | 10 | `attach_corrected_value` on a `contractual_adjustment` observation — Phase 4 corrected amount, payment unchanged, index enforcement |
+| `tests/validate_corrected_billed_amount.sql` | 10 | `attach_corrected_value` on a `billed_amount` observation — Phase 3 corrected amount, payment unchanged, index enforcement |
+
+### 4.8 Supabase stale-function caveat
+
+If a validation check fails with an unexpected amount (e.g., `claim_adjudicated`
+returns the extracted amount instead of the corrected value), the most likely
+cause is a stale registered version of `fte_reconcile_practice` in Supabase.
+Re-paste and execute `reconciler/fte_reconcile.sql` (`CREATE OR REPLACE` —
+safe to rerun), then rerun the failing suite.
+
+---
+
+## 5. How to run against fixtures
 
 Prerequisites:
 1. Apply the schema: `psql "$DATABASE_URL" -f migrations/001_create_financial_truth_schema.sql`
@@ -102,7 +204,7 @@ All checks must emit `PASS` notices and exit without an unhandled `EXCEPTION`.
 
 ---
 
-## 5. How to extend
+## 6. How to extend
 
 **New observation-level resolution action:**
 
@@ -150,7 +252,7 @@ on claim events or positions), follow this four-step guide:
 
 ---
 
-## 6. Why a SQL stored procedure?
+## 7. Why a SQL stored procedure?
 
 - **Single transaction:** the entire 9-phase derivation runs atomically. Either
   all derived rows are committed together or none are — there is no partial-

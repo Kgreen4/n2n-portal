@@ -1,7 +1,7 @@
 # Financial Truth Engine — Schema (README_SCHEMA)
 
 **Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`
-**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement (Phases 2 and 4 of `NEXT_STEPS.md`, Tasks 001–004D)
+**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement (Phases 2 and 4 of `NEXT_STEPS.md`, Tasks 001–004H)
 **Scope:** Schema, RLS, indexes, comments, constraints. No UI, no extraction code, no PDF parsing.
 
 ---
@@ -74,9 +74,10 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    `target_type = 'observation'`, non-null non-negative `corrected_value`) and a unique partial
    index `idx_fte_resolutions_single_active_correction` on
    `(practice_id, observation_id, action) WHERE is_superseded = false AND action = 'attach_corrected_value'`.
-   This makes the `LIMIT 1` in Phase 5c's correlated subquery deterministic rather than
-   advisory. `fte_observations` rows are never mutated — the correction lives exclusively in
-   `fte_review_resolutions`.
+   This makes the `LIMIT 1` in Phases 3, 4, and 5c's correlated subqueries deterministic
+   rather than advisory. `fte_observations` rows are never mutated — the correction lives
+   exclusively in `fte_review_resolutions`. See `reconciler/README.md §4` for the full
+   correction model.
 
 ---
 
@@ -129,12 +130,15 @@ psql "$DATABASE_URL" -f tests/validate_schema.sql
 psql "$DATABASE_URL" -f tests/validate_reconciler.sql
 psql "$DATABASE_URL" -f tests/validate_review_resolution.sql       # ccdbe216 fixture required
 psql "$DATABASE_URL" -f tests/validate_observation_resolution.sql  # ccdbe216 fixture required
-psql "$DATABASE_URL" -f tests/validate_corrected_value.sql         # 96c5c357 fixture required
+psql "$DATABASE_URL" -f tests/validate_corrected_value.sql                  # 96c5c357 fixture required
+psql "$DATABASE_URL" -f tests/validate_corrected_value_supersession.sql      # 96c5c357 fixture required
+psql "$DATABASE_URL" -f tests/validate_corrected_contractual_adjustment.sql  # 96c5c357 fixture required
+psql "$DATABASE_URL" -f tests/validate_corrected_billed_amount.sql           # 96c5c357 fixture required
 ```
 
 Use the Supabase `service_role` / `postgres` connection. For the Supabase SQL Editor,
 load fixture files manually before running test bodies (the SQL Editor does not support
-`\i`). See `tests/README.md` for the complete run order.
+`\i`). See `tests/RUNBOOK.md` for the complete run order.
 
 ---
 

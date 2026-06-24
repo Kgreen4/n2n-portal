@@ -142,7 +142,7 @@ starting from the `begin;` block.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| CHECK N fails with "expected X, got Y" on a payment/balance value | Stale registered reconciler — Supabase has a pre-004D (or older) version of `fte_reconcile_practice` lacking the corrected-value or Phase 0.5 logic | Re-paste and execute `reconciler/fte_reconcile.sql` (it is `CREATE OR REPLACE`; safe to rerun), then rerun the failing suite |
+| CHECK N fails with "expected X, got Y" on a payment/balance value | Stale registered reconciler — Supabase has a pre-004D (or older) version of `fte_reconcile_practice` lacking the corrected-value or Phase 0.5 logic | Re-paste and execute `reconciler/fte_reconcile.sql` (it is `CREATE OR REPLACE`; safe to rerun), then rerun the failing suite. For the corrected-value correction model, see `reconciler/README.md §4`. |
 | `syntax error at or near "\"` in Supabase SQL Editor | `\i` psql metacommand in the file | Comment out or delete the `\i` line; paste only the content from `begin;` onward, or use local psql instead |
 | `duplicate key value violates unique constraint` or `already exists` when applying a migration | Migration already applied to this DB | Skip that migration; check the others and apply only the ones not yet applied |
 | NOTICE / PASS lines not visible | Supabase SQL Editor Messages panel is collapsed | Expand the Messages panel below the Results panel |

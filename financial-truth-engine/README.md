@@ -1,6 +1,6 @@
 # Financial Truth Engine
 
-**Status:** Active — schema, reconciler, and corrected-value resolutions proven on synthetic data (Task 004D merged 2026-06-23)
+**Status:** Active — schema, reconciler, and corrected-value resolutions proven on synthetic data (Tasks 001–004H merged 2026-06-23)
 **Owner:** Keith Green / N2N Analytics  
 **Created:** 2026-06-16  
 **Important:** This effort is intentionally separate from the current EOB extraction project.
@@ -194,8 +194,8 @@ As of Task 004D (2026-06-23):
 - Four reviewer action categories proven on synthetic data:
   - `confirm_payment_event` — promotes ambiguous payment events to reconciled/balanced
   - `confirm_observation` / `reject_observation` / `mark_duplicate` — observation-level suppression
-  - `attach_corrected_value` — per-observation payment correction enforced by DB constraints (migration 004); Phase 5c uses `COALESCE(corrected_value, extracted_amount)`
-- 42 validation checks across 5 test suites, all passing in a disposable Supabase project
+  - `attach_corrected_value` — per-observation amount correction applied to `billed_amount`, `contractual_adjustment`, and `payment` observations; enforced by DB constraints (migration 004); Phases 3, 4, and 5c each use `COALESCE(corrected_value, extracted_amount)` — see `reconciler/README.md §4`
+- 72 numeric checks across 8 test suites, all passing in a disposable Supabase project
 
 Not yet implemented: AI extraction layer, UI, API, Edge Functions.
 
@@ -210,8 +210,11 @@ Not yet implemented: AI extraction layer, UI, API, Edge Functions.
 | `tests/validate_review_resolution.sql` | 7 | 004A/B |
 | `tests/validate_observation_resolution.sql` | 12 | 004C |
 | `tests/validate_corrected_value.sql` | 11 | 004D |
+| `tests/validate_corrected_value_supersession.sql` | 10 | 004E |
+| `tests/validate_corrected_contractual_adjustment.sql` | 10 | 004G |
+| `tests/validate_corrected_billed_amount.sql` | 10 | 004H |
 
-All suites wrap in `ROLLBACK` — nothing persists. See `tests/README.md` for run order.
+All suites wrap in `ROLLBACK` — nothing persists. See `tests/RUNBOOK.md` for run order.
 
 ---
 
