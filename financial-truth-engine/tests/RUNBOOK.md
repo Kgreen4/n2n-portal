@@ -18,8 +18,9 @@ errors in the Supabase SQL Editor, and missing fixture loads.
 | `tests/validate_corrected_value_supersession.sql` | 10 | supersession — replace active correction, audit trail, index enforcement |
 | `tests/validate_corrected_contractual_adjustment.sql` | 10 | `attach_corrected_value` on contractual_adjustment obs — Phase 4 corrected amount, payment unchanged, index enforcement |
 | `tests/validate_corrected_billed_amount.sql` | 10 | `attach_corrected_value` on billed_amount obs — Phase 3 corrected amount, payment unchanged, index enforcement |
+| `tests/validate_dismiss_short_pay.sql` | 9 | `dismiss_short_pay` — Phase 7/8 suppression, math preserved, CLM-APC-2000 isolation, supersession |
 
-**Total numeric checks: 72**
+**Total numeric checks: 81**
 
 All suites are wrapped in `ROLLBACK` — nothing persists to the database.
 `fte_analysis_runs` is append-only and is **not** rolled back; suites use
@@ -50,6 +51,7 @@ Suite → fixture dependency:
 | `validate_corrected_value_supersession.sql` | 96c5c357 |
 | `validate_corrected_contractual_adjustment.sql` | 96c5c357 |
 | `validate_corrected_billed_amount.sql` | 96c5c357 |
+| `validate_dismiss_short_pay.sql` | 96c5c357 |
 
 ---
 
@@ -100,7 +102,7 @@ psql "$DATABASE_URL" -f tests/run_all_validations.sql
 This runner loads both fixtures, then executes all six suites in the correct
 order. See `tests/run_all_validations.sql` for the exact sequence.
 
-Expected output: 72 `PASS` NOTICE lines across eight suites, plus a banner
+Expected output: 81 `PASS` NOTICE lines across nine suites, plus a banner
 after each suite. Each suite is independent — a failure in one suite does not
 prevent the next from running, but scroll up to find the EXCEPTION output from
 any failed suite.
@@ -127,6 +129,7 @@ starting from the `begin;` block.
 8. Paste + execute `tests/validate_corrected_value_supersession.sql`
 9. Paste + execute `tests/validate_corrected_contractual_adjustment.sql`
 10. Paste + execute `tests/validate_corrected_billed_amount.sql`
+11. Paste + execute `tests/validate_dismiss_short_pay.sql`
 
 **What to expect in the SQL Editor:**
 

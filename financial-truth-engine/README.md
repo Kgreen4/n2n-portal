@@ -1,6 +1,6 @@
 # Financial Truth Engine
 
-**Status:** Active — schema, reconciler, and corrected-value resolutions proven on synthetic data (Tasks 001–004H merged 2026-06-23)
+**Status:** Active — schema, reconciler, corrected-value resolutions, and dismiss_short_pay position-level resolution proven on synthetic data (Tasks 001–005A merged)
 **Owner:** Keith Green / N2N Analytics  
 **Created:** 2026-06-16  
 **Important:** This effort is intentionally separate from the current EOB extraction project.
@@ -191,11 +191,12 @@ As of Task 004D (2026-06-23):
 - 11-table ledger schema with RLS, tenant isolation, and immutable evidence
 - Deterministic 9-phase reconciler (`fte_reconcile_practice`) — idempotent, evidence-linked
 - Phase 0.5 review resolution loading — reviewer decisions survive reruns
-- Four reviewer action categories proven on synthetic data:
+- Five reviewer action categories proven on synthetic data:
   - `confirm_payment_event` — promotes ambiguous payment events to reconciled/balanced
   - `confirm_observation` / `reject_observation` / `mark_duplicate` — observation-level suppression
   - `attach_corrected_value` — per-observation amount correction applied to `billed_amount`, `contractual_adjustment`, and `payment` observations; enforced by DB constraints (migration 004); Phases 3, 4, and 5c each use `COALESCE(corrected_value, extracted_amount)` — see `reconciler/README.md §4`
-- 72 numeric checks across 8 test suites, all passing in a disposable Supabase project
+  - `dismiss_short_pay` — position-level dismissal that suppresses Phase 7 queue routing and Phase 8 event emission while preserving mathematical `unbalanced` position; enforced by DB constraints (migration 005) — see `reconciler/README.md §5`
+- 81 numeric checks across 9 test suites, all passing in a disposable Supabase project
 
 Not yet implemented: AI extraction layer, UI, API, Edge Functions.
 
@@ -213,6 +214,7 @@ Not yet implemented: AI extraction layer, UI, API, Edge Functions.
 | `tests/validate_corrected_value_supersession.sql` | 10 | 004E |
 | `tests/validate_corrected_contractual_adjustment.sql` | 10 | 004G |
 | `tests/validate_corrected_billed_amount.sql` | 10 | 004H |
+| `tests/validate_dismiss_short_pay.sql` | 9 | 005A |
 
 All suites wrap in `ROLLBACK` — nothing persists. See `tests/RUNBOOK.md` for run order.
 

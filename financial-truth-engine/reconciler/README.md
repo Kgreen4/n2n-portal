@@ -73,8 +73,8 @@ produces `suspected_summary_row`, even if failure_mode is also set.
 | **5c** | Emit `payment_applied` events from TRUSTED `payment` observations. Each event gets two `supports` evidence links: (1) the page observation, and (2) the matching `check_payment` stub (if one exists with `metadata->>'check_number' = check_eft_identifier`). A reviewer-supplied corrected payment amount is applied via `COALESCE` — see §4. |
 | **5** (late/retry) | For each `late_retry_page_contradiction` review entry that has an `observation_id`, find the `payment_applied` event for the same claim, then: **(a)** if an active `confirm_payment_event` resolution exists for the claim in `_fte_active_resolutions`, mark the event `reconciled`; otherwise mark it `ambiguous`; **(b)** wire the review entry's `claim_event_id` (unconditional); **(c)** insert a `contradicts` evidence link (unconditional — the contradiction record is always preserved even when the reviewer has confirmed the payment). If no payment event exists the loop is a no-op for that entry. |
 | **6** | Derive `fte_financial_positions` for every claim that has at least one event OR at least one review queue entry. `reconciliation_status` CASE (evaluated in priority order): (1) no events → `in_review`; (2) any linked event has `reconciliation_status = 'ambiguous'` → `in_review` — **this applies even when the math balances to zero** (gap = 0). Financial truth cannot be finalized while contradicting evidence is unresolved; the claim must go to human review. Note: `'ambiguous'` is valid on `fte_claim_events` but is **not** a valid `fte_financial_positions.reconciliation_status` value (schema CHECK forbids it) — `in_review` is the correct surrogate; (3) any unbalanced event or positive open balance → `unbalanced`; (4) else → `balanced`. `open_balance_amount` is NULL when billed is unknown; otherwise `GREATEST(0, billed − adj − paid)`. `position_confidence_score` = MIN(confidence_score) across non–short_pay events, falling back to `0.0000`. |
-| **7** | Route every `unbalanced` or `in_review` position to `fte_review_queue` with reason `unbalanced_financial_position`. |
-| **8** | For each unbalanced position with `open_balance_amount > 0`, emit a `short_pay_detected` event and inherit the `derived_from` evidence link from the corresponding `claim_adjudicated` event. |
+| **7** | Route every `unbalanced` or `in_review` position to `fte_review_queue` with reason `unbalanced_financial_position`. **dismiss_short_pay suppression:** `unbalanced` positions are skipped when an active `dismiss_short_pay` resolution exists for the claim in `_fte_active_resolutions`. The `fte_financial_positions` row is NOT changed — `reconciliation_status = 'unbalanced'` and `open_balance_amount` remain correct. `in_review` positions are always routed regardless of any resolution. |
+| **8** | For each unbalanced position with `open_balance_amount > 0`, emit a `short_pay_detected` event and inherit the `derived_from` evidence link from the corresponding `claim_adjudicated` event. **dismiss_short_pay suppression:** the `short_pay_detected` event is not emitted when an active `dismiss_short_pay` resolution exists for the claim. The position row retains `reconciliation_status = 'unbalanced'` and the correct `open_balance_amount` — math is preserved as financial truth. |
 | **9** | Insert a `fte_analysis_runs` row with status `succeeded` and return a summary JSON with keys `run_id`, `practice_id`, `claims_processed`, `events_emitted`, `positions_derived`, `review_entries`, `review_resolutions_applied`. |
 
 ---
@@ -181,7 +181,69 @@ safe to rerun), then rerun the failing suite.
 
 ---
 
-## 5. How to run against fixtures
+## 5. Position-level resolution model
+
+`dismiss_short_pay` is the first position-level reviewer action. It suppresses
+short-pay workflow routing for a specific claim without altering the mathematical
+position derived by Phase 6.
+
+### 5.1 Overview
+
+When a reviewer decides that an open balance is known, accepted, or not worth
+pursuing (e.g., a known write-off, a contractual allowance, or a credentialing
+exclusion), they insert a row into `fte_review_resolutions` with
+`action = 'dismiss_short_pay'`, `target_type = 'position'`,
+`claim_id` pointing to the stable claim anchor, and `is_superseded = false`.
+
+On the next reconciler run, Phase 7 skips the `fte_review_queue` insert for
+that claim's unbalanced position, and Phase 8 skips the `short_pay_detected`
+event. The `fte_financial_positions` row is left exactly as Phase 6 derived it:
+`reconciliation_status = 'unbalanced'`, `open_balance_amount` mathematically
+correct. The suppression is operational, not mathematical — financial truth is
+preserved.
+
+### 5.2 Why `claim_id` (not `source_position_id`) is the stable anchor
+
+`fte_financial_positions` rows are deleted and re-derived on every Phase 0 reset.
+`source_position_id` is a plain uuid snapshot field with no `REFERENCES` clause —
+it becomes stale after each reprocess. `claim_id` is a hard FK to `fte_claims`,
+which Phase 0 never deletes. Phases 7 and 8 look up active `dismiss_short_pay`
+resolutions by `claim_id`, guaranteeing the lookup survives reruns.
+
+### 5.3 Supersession workflow
+
+To re-enable short-pay routing for a previously dismissed claim:
+
+1. `UPDATE fte_review_resolutions SET is_superseded = true WHERE claim_id = '<claim_id>' AND action = 'dismiss_short_pay' AND is_superseded = false;`
+2. Rerun `fte_reconcile_practice(practice_id)`.
+
+On the next run Phase 0.5 finds no active `dismiss_short_pay` row for the claim,
+so Phases 7 and 8 behave as if no resolution existed — the queue entry and
+`short_pay_detected` event reappear.
+
+### 5.4 Migration 005 DB constraints
+
+`migrations/005_dismiss_short_pay_constraints.sql` enforces the required shape:
+
+| Constraint | Rule |
+|---|---|
+| `fte_review_resolutions_dismiss_shortpay_needs_claim_id` | `claim_id IS NOT NULL` when `action = 'dismiss_short_pay'` |
+| `fte_review_resolutions_dismiss_shortpay_needs_position_type` | `target_type = 'position'` when `action = 'dismiss_short_pay'` |
+
+### 5.5 Validation suite
+
+`tests/validate_dismiss_short_pay.sql` — 9 checks (wrapped in ROLLBACK):
+
+| Step | Checks | What it proves |
+|---|---|---|
+| 1: baseline | 1–3 | `review_resolutions_applied = 0`; `short_pay_detected` emitted; CLM-APC-1000 queued |
+| 3: dismissed | 4–7 | `review_resolutions_applied = 1`; event suppressed; queue entry absent; position math unchanged |
+| 4: isolation | 8 | CLM-APC-2000 still queued (unaffected) |
+| 5: supersession | 9 | After `is_superseded = true`, event re-emitted and queue row reappears |
+
+---
+
+## 7. How to run against fixtures
 
 Prerequisites:
 1. Apply the schema: `psql "$DATABASE_URL" -f migrations/001_create_financial_truth_schema.sql`
@@ -204,7 +266,7 @@ All checks must emit `PASS` notices and exit without an unhandled `EXCEPTION`.
 
 ---
 
-## 6. How to extend
+## 8. How to extend
 
 **New observation-level resolution action:**
 
@@ -252,7 +314,7 @@ on claim events or positions), follow this four-step guide:
 
 ---
 
-## 7. Why a SQL stored procedure?
+## 9. Why a SQL stored procedure?
 
 - **Single transaction:** the entire 9-phase derivation runs atomically. Either
   all derived rows are committed together or none are — there is no partial-
