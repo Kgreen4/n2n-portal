@@ -332,7 +332,7 @@ Apply migrations and register the reconciler before running.
 **Total numeric checks: 72** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
-manually before running the test body. The `tests/README.md` documents the run order.
+manually before running the test body. The `tests/RUNBOOK.md` documents the run order.
 
 ---
 
