@@ -16,8 +16,9 @@ errors in the Supabase SQL Editor, and missing fixture loads.
 | `tests/validate_observation_resolution.sql` | 12 | confirm/reject/mark_duplicate, Phase 1 suppression, ledger recalc |
 | `tests/validate_corrected_value.sql` | 11 | `attach_corrected_value` — correction applied, balanced, idempotency, index |
 | `tests/validate_corrected_value_supersession.sql` | 10 | supersession — replace active correction, audit trail, index enforcement |
+| `tests/validate_corrected_contractual_adjustment.sql` | 10 | `attach_corrected_value` on contractual_adjustment obs — Phase 4 corrected amount, payment unchanged, index enforcement |
 
-**Total numeric checks: 52**
+**Total numeric checks: 62**
 
 All suites are wrapped in `ROLLBACK` — nothing persists to the database.
 `fte_analysis_runs` is append-only and is **not** rolled back; suites use
@@ -46,6 +47,7 @@ Suite → fixture dependency:
 | `validate_observation_resolution.sql` | ccdbe216 |
 | `validate_corrected_value.sql` | 96c5c357 |
 | `validate_corrected_value_supersession.sql` | 96c5c357 |
+| `validate_corrected_contractual_adjustment.sql` | 96c5c357 |
 
 ---
 
@@ -96,7 +98,7 @@ psql "$DATABASE_URL" -f tests/run_all_validations.sql
 This runner loads both fixtures, then executes all six suites in the correct
 order. See `tests/run_all_validations.sql` for the exact sequence.
 
-Expected output: 52 `PASS` NOTICE lines across six suites, plus a banner
+Expected output: 62 `PASS` NOTICE lines across seven suites, plus a banner
 after each suite. Each suite is independent — a failure in one suite does not
 prevent the next from running, but scroll up to find the EXCEPTION output from
 any failed suite.
@@ -121,6 +123,7 @@ starting from the `begin;` block.
 6. Paste + execute `tests/validate_observation_resolution.sql`
 7. Paste + execute `tests/validate_corrected_value.sql`
 8. Paste + execute `tests/validate_corrected_value_supersession.sql`
+9. Paste + execute `tests/validate_corrected_contractual_adjustment.sql`
 
 **What to expect in the SQL Editor:**
 
@@ -154,7 +157,7 @@ starting from the `begin;` block.
 - Do not load raw PDFs or production data into the validation DB.
 - Do not paste credentials, service-role keys, or anon keys into any file in
   this repo.
-- Do not connect to the legacy EOB Supabase project (`jdmyjdvricpyrsfchakk`)
+- Do not connect to the legacy EOB Supabase project
   for any FTE validation step.
 - `$DATABASE_URL` in the commands above is a shell variable you supply at
   runtime — it is never stored in this file.
