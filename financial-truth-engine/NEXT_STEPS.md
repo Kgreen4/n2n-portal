@@ -237,6 +237,54 @@ no production data, no legacy EOB project accessed.
 
 ---
 
+### Task 005B — confirm_short_pay Position-Level Review Resolution ✅ Complete
+
+**Delivered:**
+- `migrations/006_confirm_short_pay_constraints.sql` — two CHECK constraints
+  (`fte_review_resolutions_confirm_shortpay_needs_claim_id`: `claim_id IS NOT NULL`
+  and `fte_review_resolutions_confirm_shortpay_needs_position_type`: `target_type = 'position'`)
+  and a partial unique index `idx_fte_resolutions_single_active_position_short_pay` on
+  `(practice_id, claim_id) WHERE is_superseded = false AND action IN ('confirm_short_pay',
+  'dismiss_short_pay')` — prevents simultaneous active rows of both actions for the same claim.
+- `reconciler/fte_reconcile.sql` (Phase 7 updated) — Phase 7 guard extended from
+  `ar.action = 'dismiss_short_pay'` to `ar.action IN ('dismiss_short_pay', 'confirm_short_pay')`:
+  both actions suppress the `unbalanced_financial_position` queue row. Phase 8 guard is
+  **unchanged** — `short_pay_detected` event is still suppressed for `dismiss_short_pay` only;
+  `confirm_short_pay` leaves the event in place so downstream recovery workflows remain active.
+  Phase 6 math and `fte_financial_positions` row (`reconciliation_status = 'unbalanced'`,
+  correct `open_balance_amount`) are preserved — the confirmation is operational, not mathematical.
+- `tests/validate_confirm_short_pay.sql` — 10-check validation suite (wrapped in ROLLBACK).
+  Verifies: baseline `short_pay_detected` emitted and queue row present (checks 1–3);
+  after confirm: `review_resolutions_applied=1`, queue row absent, `short_pay_detected`
+  **preserved**, position `unbalanced`/`open_balance_amount=1248.11` (checks 4–7);
+  conflict-prevention — `dismiss_short_pay` insert raises `unique_violation` while
+  `confirm_short_pay` is active (check 8); CLM-APC-2000 unaffected (check 9);
+  supersession restores the queue row while `short_pay_detected` remains (check 10).
+- `tests/RUNBOOK.md` (updated) — added `validate_confirm_short_pay.sql` to suite table
+  (10 checks), fixture dependency table (96c5c357), and Supabase manual run sequence
+  (step 12); migration 006 added to first-time setup; updated total 81→91.
+- `tests/run_all_validations.sql` (updated) — added `\i tests/validate_confirm_short_pay.sql`
+  after dismiss suite; updated expected count 81→91.
+- `reconciler/README.md` (updated) — Phase 7/8 table rows document both actions; §5.6–§5.10
+  added (confirm_short_pay overview, stable anchor rationale, supersession, migration 006
+  constraints table, validation suite table).
+- `README.md` (updated) — status line, capabilities bullet, suite table (10 suites),
+  numeric check count 81→91.
+- `README_SCHEMA.md` (updated) — migration header, status line, Invariant #11
+  (confirm_short_pay shape constraints, conflict-prevention index, Phase 7/8 behavior,
+  math preservation), How To Apply psql block (migration 006 + validate_confirm_short_pay.sql).
+- `NEXT_STEPS.md` (this file) — Task 005B entry and Current Capabilities/Suites updates.
+
+**Safety:** no PHI, no real patient data, no production data, no legacy EOB DB or
+code accessed. No new `reconciliation_status` values. No new claim event types.
+No fixture files modified. No forbidden files touched. Phase 8 `short_pay_detected`
+event remains emitted — financial truth and downstream recovery workflows preserved.
+Conflict-prevention index enforces at-most-one active short-pay decision per claim at
+the DB level. Tested via ROLLBACK-wrapped suite against synthetic 96c5c357 fixture in a
+disposable Supabase project.
+
+---
+
 ### Task 005A — dismiss_short_pay Position-Level Review Resolution ✅ Complete
 
 **Delivered:**
@@ -312,7 +360,7 @@ project accessed.
 
 ## Current Capabilities
 
-As of Task 004H complete (2026-06-23), the FTE can:
+As of Task 005B complete (2026-06-24), the FTE can:
 
 - **Represent the full claim ledger.** Eleven tables covering practices, evidence,
   observations, claims, claim events, event-evidence audit links, financial positions,
@@ -355,6 +403,15 @@ As of Task 004H complete (2026-06-23), the FTE can:
   open-balance math picks up the corrected value automatically. Proven across 10
   validation checks (Task 004H). All three claim-level amounts (billed, contractual
   adjustment, payment) can now be independently corrected by a reviewer.
+- **Dismiss a short pay.** `dismiss_short_pay` suppresses both the Phase 7 queue row
+  and the Phase 8 `short_pay_detected` event for the claim. Position math preserved
+  (`unbalanced`, correct `open_balance_amount`). Enforced by migration 005 constraints.
+  Proven across 9 validation checks (Task 005A).
+- **Confirm a short pay.** `confirm_short_pay` suppresses the Phase 7 queue row only —
+  the `short_pay_detected` event remains emitted so recovery workflows stay active.
+  A conflict-prevention partial unique index (migration 006) prevents simultaneous
+  active `confirm_short_pay` + `dismiss_short_pay` for the same claim. Position math
+  preserved. Proven across 10 validation checks (Task 005B).
 
 **Not yet implemented:** extraction layer (AI observations from real PDFs), UI,
 API endpoints, Edge Functions, denial/contract intelligence.
@@ -376,8 +433,10 @@ Apply migrations and register the reconciler before running.
 | `tests/validate_corrected_value_supersession.sql` | 10 | corrected-value supersession — replace active correction, audit trail, index enforcement |
 | `tests/validate_corrected_contractual_adjustment.sql` | 10 | `attach_corrected_value` on contractual_adjustment obs — Phase 4 corrected amount, payment unchanged, index enforcement |
 | `tests/validate_corrected_billed_amount.sql` | 10 | `attach_corrected_value` on billed_amount obs — Phase 3 corrected amount, payment unchanged, index enforcement |
+| `tests/validate_dismiss_short_pay.sql` | 9 | `dismiss_short_pay` — Phase 7/8 suppression, math preserved, CLM-APC-2000 isolation, supersession |
+| `tests/validate_confirm_short_pay.sql` | 10 | `confirm_short_pay` — Phase 7 suppression only, short_pay_detected preserved, conflict-prevention index, CLM-APC-2000 isolation, supersession |
 
-**Total numeric checks: 72** (structure checks in validate_schema.sql not counted)
+**Total numeric checks: 91** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
 manually before running the test body. The `tests/RUNBOOK.md` documents the run order.

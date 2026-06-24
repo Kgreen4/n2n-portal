@@ -1,7 +1,7 @@
 # Financial Truth Engine — Schema (README_SCHEMA)
 
-**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`
-**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + dismiss_short_pay position-level resolution (Tasks 001–005A)
+**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`, `migrations/006_confirm_short_pay_constraints.sql`
+**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + position-level resolutions (dismiss_short_pay + confirm_short_pay) (Tasks 001–005B)
 **Scope:** Schema, RLS, indexes, comments, constraints. No UI, no extraction code, no PDF parsing.
 
 ---
@@ -37,7 +37,7 @@ tables even if temporarily deployed into the same Supabase project. The migratio
 | 4 Intelligence | `fte_denial_knowledge` | Editable CARC/RARC/payer rules. `practice_id IS NULL` = global default; non-null = override. |
 | 4 Intelligence | `fte_contract_terms` | Expected payer behavior per CPT/modifier and effective window. |
 | Review | `fte_review_queue` | Makes uncertainty explicit (low-confidence / conflicting / missing-link / unbalanced / suspected-duplicate / suspected-summary-row / late-retry-page-contradiction). |
-| Review | `fte_review_resolutions` | **Append-only** typed reviewer decisions (15-action vocabulary across 3 categories). Survives Phase 0 DELETE — hard FKs to stable entity tables only (`fte_practices`, `fte_claims`, `fte_observations`, `fte_evidence`). Volatile derived-row IDs are snapshot fields with no `REFERENCES` clause; they become stale after a reprocess — that is expected. Phase 0.5 loads non-superseded rows before reconciliation begins. Migration 003 adds `target_observation_id uuid references fte_observations(id) on delete restrict` plus 5 CHECK constraints for the three observation-level actions (`confirm_observation`, `reject_observation`, `mark_duplicate`) and a partial index for reverse lookup. Migration 004 adds 4 CHECK constraints for `attach_corrected_value` (requires `observation_id IS NOT NULL`, `target_type = 'observation'`, `corrected_value IS NOT NULL`, `corrected_value >= 0`) and `idx_fte_resolutions_single_active_correction` — `UNIQUE (practice_id, observation_id, action) WHERE is_superseded = false AND action = 'attach_corrected_value'` — enforcing at most one active corrected-value resolution per observation. To supersede: set `is_superseded = true` on the old row, then insert a new one. |
+| Review | `fte_review_resolutions` | **Append-only** typed reviewer decisions (15-action vocabulary across 3 categories). Survives Phase 0 DELETE — hard FKs to stable entity tables only (`fte_practices`, `fte_claims`, `fte_observations`, `fte_evidence`). Volatile derived-row IDs are snapshot fields with no `REFERENCES` clause; they become stale after a reprocess — that is expected. Phase 0.5 loads non-superseded rows before reconciliation begins. Migration 003 adds `target_observation_id uuid references fte_observations(id) on delete restrict` plus 5 CHECK constraints for the three observation-level actions (`confirm_observation`, `reject_observation`, `mark_duplicate`) and a partial index for reverse lookup. Migration 004 adds 4 CHECK constraints for `attach_corrected_value` (requires `observation_id IS NOT NULL`, `target_type = 'observation'`, `corrected_value IS NOT NULL`, `corrected_value >= 0`) and `idx_fte_resolutions_single_active_correction` — `UNIQUE (practice_id, observation_id, action) WHERE is_superseded = false AND action = 'attach_corrected_value'` — enforcing at most one active corrected-value resolution per observation. Migration 005 adds 2 CHECK constraints for `dismiss_short_pay` (`claim_id IS NOT NULL`, `target_type = 'position'`). Migration 006 adds 2 CHECK constraints for `confirm_short_pay` (`claim_id IS NOT NULL`, `target_type = 'position'`) and `idx_fte_resolutions_single_active_position_short_pay` — `UNIQUE (practice_id, claim_id) WHERE is_superseded = false AND action IN ('confirm_short_pay', 'dismiss_short_pay')` — preventing simultaneous active rows of both actions for the same claim. To supersede: set `is_superseded = true` on the old row, then insert a new one. |
 | Audit | `fte_analysis_runs` | Execution/audit metadata for reconciliation and ingestion runs. |
 
 ---
@@ -90,6 +90,21 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    retains `reconciliation_status = 'unbalanced'` and the correct `open_balance_amount` —
    the dismissal is operational, not mathematical; financial truth is preserved.
    See `reconciler/README.md §5`.
+11. **confirm_short_pay resolutions require a stable claim anchor, position target, and
+   conflict prevention.** Migration 006 adds two CHECK constraints —
+   `fte_review_resolutions_confirm_shortpay_needs_claim_id` (`claim_id IS NOT NULL` when
+   `action = 'confirm_short_pay'`) and `fte_review_resolutions_confirm_shortpay_needs_position_type`
+   (`target_type = 'position'` when `action = 'confirm_short_pay'`) — and a partial unique index
+   `idx_fte_resolutions_single_active_position_short_pay` on `(practice_id, claim_id) WHERE
+   is_superseded = false AND action IN ('confirm_short_pay', 'dismiss_short_pay')`. The partial
+   unique index prevents simultaneous active rows of both actions for the same claim: once one
+   is active, inserting the other raises `unique_violation`. To switch: set `is_superseded = true`
+   on the current row, then insert the new one. When a non-superseded `confirm_short_pay` row
+   exists for a claim, the reconciler suppresses Phase 7 queue routing only — the
+   `short_pay_detected` event (Phase 8) remains emitted so downstream recovery workflows can act
+   on it. The `fte_financial_positions` row retains `reconciliation_status = 'unbalanced'` and
+   the correct `open_balance_amount` — financial truth is preserved.
+   See `reconciler/README.md §5.6–§5.10`.
 
 ---
 
@@ -129,6 +144,8 @@ psql "$DATABASE_URL" -f migrations/001_create_financial_truth_schema.sql
 psql "$DATABASE_URL" -f migrations/002_add_review_resolutions.sql
 psql "$DATABASE_URL" -f migrations/003_add_observation_resolution_target.sql
 psql "$DATABASE_URL" -f migrations/004_corrected_value_constraints.sql
+psql "$DATABASE_URL" -f migrations/005_dismiss_short_pay_constraints.sql
+psql "$DATABASE_URL" -f migrations/006_confirm_short_pay_constraints.sql
 
 # Register the reconciler
 psql "$DATABASE_URL" -f reconciler/fte_reconcile.sql
@@ -146,6 +163,8 @@ psql "$DATABASE_URL" -f tests/validate_corrected_value.sql                  # 96
 psql "$DATABASE_URL" -f tests/validate_corrected_value_supersession.sql      # 96c5c357 fixture required
 psql "$DATABASE_URL" -f tests/validate_corrected_contractual_adjustment.sql  # 96c5c357 fixture required
 psql "$DATABASE_URL" -f tests/validate_corrected_billed_amount.sql           # 96c5c357 fixture required
+psql "$DATABASE_URL" -f tests/validate_dismiss_short_pay.sql                 # 96c5c357 fixture required
+psql "$DATABASE_URL" -f tests/validate_confirm_short_pay.sql                 # 96c5c357 fixture required
 ```
 
 Use the Supabase `service_role` / `postgres` connection. For the Supabase SQL Editor,
