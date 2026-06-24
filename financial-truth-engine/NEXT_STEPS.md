@@ -199,9 +199,48 @@ validation-only, runs under ROLLBACK in a disposable Supabase project.
 
 ---
 
+### Task 004F — Validation Runbook and Ergonomics ✅ Complete
+
+**Delivered:**
+- `tests/RUNBOOK.md` — authoritative run-order guide for the validation suite.
+  Covers first-time setup (local psql and Supabase SQL Editor sequences), the
+  repeatable validation-run command, the suite→fixture dependency table, and a
+  troubleshooting section addressing the most common failure modes (stale registered
+  reconciler, `\i` metacommand errors in the SQL Editor, duplicate-object errors on
+  re-migration, missing NOTICE output in collapsed Messages panel).
+
+**Safety:** documentation-only; no schema, reconciler, fixture, or test changes.
+
+---
+
+### Task 004G — Corrected Contractual Adjustment Support ✅ Complete
+
+**Delivered:**
+- `reconciler/fte_reconcile.sql` (Phase 4 updated) — correlated subquery in the
+  `FOR v_obs` SELECT list looks up any active `attach_corrected_value` resolution
+  from `_fte_active_resolutions` for each trusted contractual_adjustment observation.
+  `COALESCE(v_obs.corrected_adj_amount, v_obs.amount)` uses the correction when present
+  and falls back to the extracted amount otherwise. Mirrors the Phase 5c payment-
+  correction pattern exactly. No migration required — migration 004's unique partial
+  index (`idx_fte_resolutions_single_active_correction`) already covers any observation
+  type; no `observation_type` restriction exists in the CHECK constraints.
+- `tests/validate_corrected_contractual_adjustment.sql` — 10-check validation suite
+  (wrapped in ROLLBACK) using synthetic obs a3 inserted inside the transaction. Verifies:
+  baseline adj=$900.00/payment=$351.89/open_balance=$348.11/unbalanced/resolutions=0,
+  corrected adj=$800.00/payment unchanged/open_balance=$448.11/unbalanced/resolutions=1,
+  resolution row survives Phase 0, idempotency across a third run, and unique partial
+  index rejects a second active correction.
+
+**Safety:** no new schema objects, no new action vocabulary, no fixture file changes;
+no migration; Phase 5c payment-correction path unchanged; ROLLBACK-wrapped validation
+in a disposable Supabase project only; no PHI, no production data, no legacy EOB
+project accessed.
+
+---
+
 ## Current Capabilities
 
-As of Task 004E complete (2026-06-23), the FTE can:
+As of Task 004G complete (2026-06-23), the FTE can:
 
 - **Represent the full claim ledger.** Eleven tables covering practices, evidence,
   observations, claims, claim events, event-evidence audit links, financial positions,
@@ -233,6 +272,11 @@ As of Task 004E complete (2026-06-23), the FTE can:
   loads only the new active correction; the unique partial index prevents a second
   active row; superseded rows are retained for audit. Proven across 10 validation
   checks (Task 004E).
+- **Correct a contractual adjustment amount.** An `attach_corrected_value` resolution
+  on a `contractual_adjustment` observation overrides the extracted adjustment amount
+  in Phase 4 — same action vocabulary, same correlated-subquery pattern as payment
+  corrections, no migration. Phase 6 open-balance math (`GREATEST(0, billed − adj − paid)`)
+  picks up the corrected value automatically. Proven across 10 validation checks (Task 004G).
 
 **Not yet implemented:** extraction layer (AI observations from real PDFs), UI,
 API endpoints, Edge Functions, denial/contract intelligence.
@@ -252,8 +296,9 @@ Apply migrations and register the reconciler before running.
 | `tests/validate_observation_resolution.sql` | 12 | confirm/reject/mark_duplicate, Phase 1 suppression, ledger recalculation |
 | `tests/validate_corrected_value.sql` | 11 | `attach_corrected_value` — correction applied, balanced, idempotency, isolation, index |
 | `tests/validate_corrected_value_supersession.sql` | 10 | corrected-value supersession — replace active correction, audit trail, index enforcement |
+| `tests/validate_corrected_contractual_adjustment.sql` | 10 | `attach_corrected_value` on contractual_adjustment obs — Phase 4 corrected amount, payment unchanged, index enforcement |
 
-**Total numeric checks: 52** (structure checks in validate_schema.sql not counted)
+**Total numeric checks: 62** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
 manually before running the test body. The `tests/README.md` documents the run order.

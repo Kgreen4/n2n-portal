@@ -253,9 +253,21 @@ BEGIN
   --          contractual_adjustment observations.
   --
   -- carc_code is propagated from the observation to the event.
+  --
+  -- corrected_adj_amount: correlated subquery looks up any active
+  -- attach_corrected_value resolution for this observation (same pattern as
+  -- Phase 5c payment corrections). The unique partial index on
+  -- fte_review_resolutions (migration 004) guarantees at most one active row,
+  -- making LIMIT 1 deterministic. COALESCE falls back to the extracted amount
+  -- when no correction exists, preserving existing behaviour.
   -- =========================================================================
   FOR v_obs IN (
-    SELECT cl.*, c.id AS claim_uuid
+    SELECT cl.*, c.id AS claim_uuid,
+      (SELECT ar.corrected_value
+       FROM _fte_active_resolutions ar
+       WHERE ar.observation_id = cl.id
+         AND ar.action         = 'attach_corrected_value'
+       LIMIT 1) AS corrected_adj_amount
     FROM _fte_classified cl
     JOIN fte_claims c
       ON  c.practice_id = p_practice_id
@@ -271,7 +283,8 @@ BEGIN
     VALUES
       (p_practice_id, v_obs.claim_uuid,
        'contractual_adjustment_applied', v_obs.service_date,
-       v_obs.amount, 'contractual_adjustment', v_obs.payer_name, v_obs.carc_code,
+       COALESCE(v_obs.corrected_adj_amount, v_obs.amount),
+       'contractual_adjustment', v_obs.payer_name, v_obs.carc_code,
        'contractual', v_obs.confidence_score, 'reconciled', '{}')
     RETURNING id INTO v_event_id;
 
