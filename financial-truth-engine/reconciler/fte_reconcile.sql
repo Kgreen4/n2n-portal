@@ -220,9 +220,22 @@ BEGIN
   --
   -- Each event gets one fte_event_evidence link (derived_from) pointing at
   -- the observation and its source evidence.
+  --
+  -- corrected_billed_amount: correlated subquery looks up any active
+  -- attach_corrected_value resolution for this observation (same pattern as
+  -- Phase 4 contractual adjustment and Phase 5c payment corrections). The
+  -- unique partial index on fte_review_resolutions (migration 004) guarantees
+  -- at most one active row, making LIMIT 1 deterministic. COALESCE falls back
+  -- to the extracted amount when no correction exists, preserving existing
+  -- behaviour.
   -- =========================================================================
   FOR v_obs IN (
-    SELECT cl.*, c.id AS claim_uuid
+    SELECT cl.*, c.id AS claim_uuid,
+      (SELECT ar.corrected_value
+       FROM _fte_active_resolutions ar
+       WHERE ar.observation_id = cl.id
+         AND ar.action         = 'attach_corrected_value'
+       LIMIT 1) AS corrected_billed_amount
     FROM _fte_classified cl
     JOIN fte_claims c
       ON  c.practice_id = p_practice_id
@@ -236,7 +249,7 @@ BEGIN
        payer_name, reason_category, confidence_score, reconciliation_status, metadata)
     VALUES
       (p_practice_id, v_obs.claim_uuid, 'claim_adjudicated', v_obs.service_date,
-       v_obs.amount, 'billed', v_obs.payer_name,
+       COALESCE(v_obs.corrected_billed_amount, v_obs.amount), 'billed', v_obs.payer_name,
        'adjudication', v_obs.confidence_score, 'reconciled', '{}')
     RETURNING id INTO v_event_id;
 

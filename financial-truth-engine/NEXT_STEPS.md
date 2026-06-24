@@ -213,6 +213,30 @@ validation-only, runs under ROLLBACK in a disposable Supabase project.
 
 ---
 
+### Task 004H — Corrected Billed Amount Support ✅ Complete
+
+**Delivered:**
+- `reconciler/fte_reconcile.sql` (Phase 3 updated) — correlated subquery in the
+  `FOR v_obs` SELECT list looks up any active `attach_corrected_value` resolution
+  from `_fte_active_resolutions` for each trusted billed_amount observation.
+  `COALESCE(v_obs.corrected_billed_amount, v_obs.amount)` uses the correction when
+  present and falls back to the extracted amount otherwise. Mirrors the Phase 4
+  contractual-adjustment and Phase 5c payment-correction pattern exactly. No migration
+  required — migration 004's unique partial index already covers any observation type.
+- `tests/validate_corrected_billed_amount.sql` — 10-check validation suite (wrapped
+  in ROLLBACK) using existing obs a1 (billed_amount $1,600.00) as the correction target.
+  Verifies: baseline billed=$1,600.00/payment=$351.89/open=$1,248.11/unbalanced/resolutions=0,
+  corrected billed=$1,500.00/payment unchanged/open=$1,148.11/unbalanced/resolutions=1,
+  resolution row survives Phase 0, idempotency across a third run, and unique partial
+  index rejects a second active correction.
+
+**Safety:** no new schema objects, no new action vocabulary, no fixture file changes;
+no migration; Phase 4 contractual-adjustment and Phase 5c payment-correction paths
+unchanged; ROLLBACK-wrapped validation in a disposable Supabase project only; no PHI,
+no production data, no legacy EOB project accessed.
+
+---
+
 ### Task 004G — Corrected Contractual Adjustment Support ✅ Complete
 
 **Delivered:**
@@ -240,7 +264,7 @@ project accessed.
 
 ## Current Capabilities
 
-As of Task 004G complete (2026-06-23), the FTE can:
+As of Task 004H complete (2026-06-23), the FTE can:
 
 - **Represent the full claim ledger.** Eleven tables covering practices, evidence,
   observations, claims, claim events, event-evidence audit links, financial positions,
@@ -277,6 +301,12 @@ As of Task 004G complete (2026-06-23), the FTE can:
   in Phase 4 — same action vocabulary, same correlated-subquery pattern as payment
   corrections, no migration. Phase 6 open-balance math (`GREATEST(0, billed − adj − paid)`)
   picks up the corrected value automatically. Proven across 10 validation checks (Task 004G).
+- **Correct a billed amount.** An `attach_corrected_value` resolution on a
+  `billed_amount` observation overrides the extracted charge amount in Phase 3 —
+  same action vocabulary, same correlated-subquery pattern, no migration. Phase 6
+  open-balance math picks up the corrected value automatically. Proven across 10
+  validation checks (Task 004H). All three claim-level amounts (billed, contractual
+  adjustment, payment) can now be independently corrected by a reviewer.
 
 **Not yet implemented:** extraction layer (AI observations from real PDFs), UI,
 API endpoints, Edge Functions, denial/contract intelligence.
@@ -297,8 +327,9 @@ Apply migrations and register the reconciler before running.
 | `tests/validate_corrected_value.sql` | 11 | `attach_corrected_value` — correction applied, balanced, idempotency, isolation, index |
 | `tests/validate_corrected_value_supersession.sql` | 10 | corrected-value supersession — replace active correction, audit trail, index enforcement |
 | `tests/validate_corrected_contractual_adjustment.sql` | 10 | `attach_corrected_value` on contractual_adjustment obs — Phase 4 corrected amount, payment unchanged, index enforcement |
+| `tests/validate_corrected_billed_amount.sql` | 10 | `attach_corrected_value` on billed_amount obs — Phase 3 corrected amount, payment unchanged, index enforcement |
 
-**Total numeric checks: 62** (structure checks in validate_schema.sql not counted)
+**Total numeric checks: 72** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
 manually before running the test body. The `tests/README.md` documents the run order.

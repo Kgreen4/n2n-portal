@@ -23,7 +23,7 @@
 -- The reconciler (CREATE OR REPLACE FUNCTION) is safe to rerun; do so
 -- whenever fte_reconcile.sql changes.
 --
--- Expected output: 62 PASS NOTICE lines across seven suites.
+-- Expected output: 72 PASS NOTICE lines across eight suites.
 -- A FAIL raises an EXCEPTION that aborts the current suite's transaction.
 -- Subsequent \i calls still execute — scroll up to find any EXCEPTION output.
 --
@@ -78,5 +78,9 @@
 \i tests/validate_corrected_contractual_adjustment.sql
 
 \echo ''
-\echo '=== All suites complete. Expected: 62 PASS checks. ==='
+\echo '--- validate_corrected_billed_amount ---'
+\i tests/validate_corrected_billed_amount.sql
+
+\echo ''
+\echo '=== All suites complete. Expected: 72 PASS checks. ==='
 \echo ''
