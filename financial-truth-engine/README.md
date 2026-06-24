@@ -201,6 +201,12 @@ As of Task 005B (2026-06-24):
 
 Not yet implemented: AI extraction layer, UI, API, Edge Functions.
 
+Position-level reviewer actions currently implemented: `dismiss_short_pay`,
+`confirm_short_pay`. `confirm_position_balanced` is intentionally deferred —
+see `reconciler/README.md §5.11` and `README_SCHEMA.md` Invariant 12 for the
+deferral rationale. Balanced-by-review (reviewer asserting `balanced` without
+event-derived math) is not implemented.
+
 ---
 
 ## Current Validation Suites

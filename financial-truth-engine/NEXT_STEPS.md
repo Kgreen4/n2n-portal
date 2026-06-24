@@ -285,6 +285,54 @@ disposable Supabase project.
 
 ---
 
+### Task 005C — `confirm_position_balanced` — Planning/Docs Only ✅ Decision Recorded
+
+**Decision: deferred. `confirm_position_balanced` is not implemented.**
+
+**Rationale:**
+
+`reconciliation_status = 'balanced'` currently has exactly one meaning:
+the reconciler derived a zero open balance from claim events (Phase 6 rule 4).
+Implementing `confirm_position_balanced` as a reviewer position-level assertion
+would make `balanced` mean either (a) event-derived math proves zero or (b)
+reviewer asserted balanced without event math. Conflating the two weakens the
+financial-truth invariant and makes positions no longer self-verifying from
+the event ledger.
+
+Two representative cases illustrate why the deferral is correct:
+
+- **CLM-APC-2000 (96c5c357 fixture):** zero events, all monetary fields NULL.
+  The claim is `in_review` because no trusted observations exist (all
+  SUSPECT / retry-pending). The open balance is unknown, not zero. Marking
+  it `balanced` via reviewer assertion would assert financial truth that cannot
+  be verified from events.
+- **CLM-AZ-0001 (ccdbe216 fixture):** ambiguous `payment_applied` event;
+  math balances (720.00 − 209.60 − 510.40 = 0.00). Already resolvable by
+  `confirm_payment_event`, which promotes the event to `reconciled` and lets
+  the reconciler derive `balanced` from events on the next run. No
+  position-level assertion needed.
+
+**What was not changed:**
+
+- No SQL modified.
+- No migrations added.
+- No tests added or modified.
+- No fixtures modified.
+- Validation total unchanged at 91 numeric checks across 10 suites.
+- `confirm_position_balanced` remains in the migration 002 action vocabulary
+  CHECK constraint — no constraint is needed for an unimplemented action.
+
+**Documentation added (this task):**
+
+- `reconciler/README.md §5.11` — deferral rationale, correct resolution paths,
+  future implementation options (new status value, separate workflow state,
+  new event/evidence model).
+- `README_SCHEMA.md` Invariant 12 — "balanced remains event-derived" invariant.
+- `README.md` — not-yet-implemented note for `confirm_position_balanced`.
+- `NEXT_STEPS.md` (this entry) — decision record.
+
+---
+
 ### Task 005A — dismiss_short_pay Position-Level Review Resolution ✅ Complete
 
 **Delivered:**
