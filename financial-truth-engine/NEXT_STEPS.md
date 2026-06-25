@@ -2,7 +2,7 @@
 
 **Status:** Execution checklist  
 **Created:** 2026-06-17  
-**Updated:** 2026-06-23
+**Updated:** 2026-06-24
 **Purpose:** Start the Financial Truth Engine cleanly while preserving the current EOB project as a reference only.
 
 ---
@@ -285,6 +285,62 @@ disposable Supabase project.
 
 ---
 
+### Task 005D — `request_more_evidence` Durable Evidence-Needed Workflow ✅ Complete
+
+**Delivered:**
+- `migrations/007_request_more_evidence_constraints.sql` — 3 CHECK constraints and 1
+  partial unique index enforcing valid shape for `request_more_evidence`:
+  `fte_review_resolutions_rme_needs_notes` (`notes IS NOT NULL AND btrim(notes) <> ''` —
+  whitespace-only notes are rejected, an actionable explanation is required);
+  `fte_review_resolutions_rme_needs_claim_id` (`claim_id IS NOT NULL` — `fte_financial_positions`
+  rows are deleted by Phase 0; only `claim_id`, a hard FK to `fte_claims`, is a stable anchor);
+  `fte_review_resolutions_rme_needs_position_type` (`target_type = 'position'`); and
+  `idx_fte_resolutions_single_active_evidence_request` on `(practice_id, claim_id)
+  WHERE is_superseded = false AND action = 'request_more_evidence'` — at most one active
+  evidence request per claim.
+- `tests/validate_request_more_evidence.sql` — 12-check validation suite (wrapped in
+  ROLLBACK). Verifies: baseline CLM-APC-2000 `in_review` and queued (checks 1–3); after
+  insert of valid evidence request: `review_resolutions_applied=1`, CLM-APC-2000 still
+  `in_review`, still queued, zero events, all monetary fields NULL (checks 4–8); duplicate
+  active evidence request raises `unique_violation` (check 9); NULL notes and blank notes
+  raise `check_violation` (check 10); NULL `claim_id` and `target_type='observation'` both
+  raise `check_violation` (check 11); CLM-APC-1000 isolation — unbalanced, `short_pay_detected`
+  event preserved, queued with `unbalanced_financial_position` (check 12). All 12 checks
+  target the 96c5c357 fixture.
+- `tests/run_all_validations.sql` (updated) — `\i tests/validate_request_more_evidence.sql`
+  added after confirm suite; expected check count 91 → 103.
+- `tests/RUNBOOK.md` (updated) — `validate_request_more_evidence.sql` added to suite table
+  (12 checks), fixture dependency table (96c5c357), first-time-setup psql and Supabase
+  sequences (migration 007 + validation step 13); total 91 → 103; "ten suites" → "eleven suites".
+- `README.md` (updated) — status line, capabilities bullet (`request_more_evidence`),
+  suite table (11 suites), numeric check count 91 → 103.
+- `README_SCHEMA.md` (updated) — migration header, status line, Invariant 13
+  (migration 007 constraints, stable-anchor rationale, reconciler-unchanged invariant,
+  difference from dismiss/confirm), How To Apply psql block (migration 007 +
+  validate_request_more_evidence.sql).
+- `reconciler/README.md` (updated) — §5.12 `request_more_evidence` added: durable-note
+  behavior, reconciler-unchanged detail per phase, shape constraints table,
+  `claim_id`-anchor rationale, partial-unique-index rationale (no cross-action conflict),
+  supersession workflow with annotated SQL.
+- `NEXT_STEPS.md` (this file) — Task 005D entry and Current Capabilities/Suites updates.
+
+**Reconciler behavior: NONE.** No reconciler phase was modified. No frozen file was
+touched. `request_more_evidence` is a durable workflow note only: the row is loaded by
+Phase 0.5 (incrementing `review_resolutions_applied`) but no downstream phase acts on it.
+Phase 7 queue routing is NOT suppressed (contrast with `dismiss_short_pay` + `confirm_short_pay`).
+Phase 8 `short_pay_detected` event is NOT suppressed. Position `reconciliation_status`
+is unchanged. Financial math is unchanged.
+
+**Safety:** no PHI, no real patient data, no production data, no legacy EOB DB or code
+accessed. No new `reconciliation_status` values. No new claim event types. No fixture
+files modified. No forbidden files touched (migrations 001–006, reconciler, fixtures,
+all existing test files, and all CODEX_TASK_*.md files are unchanged). All shape
+enforcement is DB-level (migration 007 constraints + partial unique index). Tested via
+ROLLBACK-wrapped 12-check suite against synthetic 96c5c357 fixture in a disposable
+Supabase project.
+
+---
+
 ### Task 005C — `confirm_position_balanced` — Planning/Docs Only ✅ Decision Recorded
 
 **Decision: deferred. `confirm_position_balanced` is not implemented.**
@@ -408,7 +464,7 @@ project accessed.
 
 ## Current Capabilities
 
-As of Task 005B complete (2026-06-24), the FTE can:
+As of Task 005D complete (2026-06-24), the FTE can:
 
 - **Represent the full claim ledger.** Eleven tables covering practices, evidence,
   observations, claims, claim events, event-evidence audit links, financial positions,
@@ -460,6 +516,14 @@ As of Task 005B complete (2026-06-24), the FTE can:
   A conflict-prevention partial unique index (migration 006) prevents simultaneous
   active `confirm_short_pay` + `dismiss_short_pay` for the same claim. Position math
   preserved. Proven across 10 validation checks (Task 005B).
+- **Request more evidence.** `request_more_evidence` records a durable reviewer note
+  that a claim cannot be resolved without additional external evidence. Requires a
+  non-null, non-blank `notes` field (whitespace-only rejected) and a stable `claim_id`
+  anchor. At most one active evidence request per claim (partial unique index, migration
+  007). No reconciler phase is modified: claim retains its derived `reconciliation_status`
+  (`in_review` or `unbalanced`); Phase 7 queue routing is NOT suppressed; no claim
+  events emitted; financial math unchanged. Supersede the row to close the request and
+  insert a substantive resolution. Proven across 12 validation checks (Task 005D).
 
 **Not yet implemented:** extraction layer (AI observations from real PDFs), UI,
 API endpoints, Edge Functions, denial/contract intelligence.
@@ -483,8 +547,9 @@ Apply migrations and register the reconciler before running.
 | `tests/validate_corrected_billed_amount.sql` | 10 | `attach_corrected_value` on billed_amount obs — Phase 3 corrected amount, payment unchanged, index enforcement |
 | `tests/validate_dismiss_short_pay.sql` | 9 | `dismiss_short_pay` — Phase 7/8 suppression, math preserved, CLM-APC-2000 isolation, supersession |
 | `tests/validate_confirm_short_pay.sql` | 10 | `confirm_short_pay` — Phase 7 suppression only, short_pay_detected preserved, conflict-prevention index, CLM-APC-2000 isolation, supersession |
+| `tests/validate_request_more_evidence.sql` | 12 | `request_more_evidence` — durable note only, no reconciler/queue/event change, notes/claim_id/target_type shape constraints, uniqueness, CLM-APC-1000 isolation |
 
-**Total numeric checks: 91** (structure checks in validate_schema.sql not counted)
+**Total numeric checks: 103** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
 manually before running the test body. The `tests/RUNBOOK.md` documents the run order.

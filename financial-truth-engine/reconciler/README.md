@@ -364,6 +364,85 @@ status value without resolving the semantic collision described above.
 
 ---
 
+### 5.12 `request_more_evidence` — durable workflow note, no reconciler change
+
+**What it records:** A reviewer decision that a claim cannot be resolved with
+currently available evidence, together with a required written explanation of
+what evidence is needed and why the claim is stuck (e.g. "clean 835 remittance
+needed — check #2-1835642 fragmented across three spacing variants on pages 8
+and 12 of the source document; hold pending payer callback").
+
+**Reconciler behavior: UNCHANGED.** No phase reads or filters on
+`request_more_evidence`. Phase 0.5 loads the row into `_fte_active_resolutions`
+(all non-superseded rows are loaded unconditionally) but no downstream phase
+acts on it. Specifically:
+
+- Phase 6 (position derivation): unchanged — claim retains its reconciler-derived
+  `reconciliation_status` (`in_review` or `unbalanced`) as if no evidence request existed.
+- Phase 7 (queue routing): unchanged — `request_more_evidence` does **not** suppress
+  Phase 7 routing; the claim's review queue entry remains active. (Contrast:
+  `dismiss_short_pay` and `confirm_short_pay` both suppress Phase 7 routing.)
+- Phase 8 (`short_pay_detected` event emission): unchanged — not suppressed.
+- `review_resolutions_applied` counter in the reconciler result JSON: increments by 1
+  for the loaded row (Phase 0.5 counts all non-superseded rows), but this is a
+  reporting count only — it does not indicate any financial recalculation.
+
+**Why no reconciler change:** The evidence request is a *workflow* signal, not
+a financial correction. Suppressing the queue entry would hide the claim from
+the reviewer worklist; emitting a new event would pollute the event ledger with
+non-financial facts. The claim must remain visible and unresolved until real
+evidence arrives and a substantive resolution action is taken.
+
+**DB-level enforcement (migration 007):**
+
+| Constraint | Rule |
+|---|---|
+| `fte_review_resolutions_rme_needs_notes` | `notes IS NOT NULL AND btrim(notes) <> ''` — whitespace-only strings are rejected |
+| `fte_review_resolutions_rme_needs_claim_id` | `claim_id IS NOT NULL` — required because `source_position_id` goes stale after each Phase 0 reset |
+| `fte_review_resolutions_rme_needs_position_type` | `target_type = 'position'` |
+| `idx_fte_resolutions_single_active_evidence_request` | `UNIQUE (practice_id, claim_id) WHERE is_superseded = false AND action = 'request_more_evidence'` — at most one active evidence request per claim |
+
+**Why `claim_id` as the anchor (not `source_position_id`):** identical rationale
+to `dismiss_short_pay` (§5.1) and `confirm_short_pay` (§5.7) — `fte_financial_positions`
+rows are deleted by Phase 0 on every reprocess, making `source_position_id`
+stale after each run. `claim_id` is a hard FK to `fte_claims`, which Phase 0
+never deletes.
+
+**Why a single-action partial unique index (not a cross-action conflict index):**
+`request_more_evidence` has no logical conflict partner in the current action
+vocabulary. An active evidence request coexists correctly with an active
+`dismiss_short_pay` or `confirm_short_pay` for the same claim. The partial
+unique index prevents only duplicate simultaneous evidence requests for the same
+claim. Contrast: `idx_fte_resolutions_single_active_position_short_pay`
+(migration 006) spans two mutually exclusive actions.
+
+**Supersession workflow:** to close an active evidence request (e.g. the
+requested evidence has been received):
+
+```sql
+-- 1. Mark the existing request superseded.
+update fte_review_resolutions
+   set is_superseded = true
+ where practice_id = '<practice_id>'
+   and claim_id    = '<claim_id>'
+   and action      = 'request_more_evidence'
+   and is_superseded = false;
+
+-- 2. Insert a substantive resolution (e.g. confirm_short_pay, dismiss_short_pay,
+--    or attach_corrected_value) now that the evidence is available.
+insert into fte_review_resolutions (practice_id, claim_id, action, ...)
+values ('<practice_id>', '<claim_id>', 'confirm_short_pay', ...);
+
+-- 3. Re-run the reconciler.  The evidence request no longer appears in
+--    _fte_active_resolutions; the new resolution takes effect.
+select fte_reconcile_practice('<practice_id>');
+```
+
+The superseded evidence-request row is retained in `fte_review_resolutions` as
+a permanent audit trail — it is never deleted.
+
+---
+
 ## 7. How to run against fixtures
 
 Prerequisites:
