@@ -1,7 +1,7 @@
 # Financial Truth Engine — Schema (README_SCHEMA)
 
-**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`, `migrations/006_confirm_short_pay_constraints.sql`, `migrations/007_request_more_evidence_constraints.sql`
-**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + position-level resolutions (dismiss_short_pay + confirm_short_pay + request_more_evidence) (Tasks 001–005D)
+**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`, `migrations/006_confirm_short_pay_constraints.sql`, `migrations/007_request_more_evidence_constraints.sql`, `migrations/008_mark_position_needs_correction_constraints.sql`
+**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + position-level resolutions (dismiss_short_pay + confirm_short_pay + request_more_evidence + mark_position_needs_correction) (Tasks 001–005E)
 **Scope:** Schema, RLS, indexes, comments, constraints. No UI, no extraction code, no PDF parsing.
 
 ---
@@ -136,6 +136,29 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    ambiguous-event balanced claims are correctly handled by `confirm_payment_event`.
    See `reconciler/README.md §5.11` for the deferral rationale and future
    implementation options.
+14. **`mark_position_needs_correction` resolutions enforce shape and uniqueness,
+   with no reconciler change.** Migration 008 adds three CHECK constraints to
+   `fte_review_resolutions` for `action = 'mark_position_needs_correction'`:
+   `fte_review_resolutions_mpnc_needs_notes` (`notes IS NOT NULL AND btrim(notes) <> ''` —
+   whitespace-only notes are rejected; a correction-needed marker without an
+   actionable explanation is not useful), `fte_review_resolutions_mpnc_needs_claim_id`
+   (`claim_id IS NOT NULL` — `fte_financial_positions` rows are deleted by Phase 0;
+   only `claim_id`, a hard FK to `fte_claims`, is a stable anchor), and
+   `fte_review_resolutions_mpnc_needs_position_type` (`target_type = 'position'`).
+   A partial unique index `idx_fte_resolutions_single_active_correction_needed` on
+   `(practice_id, claim_id) WHERE is_superseded = false AND action = 'mark_position_needs_correction'`
+   prevents multiple simultaneous active markers for the same claim. **The reconciler is
+   entirely unaffected:** no phase reads or acts on `mark_position_needs_correction`; the
+   row is loaded into `_fte_active_resolutions` by Phase 0.5 (all non-superseded rows are
+   loaded unconditionally) but no downstream phase changes derived position status, emits a
+   claim event, or suppresses queue routing as a result. The claim retains its
+   reconciler-derived `reconciliation_status` (`in_review` or `unbalanced`) and its review
+   queue entry across reruns regardless of any active correction-needed marker. Phase 7
+   queue routing is NOT suppressed (contrast: `dismiss_short_pay` and `confirm_short_pay`
+   both suppress Phase 7). Phase 8 `short_pay_detected` event emission is NOT suppressed
+   (contrast: `dismiss_short_pay` suppresses Phase 8; `confirm_short_pay` does not). This
+   differs from `request_more_evidence` only in intent — both are durable workflow notes
+   with identical reconciler impact (none). See `reconciler/README.md §5.13`.
 
 ---
 
@@ -178,6 +201,7 @@ psql "$DATABASE_URL" -f migrations/004_corrected_value_constraints.sql
 psql "$DATABASE_URL" -f migrations/005_dismiss_short_pay_constraints.sql
 psql "$DATABASE_URL" -f migrations/006_confirm_short_pay_constraints.sql
 psql "$DATABASE_URL" -f migrations/007_request_more_evidence_constraints.sql
+psql "$DATABASE_URL" -f migrations/008_mark_position_needs_correction_constraints.sql
 
 # Register the reconciler
 psql "$DATABASE_URL" -f reconciler/fte_reconcile.sql
@@ -198,6 +222,7 @@ psql "$DATABASE_URL" -f tests/validate_corrected_billed_amount.sql           # 9
 psql "$DATABASE_URL" -f tests/validate_dismiss_short_pay.sql                 # 96c5c357 fixture required
 psql "$DATABASE_URL" -f tests/validate_confirm_short_pay.sql                 # 96c5c357 fixture required
 psql "$DATABASE_URL" -f tests/validate_request_more_evidence.sql             # 96c5c357 fixture required
+psql "$DATABASE_URL" -f tests/validate_mark_position_needs_correction.sql    # 96c5c357 fixture required
 ```
 
 Use the Supabase `service_role` / `postgres` connection. For the Supabase SQL Editor,

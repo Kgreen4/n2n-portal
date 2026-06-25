@@ -443,6 +443,99 @@ a permanent audit trail — it is never deleted.
 
 ---
 
+### 5.13 `mark_position_needs_correction` — durable correction-needed marker, no reconciler change
+
+**What it records:** A reviewer decision that a financial position contains an
+extraction or attribution error that must be corrected before the claim can be
+resolved. The marker is a durable workflow note — it does not trigger any
+automated correction and does not modify the claim's reconciler-derived status.
+
+**Reconciler behavior: UNCHANGED.** No phase reads or filters on
+`mark_position_needs_correction`. Phase 0.5 loads the row into
+`_fte_active_resolutions` (all non-superseded rows are loaded unconditionally)
+but no downstream phase acts on it. Specifically:
+
+- Phase 6 (position derivation): unchanged — claim retains its reconciler-derived
+  `reconciliation_status` (`in_review` or `unbalanced`) as if no correction marker existed.
+- Phase 7 (queue routing): unchanged — `mark_position_needs_correction` does **not**
+  suppress Phase 7 routing; the claim's review queue entry remains active. (Contrast:
+  `dismiss_short_pay` and `confirm_short_pay` both suppress Phase 7 routing;
+  `request_more_evidence` also does not suppress Phase 7.)
+- Phase 8 (`short_pay_detected` event emission): unchanged — the event is emitted if
+  the position math qualifies, regardless of any active correction marker. (Contrast:
+  `dismiss_short_pay` suppresses Phase 8; `confirm_short_pay` does not suppress Phase 8.)
+- No claim events are emitted as a result of inserting or superseding a
+  `mark_position_needs_correction` row.
+
+The claim must remain visible in the review queue and its `short_pay_detected`
+event must remain active so that downstream correction workflows can engage.
+Once a lower-level correction is applied (e.g. `attach_corrected_value` on an
+affected observation), the reconciler re-derives the position from updated math
+and the marker can be superseded.
+
+**DB constraints (migration 008):**
+
+| Constraint / index | Rule |
+|---|---|
+| `fte_review_resolutions_mpnc_needs_notes` | `notes IS NOT NULL AND btrim(notes) <> ''` — whitespace-only notes rejected; a correction-needed marker without an actionable explanation is not useful |
+| `fte_review_resolutions_mpnc_needs_claim_id` | `claim_id IS NOT NULL` — required because `source_position_id` goes stale after each Phase 0 reset |
+| `fte_review_resolutions_mpnc_needs_position_type` | `target_type = 'position'` |
+| `idx_fte_resolutions_single_active_correction_needed` | `UNIQUE (practice_id, claim_id) WHERE is_superseded = false AND action = 'mark_position_needs_correction'` — at most one active correction-needed marker per claim |
+
+**Why `claim_id` as the anchor (not `source_position_id`):** identical rationale
+to §5.2 — `fte_financial_positions` rows are deleted wholesale by Phase 0 on
+every reconciler run; `source_position_id` references those rows and becomes
+stale immediately after the first rerun. `claim_id` is a hard FK to
+`fte_claims`, which is never deleted by the reconciler — it is a stable,
+permanent anchor that survives all reruns.
+
+**Why a single-action partial unique index (not a cross-action conflict index):**
+`mark_position_needs_correction` has no logical conflict partner in the current
+action vocabulary. An active correction-needed marker coexists correctly with an
+active `dismiss_short_pay`, `confirm_short_pay`, or `request_more_evidence` for
+the same claim. The partial unique index prevents redundant duplicate markers
+(two simultaneous active correction-needed markers for the same claim carry no
+additional information), not cross-action conflicts.
+
+**Supersession workflow:** when a lower-level correction resolves the issue, or
+when the reviewer changes the description, supersede the existing marker and
+insert a fresh row:
+
+```sql
+-- 1. Supersede the active marker.
+update fte_review_resolutions
+   set is_superseded = true
+ where practice_id = '<practice_id>'
+   and claim_id    = '<claim_id>'
+   and action      = 'mark_position_needs_correction'
+   and is_superseded = false;
+
+-- 2. Optionally insert an updated marker or a substantive resolution
+--    (e.g. attach_corrected_value) now that the correction is applied.
+
+-- 3. Re-run the reconciler.  The old marker no longer appears in
+--    _fte_active_resolutions; the reconciler re-derives the position from
+--    the corrected observation amounts.
+select fte_reconcile_practice('<practice_id>');
+```
+
+The superseded row is retained in `fte_review_resolutions` as a permanent audit
+trail — it is never deleted.
+
+**Coexistence note:** `mark_position_needs_correction` and `request_more_evidence`
+(§5.12) serve complementary purposes. An evidence request means the reviewer
+cannot resolve the claim without additional external information. A
+correction-needed marker means the reviewer has identified a specific extraction
+or attribution error that must be fixed in the ledger. Both may be active
+simultaneously for the same claim — there is no conflict index between them.
+
+**Validation:** `tests/validate_mark_position_needs_correction.sql` — 12 checks
+using the 96c5c357 fixture (CLM-APC-1000 as the primary vehicle, CLM-APC-2000 as
+the shape-violation and isolation target). Requires migration 008 applied before
+running (check 9 uses the partial unique index).
+
+---
+
 ## 7. How to run against fixtures
 
 Prerequisites:
