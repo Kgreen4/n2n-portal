@@ -20,8 +20,9 @@ errors in the Supabase SQL Editor, and missing fixture loads.
 | `tests/validate_corrected_billed_amount.sql` | 10 | `attach_corrected_value` on billed_amount obs — Phase 3 corrected amount, payment unchanged, index enforcement |
 | `tests/validate_dismiss_short_pay.sql` | 9 | `dismiss_short_pay` — Phase 7/8 suppression, math preserved, CLM-APC-2000 isolation, supersession |
 | `tests/validate_confirm_short_pay.sql` | 10 | `confirm_short_pay` — Phase 7 suppression only, short_pay_detected preserved, conflict-prevention index, CLM-APC-2000 isolation, supersession |
+| `tests/validate_request_more_evidence.sql` | 12 | `request_more_evidence` — durable note only, no reconciler/queue/event change, notes/claim_id/target_type shape constraints, uniqueness, CLM-APC-1000 isolation |
 
-**Total numeric checks: 91**
+**Total numeric checks: 103**
 
 All suites are wrapped in `ROLLBACK` — nothing persists to the database.
 `fte_analysis_runs` is append-only and is **not** rolled back; suites use
@@ -54,6 +55,7 @@ Suite → fixture dependency:
 | `validate_corrected_billed_amount.sql` | 96c5c357 |
 | `validate_dismiss_short_pay.sql` | 96c5c357 |
 | `validate_confirm_short_pay.sql` | 96c5c357 |
+| `validate_request_more_evidence.sql` | 96c5c357 |
 
 ---
 
@@ -72,6 +74,7 @@ psql "$DATABASE_URL" -f migrations/003_add_observation_resolution_target.sql
 psql "$DATABASE_URL" -f migrations/004_corrected_value_constraints.sql
 psql "$DATABASE_URL" -f migrations/005_dismiss_short_pay_constraints.sql
 psql "$DATABASE_URL" -f migrations/006_confirm_short_pay_constraints.sql
+psql "$DATABASE_URL" -f migrations/007_request_more_evidence_constraints.sql
 
 # Register the reconciler function (CREATE OR REPLACE — safe to rerun)
 psql "$DATABASE_URL" -f reconciler/fte_reconcile.sql
@@ -88,7 +91,8 @@ to the next — do not batch them.
 4. Paste + execute `migrations/004_corrected_value_constraints.sql`
 5. Paste + execute `migrations/005_dismiss_short_pay_constraints.sql`
 6. Paste + execute `migrations/006_confirm_short_pay_constraints.sql`
-7. Paste + execute `reconciler/fte_reconcile.sql`
+7. Paste + execute `migrations/007_request_more_evidence_constraints.sql`
+8. Paste + execute `reconciler/fte_reconcile.sql`
 
 "Success. No rows returned" after each step is correct — DDL and
 `CREATE OR REPLACE FUNCTION` produce no result rows.
@@ -105,10 +109,10 @@ Run in this order every time. Migrations are **not** repeated here.
 psql "$DATABASE_URL" -f tests/run_all_validations.sql
 ```
 
-This runner loads both fixtures, then executes all ten suites in the correct
+This runner loads both fixtures, then executes all eleven suites in the correct
 order. See `tests/run_all_validations.sql` for the exact sequence.
 
-Expected output: 91 `PASS` NOTICE lines across ten suites, plus a banner
+Expected output: 103 `PASS` NOTICE lines across eleven suites, plus a banner
 after each suite. Each suite is independent — a failure in one suite does not
 prevent the next from running, but scroll up to find the EXCEPTION output from
 any failed suite.
@@ -137,6 +141,7 @@ starting from the `begin;` block.
 10. Paste + execute `tests/validate_corrected_billed_amount.sql`
 11. Paste + execute `tests/validate_dismiss_short_pay.sql`
 12. Paste + execute `tests/validate_confirm_short_pay.sql`
+13. Paste + execute `tests/validate_request_more_evidence.sql`
 
 **What to expect in the SQL Editor:**
 

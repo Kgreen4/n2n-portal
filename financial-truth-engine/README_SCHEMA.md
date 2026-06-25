@@ -1,7 +1,7 @@
 # Financial Truth Engine — Schema (README_SCHEMA)
 
-**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`, `migrations/006_confirm_short_pay_constraints.sql`
-**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + position-level resolutions (dismiss_short_pay + confirm_short_pay) (Tasks 001–005B)
+**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`, `migrations/006_confirm_short_pay_constraints.sql`, `migrations/007_request_more_evidence_constraints.sql`
+**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + position-level resolutions (dismiss_short_pay + confirm_short_pay + request_more_evidence) (Tasks 001–005D)
 **Scope:** Schema, RLS, indexes, comments, constraints. No UI, no extraction code, no PDF parsing.
 
 ---
@@ -105,6 +105,24 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    on it. The `fte_financial_positions` row retains `reconciliation_status = 'unbalanced'` and
    the correct `open_balance_amount` — financial truth is preserved.
    See `reconciler/README.md §5.6–§5.10`.
+13. **`request_more_evidence` resolutions enforce shape and uniqueness.** Migration 007
+   adds three CHECK constraints to `fte_review_resolutions` for `action = 'request_more_evidence'`:
+   `fte_review_resolutions_rme_needs_notes` (`notes IS NOT NULL AND btrim(notes) <> ''` —
+   whitespace-only notes are rejected because they are not actionable), `fte_review_resolutions_rme_needs_claim_id`
+   (`claim_id IS NOT NULL` — required because `fte_financial_positions` rows are deleted by
+   Phase 0; only `claim_id`, a hard FK to `fte_claims`, is a stable anchor), and
+   `fte_review_resolutions_rme_needs_position_type` (`target_type = 'position'`). A partial
+   unique index `idx_fte_resolutions_single_active_evidence_request` on `(practice_id, claim_id)
+   WHERE is_superseded = false AND action = 'request_more_evidence'` prevents multiple
+   simultaneous active evidence requests for the same claim. Supersede the existing row and
+   insert a new one to update an active request. **The reconciler is entirely unaffected:**
+   no phase reads or acts on `request_more_evidence`; the row is loaded into
+   `_fte_active_resolutions` by Phase 0.5 (all non-superseded rows are loaded
+   unconditionally) but no downstream phase changes derived position status, emits a claim
+   event, or suppresses queue routing as a result. The claim retains its reconciler-derived
+   `reconciliation_status` (`in_review` or `unbalanced`) across reruns. This differs from
+   `dismiss_short_pay` (suppresses Phase 7 routing and Phase 8 event) and `confirm_short_pay`
+   (suppresses Phase 7 routing) — see `reconciler/README.md §5.12`.
 12. **`balanced` remains event-derived.** `reconciliation_status = 'balanced'`
    means the reconciler derived a zero open balance from claim events (Phase 6
    rule 4). Every `balanced` position is traceable to events and verifiable from
@@ -159,6 +177,7 @@ psql "$DATABASE_URL" -f migrations/003_add_observation_resolution_target.sql
 psql "$DATABASE_URL" -f migrations/004_corrected_value_constraints.sql
 psql "$DATABASE_URL" -f migrations/005_dismiss_short_pay_constraints.sql
 psql "$DATABASE_URL" -f migrations/006_confirm_short_pay_constraints.sql
+psql "$DATABASE_URL" -f migrations/007_request_more_evidence_constraints.sql
 
 # Register the reconciler
 psql "$DATABASE_URL" -f reconciler/fte_reconcile.sql
@@ -178,6 +197,7 @@ psql "$DATABASE_URL" -f tests/validate_corrected_contractual_adjustment.sql  # 9
 psql "$DATABASE_URL" -f tests/validate_corrected_billed_amount.sql           # 96c5c357 fixture required
 psql "$DATABASE_URL" -f tests/validate_dismiss_short_pay.sql                 # 96c5c357 fixture required
 psql "$DATABASE_URL" -f tests/validate_confirm_short_pay.sql                 # 96c5c357 fixture required
+psql "$DATABASE_URL" -f tests/validate_request_more_evidence.sql             # 96c5c357 fixture required
 ```
 
 Use the Supabase `service_role` / `postgres` connection. For the Supabase SQL Editor,

@@ -1,6 +1,6 @@
 # Financial Truth Engine
 
-**Status:** Active — schema, reconciler, corrected-value resolutions, and position-level resolutions (dismiss_short_pay + confirm_short_pay) proven on synthetic data (Tasks 001–005B merged)
+**Status:** Active — schema, reconciler, corrected-value resolutions, position-level resolutions (dismiss_short_pay + confirm_short_pay), and durable evidence-request workflow (request_more_evidence) proven on synthetic data (Tasks 001–005D merged)
 **Owner:** Keith Green / N2N Analytics  
 **Created:** 2026-06-16  
 **Important:** This effort is intentionally separate from the current EOB extraction project.
@@ -186,7 +186,7 @@ This proves whether the ledger architecture reduces fragility before UI, reports
 
 ## Current Capabilities
 
-As of Task 005B (2026-06-24):
+As of Task 005D (2026-06-24):
 
 - 11-table ledger schema with RLS, tenant isolation, and immutable evidence
 - Deterministic 9-phase reconciler (`fte_reconcile_practice`) — idempotent, evidence-linked
@@ -197,15 +197,16 @@ As of Task 005B (2026-06-24):
   - `attach_corrected_value` — per-observation amount correction applied to `billed_amount`, `contractual_adjustment`, and `payment` observations; enforced by DB constraints (migration 004); Phases 3, 4, and 5c each use `COALESCE(corrected_value, extracted_amount)` — see `reconciler/README.md §4`
   - `dismiss_short_pay` — position-level dismissal: suppresses Phase 7 queue routing and Phase 8 `short_pay_detected` event; preserves mathematical `unbalanced` position; enforced by DB constraints (migration 005) — see `reconciler/README.md §5`
   - `confirm_short_pay` — position-level confirmation: suppresses Phase 7 queue routing only; preserves `short_pay_detected` event so downstream recovery workflows remain active; preserves mathematical `unbalanced` position; conflict-prevention index prevents simultaneous active `confirm_short_pay` + `dismiss_short_pay` for the same claim (migration 006) — see `reconciler/README.md §5.6–§5.10`
-- 91 numeric checks across 10 test suites, all passing in a disposable Supabase project
+  - `request_more_evidence` — durable reviewer note that a claim cannot be resolved without additional evidence (e.g. a clean 835 remittance, a payer callback); requires non-null/non-blank `notes` and a stable `claim_id` anchor; at most one active evidence request per claim (partial unique index); claim retains its reconciler-derived position status (`in_review` or `unbalanced`) unchanged; Phase 7 queue routing is NOT suppressed; no claim events emitted; supersede the row to close the request — see `reconciler/README.md §5.12`
+- 103 numeric checks across 11 test suites, all passing in a disposable Supabase project
 
 Not yet implemented: AI extraction layer, UI, API, Edge Functions.
 
 Position-level reviewer actions currently implemented: `dismiss_short_pay`,
-`confirm_short_pay`. `confirm_position_balanced` is intentionally deferred —
-see `reconciler/README.md §5.11` and `README_SCHEMA.md` Invariant 12 for the
-deferral rationale. Balanced-by-review (reviewer asserting `balanced` without
-event-derived math) is not implemented.
+`confirm_short_pay`, `request_more_evidence`. `confirm_position_balanced` is
+intentionally deferred — see `reconciler/README.md §5.11` and
+`README_SCHEMA.md` Invariant 12 for the deferral rationale. Balanced-by-review
+(reviewer asserting `balanced` without event-derived math) is not implemented.
 
 ---
 
@@ -223,6 +224,7 @@ event-derived math) is not implemented.
 | `tests/validate_corrected_billed_amount.sql` | 10 | 004H |
 | `tests/validate_dismiss_short_pay.sql` | 9 | 005A |
 | `tests/validate_confirm_short_pay.sql` | 10 | 005B |
+| `tests/validate_request_more_evidence.sql` | 12 | 005D |
 
 All suites wrap in `ROLLBACK` — nothing persists. See `tests/RUNBOOK.md` for run order.
 
