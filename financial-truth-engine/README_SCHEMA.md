@@ -1,7 +1,7 @@
 # Financial Truth Engine — Schema (README_SCHEMA)
 
-**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`, `migrations/006_confirm_short_pay_constraints.sql`, `migrations/007_request_more_evidence_constraints.sql`, `migrations/008_mark_position_needs_correction_constraints.sql`, `migrations/009_mark_position_resolved_constraints.sql`
-**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + position-level resolutions (dismiss_short_pay + confirm_short_pay + request_more_evidence + mark_position_needs_correction + mark_position_resolved) (Tasks 001–005F)
+**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`, `migrations/006_confirm_short_pay_constraints.sql`, `migrations/007_request_more_evidence_constraints.sql`, `migrations/008_mark_position_needs_correction_constraints.sql`, `migrations/009_mark_position_resolved_constraints.sql`, `migrations/010_reject_payment_event_constraints.sql`
+**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + position-level resolutions (dismiss_short_pay + confirm_short_pay + request_more_evidence + mark_position_needs_correction + mark_position_resolved) + payment-event-level suppression (reject_payment_event) (Tasks 001–005G)
 **Scope:** Schema, RLS, indexes, comments, constraints. No UI, no extraction code, no PDF parsing.
 
 ---
@@ -183,6 +183,38 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    financial truth is preserved; only queue visibility is affected. To replace an active
    resolved marker: UPDATE SET `is_superseded = true`, then INSERT a new row.
    See `reconciler/README.md §5.14`.
+16. **`reject_payment_event` resolutions enforce shape, require an actionable note, and
+   suppress Phase 5c payment-event emission only.** Migration 010 adds three CHECK
+   constraints and one cross-action partial unique index to `fte_review_resolutions` for
+   `action = 'reject_payment_event'`:
+   `fte_review_resolutions_rpe_needs_notes` (`notes IS NOT NULL AND btrim(notes) <> ''` —
+   whitespace-only notes rejected; rejecting a payment event is a financially significant
+   decision that requires an actionable explanation),
+   `fte_review_resolutions_rpe_needs_claim_id` (`claim_id IS NOT NULL` — `fte_claim_events`
+   rows are deleted and re-derived on every Phase 0 reset; `source_claim_event_id` becomes
+   stale after each reprocess; `claim_id` is a hard FK to `fte_claims`, which Phase 0 never
+   deletes, and is the only stable anchor for payment-event-level decisions — mirrors the
+   `claim_id` anchor rationale for position-level actions in migrations 005–009), and
+   `fte_review_resolutions_rpe_needs_payment_event_type` (`target_type = 'payment_event'` —
+   targets a claim event, not an observation or position row). A cross-action partial unique
+   index `idx_fte_resolutions_single_active_payment_event_decision` on `(practice_id, claim_id)
+   WHERE is_superseded = false AND action IN ('confirm_payment_event', 'reject_payment_event')`
+   prevents simultaneous active rows of both actions for the same claim — they are logically
+   contradictory (confirming a payment while also rejecting it). This mirrors the cross-action
+   index pattern from migration 006 (`confirm_short_pay` + `dismiss_short_pay`). To switch:
+   UPDATE the current active row `SET is_superseded = true`, then INSERT the new action.
+   **Reconciler behavior per phase:** Phase 1 is unchanged — the payment observation retains
+   `classification = 'trusted'`; the observation is kept in the ledger as evidence; only
+   Phase 5c event emission is suppressed. Phase 0.5 builds a second temp table
+   `_fte_rejected_payment_event_claims ON COMMIT DROP` (set of `DISTINCT claim_id` from active
+   `reject_payment_event` rows); Phase 5c checks this table before each `payment_applied`
+   INSERT and `CONTINUE`s (skips the INSERT) when the claim matches. Phase 6 open_balance
+   recalculates as `GREATEST(0, billed − adj − 0)` — the full billed amount — because no
+   paid amount was applied. Phase 7 is NOT suppressed — the claim remains `unbalanced` and
+   the `unbalanced_financial_position` queue row still emits. Phase 8 is NOT suppressed —
+   `short_pay_detected` still emits, with `open_balance_amount` equal to the full billed
+   amount. Supersede the row to restore payment-event emission on the next reconciler run.
+   See `reconciler/README.md §5.15`.
 
 ---
 
@@ -227,6 +259,7 @@ psql "$DATABASE_URL" -f migrations/006_confirm_short_pay_constraints.sql
 psql "$DATABASE_URL" -f migrations/007_request_more_evidence_constraints.sql
 psql "$DATABASE_URL" -f migrations/008_mark_position_needs_correction_constraints.sql
 psql "$DATABASE_URL" -f migrations/009_mark_position_resolved_constraints.sql
+psql "$DATABASE_URL" -f migrations/010_reject_payment_event_constraints.sql
 
 # Register the reconciler
 psql "$DATABASE_URL" -f reconciler/fte_reconcile.sql
@@ -249,6 +282,7 @@ psql "$DATABASE_URL" -f tests/validate_confirm_short_pay.sql                 # 9
 psql "$DATABASE_URL" -f tests/validate_request_more_evidence.sql             # 96c5c357 fixture required
 psql "$DATABASE_URL" -f tests/validate_mark_position_needs_correction.sql    # 96c5c357 fixture required
 psql "$DATABASE_URL" -f tests/validate_mark_position_resolved.sql            # 96c5c357 fixture required
+psql "$DATABASE_URL" -f tests/validate_reject_payment_event.sql              # 96c5c357 fixture required
 ```
 
 Use the Supabase `service_role` / `postgres` connection. For the Supabase SQL Editor,

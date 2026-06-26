@@ -65,12 +65,12 @@ produces `suspected_summary_row`, even if failure_mode is also set.
 | Phase | Description |
 |-------|-------------|
 | **0** | Idempotent reset: DELETE all derived rows for the practice in FK-safe order (`fte_event_evidence` → `fte_review_queue` → `fte_financial_positions` → `fte_claim_events`). `fte_analysis_runs` is append-only and is NOT deleted. |
-| **0.5** | Load active review resolutions: snapshot non-superseded `fte_review_resolutions` rows for this practice into temp table `_fte_active_resolutions ON COMMIT DROP`. Zero rows is valid — downstream phases behave identically to the no-resolution baseline. `DROP TABLE IF EXISTS` guard (same pattern as Phase 1's `_fte_classified`) ensures idempotency across multiple calls in the same outer transaction. `GET DIAGNOSTICS` captures the row count for `review_resolutions_applied` in the return JSON. Additionally builds `_fte_suppressed_observations ON COMMIT DROP` — the set of `observation_id` values where `action IN ('reject_observation', 'mark_duplicate')`. Phase 1 uses a `NOT EXISTS` subquery against this table to exclude suppressed observations from classification entirely. |
+| **0.5** | Load active review resolutions: snapshot non-superseded `fte_review_resolutions` rows for this practice into temp table `_fte_active_resolutions ON COMMIT DROP`. Zero rows is valid — downstream phases behave identically to the no-resolution baseline. `DROP TABLE IF EXISTS` guard (same pattern as Phase 1's `_fte_classified`) ensures idempotency across multiple calls in the same outer transaction. `GET DIAGNOSTICS` captures the row count for `review_resolutions_applied` in the return JSON. Additionally builds `_fte_suppressed_observations ON COMMIT DROP` — the set of `observation_id` values where `action IN ('reject_observation', 'mark_duplicate')` — Phase 1 uses a `NOT EXISTS` subquery against this table to exclude suppressed observations from classification entirely. Also builds `_fte_rejected_payment_event_claims ON COMMIT DROP` — the set of `DISTINCT claim_id` values from active `reject_payment_event` resolutions — Phase 5c checks this table before each `payment_applied` INSERT and skips the INSERT when the claim matches (see §5.15). |
 | **1** | Classify all observations into the temp table `_fte_classified` using the five rules above. `DROP TABLE IF EXISTS` ensures idempotency within the same outer transaction. |
 | **2** | Route EXCLUDED and SUSPECT observations to `fte_review_queue`. Summary rows with no `claim_identifier` produce review entries with `claim_id = NULL`. A `confirm_observation` active resolution for an observation suppresses that observation's queue entry only (checked via `NOT EXISTS` on `_fte_active_resolutions`) — the observation still classifies in Phase 1 with its original rule, but no queue row is emitted. This is queue-only suppression: it does not promote an EXCLUDED observation to TRUSTED, and it does not change ledger events or positions. |
 | **3** | Emit `claim_adjudicated` events from TRUSTED `billed_amount` observations. Each event gets one `derived_from` evidence link. A reviewer-supplied corrected billed amount is applied via `COALESCE` — see §4. |
 | **4** | Emit `contractual_adjustment_applied` events from TRUSTED `contractual_adjustment` observations. `carc_code` is propagated. Each event gets one `derived_from` link. A reviewer-supplied corrected adjustment amount is applied via `COALESCE` — see §4. |
-| **5c** | Emit `payment_applied` events from TRUSTED `payment` observations. Each event gets two `supports` evidence links: (1) the page observation, and (2) the matching `check_payment` stub (if one exists with `metadata->>'check_number' = check_eft_identifier`). A reviewer-supplied corrected payment amount is applied via `COALESCE` — see §4. |
+| **5c** | Emit `payment_applied` events from TRUSTED `payment` observations. Each event gets two `supports` evidence links: (1) the page observation, and (2) the matching `check_payment` stub (if one exists with `metadata->>'check_number' = check_eft_identifier`). A reviewer-supplied corrected payment amount is applied via `COALESCE` — see §4. Before each INSERT, the phase checks `_fte_rejected_payment_event_claims`; if the claim's `claim_id` matches, `CONTINUE` skips the INSERT entirely — the observation retains `classification = 'trusted'` and no event row is created for that claim (see §5.15). |
 | **5** (late/retry) | For each `late_retry_page_contradiction` review entry that has an `observation_id`, find the `payment_applied` event for the same claim, then: **(a)** if an active `confirm_payment_event` resolution exists for the claim in `_fte_active_resolutions`, mark the event `reconciled`; otherwise mark it `ambiguous`; **(b)** wire the review entry's `claim_event_id` (unconditional); **(c)** insert a `contradicts` evidence link (unconditional — the contradiction record is always preserved even when the reviewer has confirmed the payment). If no payment event exists the loop is a no-op for that entry. |
 | **6** | Derive `fte_financial_positions` for every claim that has at least one event OR at least one review queue entry. `reconciliation_status` CASE (evaluated in priority order): (1) no events → `in_review`; (2) any linked event has `reconciliation_status = 'ambiguous'` → `in_review` — **this applies even when the math balances to zero** (gap = 0). Financial truth cannot be finalized while contradicting evidence is unresolved; the claim must go to human review. Note: `'ambiguous'` is valid on `fte_claim_events` but is **not** a valid `fte_financial_positions.reconciliation_status` value (schema CHECK forbids it) — `in_review` is the correct surrogate; (3) any unbalanced event or positive open balance → `unbalanced`; (4) else → `balanced`. `open_balance_amount` is NULL when billed is unknown; otherwise `GREATEST(0, billed − adj − paid)`. `position_confidence_score` = MIN(confidence_score) across non–short_pay events, falling back to `0.0000`. |
 | **7** | Route every `unbalanced` or `in_review` position to `fte_review_queue` with reason `unbalanced_financial_position`. **dismiss_short_pay / confirm_short_pay / mark_position_resolved suppression:** `unbalanced` positions are skipped when an active `dismiss_short_pay`, `confirm_short_pay`, or `mark_position_resolved` resolution exists for the claim in `_fte_active_resolutions`. The `fte_financial_positions` row is NOT changed — `reconciliation_status = 'unbalanced'` and `open_balance_amount` remain correct. `in_review` positions are always routed regardless of any resolution. |
@@ -632,12 +632,149 @@ Superseded rows are retained as an audit trail. Phase 0.5 loads only
 | `mark_position_resolved` | **Suppressed** | **Never suppressed** | **Preserved** | **Yes** |
 | `request_more_evidence` | Not suppressed | Not suppressed | Not suppressed | Yes |
 | `mark_position_needs_correction` | Not suppressed | Not suppressed | Not suppressed | Yes |
+| `reject_payment_event` | Not suppressed ¹ | Not suppressed ¹ | Not suppressed ¹ | **Yes** |
+
+¹ `reject_payment_event` is a **payment-event-level** action, not a position-level
+action. It acts in Phase 5c (suppresses `payment_applied` INSERT), not in Phase 7
+or Phase 8. The claim remains `unbalanced` and `short_pay_detected` still emits —
+with `open_balance_amount` equal to the full billed amount (no paid amount applied).
+See §5.15 for the full specification.
 
 **Validation:** `tests/validate_mark_position_resolved.sql` — 14 checks using the
 96c5c357 fixture (CLM-APC-1000 as the primary vehicle for Phase 7 suppression and
 Phase 8 preservation; CLM-APC-2000 as the `in_review` invariant and shape-violation
 target). Requires migration 009 applied before running (check 11 uses the partial
 unique index).
+
+---
+
+### 5.15 `reject_payment_event` — Phase 5c payment-event suppression
+
+`reject_payment_event` is a **payment-event-level** reviewer decision that signals:
+"Do not emit a `payment_applied` ledger event for this claim — the payment observation
+is present in the source document but should not be treated as a settled ledger entry
+at this time." The payment observation retains `classification = 'trusted'` (Phase 1
+is unchanged). Only the Phase 5c ledger event emission is suppressed.
+
+This action is distinct from position-level actions (`dismiss_short_pay`,
+`confirm_short_pay`, `mark_position_resolved`): those act in Phase 7 or Phase 8 after
+the financial position exists; `reject_payment_event` prevents the `payment_applied`
+event from being created at all, so the financial position derives without any paid
+amount.
+
+#### Reconciler behavior (Phase 0.5 and Phase 5c)
+
+**Phase 0.5** builds a second claim-set temp table alongside `_fte_suppressed_observations`:
+
+```sql
+DROP TABLE IF EXISTS _fte_rejected_payment_event_claims;
+
+CREATE TEMP TABLE _fte_rejected_payment_event_claims ON COMMIT DROP AS
+SELECT DISTINCT claim_id
+FROM _fte_active_resolutions
+WHERE action    = 'reject_payment_event'
+  AND claim_id IS NOT NULL;
+```
+
+**Phase 5c** checks this table before each `payment_applied` INSERT:
+
+```sql
+IF EXISTS (
+  SELECT 1
+  FROM   _fte_rejected_payment_event_claims r
+  WHERE  r.claim_id = v_obs.claim_uuid
+) THEN
+  CONTINUE;
+END IF;
+```
+
+When the claim matches, the loop body skips the INSERT via `CONTINUE`. No event row
+is created; no evidence link is created. The `fte_observations` row is untouched —
+`classification` remains `'trusted'`.
+
+#### Effect on subsequent phases
+
+- **Phase 6** — `open_balance_amount` derives as `GREATEST(0, billed − adj − 0)` because
+  `SUM(paid)` is 0 (no `payment_applied` event). The position derives as `unbalanced`.
+  `reconciliation_status = 'unbalanced'` and `open_balance_amount = billed − adj` —
+  financial truth reflects that no payment landed in the ledger.
+- **Phase 7** — the `unbalanced` position is routed to `fte_review_queue` as normal.
+  `reject_payment_event` does NOT suppress Phase 7 routing (contrast with
+  `dismiss_short_pay` / `confirm_short_pay` / `mark_position_resolved`).
+- **Phase 8** — `short_pay_detected` is emitted as normal with `open_balance_amount`
+  equal to the full billed amount. `reject_payment_event` does NOT suppress Phase 8.
+
+#### Shape constraints (migration 010)
+
+| Constraint | Rule |
+|---|---|
+| `fte_review_resolutions_rpe_needs_notes` | `notes IS NOT NULL AND btrim(notes) <> ''` when `action = 'reject_payment_event'` |
+| `fte_review_resolutions_rpe_needs_claim_id` | `claim_id IS NOT NULL` when `action = 'reject_payment_event'` |
+| `fte_review_resolutions_rpe_needs_payment_event_type` | `target_type = 'payment_event'` when `action = 'reject_payment_event'` |
+| `idx_fte_resolutions_single_active_payment_event_decision` | `UNIQUE (practice_id, claim_id) WHERE is_superseded = false AND action IN ('confirm_payment_event', 'reject_payment_event')` |
+
+**Why notes is required:** rejecting a payment event is a financially significant
+decision — the payment is visible in the source document but the reviewer is asserting
+it should not appear in the ledger. Without a written rationale the decision is not
+auditable (e.g., "duplicate EFT — same check already applied via primary ERA",
+"payment reversed by payer per phone call 2026-06-24").
+
+**Why `claim_id` is the stable anchor:** `fte_claim_events` rows (including
+`payment_applied`) are deleted by Phase 0 on every reprocess; `source_claim_event_id`
+goes stale after the first Phase 0 reset. `claim_id` is a hard FK to `fte_claims`,
+which Phase 0 never deletes. Same rationale as all other claim-anchored resolutions
+(§5.1, §5.6, §5.12, §5.13, §5.14).
+
+**Why a cross-action partial unique index:** `confirm_payment_event` promotes an
+ambiguous payment event to `reconciled` (the reviewer asserts the payment is legitimate);
+`reject_payment_event` suppresses the event entirely (the reviewer asserts the payment
+should not be in the ledger). These are logically contradictory decisions for the same
+claim — both active simultaneously would produce undefined behavior. The index mirrors
+the migration 006 pattern (`confirm_short_pay` + `dismiss_short_pay`) and prevents
+the contradiction at the DB level.
+
+#### Supersession workflow
+
+To replace an active `reject_payment_event`:
+
+```sql
+-- Step 1: supersede the current active row
+UPDATE fte_review_resolutions
+SET    is_superseded = true
+WHERE  practice_id   = '<practice_id>'
+  AND  claim_id      = '<claim_id>'
+  AND  action        = 'reject_payment_event'
+  AND  is_superseded = false;
+
+-- Step 2: insert the replacement (or a confirm_payment_event to reverse the rejection)
+INSERT INTO fte_review_resolutions (
+  practice_id, claim_id, action, target_type, notes, resolved_by
+) VALUES (
+  '<practice_id>', '<claim_id>', 'reject_payment_event', 'payment_event',
+  '<updated rationale>', '<reviewer_id>'
+);
+```
+
+To reverse a rejection and allow the payment event to emit: supersede the
+`reject_payment_event` row (step 1) and do not insert a replacement — or insert a
+`confirm_payment_event` row instead.
+
+#### Validation
+
+`tests/validate_reject_payment_event.sql` — 18 checks using the 96c5c357 fixture
+(`fixtures/synthetic_96c5c357_failure_modes.sql`):
+
+- **Checks 1–4** — baseline (no resolution): `payment_applied` emitted, `open_balance_amount =
+  $1,248.11`, `unbalanced`, `short_pay_detected` emitted, queue row present.
+- **Checks 5–13** — with active `reject_payment_event`: `payment_applied` not emitted,
+  `open_balance_amount = $1,600.00` (full billed), `unbalanced`, `short_pay_detected`
+  emitted with recalculated amount, queue row present, observation remains `'trusted'`,
+  CLM-APC-2000 unaffected.
+- **Checks 14–15** — migration 010 constraint violations: blank notes rejected,
+  null `claim_id` rejected.
+
+Requires migration 010 applied before running (checks 14–15 exercise the CHECK
+constraints).
 
 ---
 
