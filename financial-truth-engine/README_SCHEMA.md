@@ -216,7 +216,7 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    amount. Supersede the row to restore payment-event emission on the next reconciler run.
    See `reconciler/README.md §5.15`.
 17. **`assert_check_identity` resolutions enforce shape and store a canonical check number,
-   but do not change reconciler behavior.** Migration 011 adds four CHECK constraints and one
+   but do not change reconciler behavior.** Migration 011 adds five CHECK constraints and one
    single-action partial unique index to `fte_review_resolutions` for
    `action = 'assert_check_identity'`:
    `fte_review_resolutions_aci_needs_notes` (`notes IS NOT NULL AND btrim(notes) <> ''` —
@@ -225,9 +225,14 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    `fte_review_resolutions_aci_needs_claim_id` (`claim_id IS NOT NULL` — `fte_claim_events`
    rows are deleted and re-derived on every Phase 0 reset; `source_claim_event_id` becomes
    stale after each reprocess; `claim_id` is a hard FK to `fte_claims`, which Phase 0 never
-   deletes, and is the only stable anchor for payment-event-level decisions — mirrors the
-   `claim_id` anchor rationale for position-level actions in migrations 005–009 and the other
-   payment-event-level action in migration 010),
+   deletes, and provides claim context for the assertion — mirrors the `claim_id` anchor
+   rationale for position-level actions in migrations 005–009 and the other payment-event-level
+   action in migration 010),
+   `fte_review_resolutions_aci_needs_observation_id` (`observation_id IS NOT NULL` — a claim
+   may later have multiple payment observations, so the reviewer must anchor to a specific
+   observed payment row; `observation_id` is a FK to `fte_observations`, the evidence layer
+   that Phase 0 never deletes, making it the stable, fine-grained payment-observation anchor;
+   `claim_id` gives claim context, `observation_id` gives the specific payment anchor),
    `fte_review_resolutions_aci_needs_corrected_identifier`
    (`corrected_identifier IS NOT NULL AND btrim(corrected_identifier) <> ''` — the assertion
    without a canonical value is meaningless; the `corrected_identifier` column, added in
@@ -236,9 +241,11 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    `fte_review_resolutions_aci_needs_payment_event_type` (`target_type = 'payment_event'` —
    targets a payment event check/EFT identifier, not an observation or position row; consistent
    with the other two payment-event-level actions). A single-action partial unique index
-   `idx_fte_resolutions_single_active_check_identity` on `(practice_id, claim_id)
+   `idx_fte_resolutions_single_active_check_identity_observation` on `(practice_id, observation_id)
    WHERE is_superseded = false AND action = 'assert_check_identity'` prevents duplicate
-   simultaneous active assertions for the same claim. Unlike the cross-action index in
+   simultaneous active assertions for the same payment observation. Per-observation (not
+   per-claim) uniqueness is correct because a claim may have multiple payment observations —
+   each may independently need an identity assertion. Unlike the cross-action index in
    migration 010 (`confirm_payment_event` + `reject_payment_event`), this is a single-action
    index because `assert_check_identity` has no logically contradictory counterpart — an
    active assertion coexists correctly with an active `confirm_payment_event` or

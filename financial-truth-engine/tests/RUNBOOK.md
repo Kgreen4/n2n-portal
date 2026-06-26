@@ -24,9 +24,9 @@ errors in the Supabase SQL Editor, and missing fixture loads.
 | `tests/validate_mark_position_needs_correction.sql` | 12 | `mark_position_needs_correction` — durable correction-needed marker, no reconciler/queue/event change, notes/claim_id/target_type shape constraints, uniqueness, CLM-APC-2000 isolation |
 | `tests/validate_mark_position_resolved.sql` | 14 | `mark_position_resolved` — Phase 7 queue suppression for unbalanced only, Phase 8 preserved, in_review invariant, notes/claim_id/target_type shape constraints, uniqueness, supersession |
 | `tests/validate_reject_payment_event.sql` | 18 | `reject_payment_event` — Phase 5c payment_applied suppression, open_balance recalc to full billed, Phase 7/8 not suppressed, observation remains trusted, CLM-APC-2000 isolation, notes/claim_id constraints, cross-action conflict, supersession |
-| `tests/validate_assert_check_identity.sql` | 12 | `assert_check_identity` — durable note only, payment_applied not suppressed, position/balance unchanged, corrected_identifier stored, notes/claim_id/corrected_identifier/target_type shape constraints, single-action uniqueness, CLM-APC-2000 isolation, supersession |
+| `tests/validate_assert_check_identity.sql` | 13 | `assert_check_identity` — durable note only, payment_applied not suppressed, position/balance unchanged, corrected_identifier stored, notes/claim_id/observation_id/corrected_identifier/target_type shape constraints, per-observation uniqueness (duplicate rejected for same observation_id), CLM-APC-2000 isolation, supersession |
 
-**Total numeric checks: 159**
+**Total numeric checks: 160**
 
 All suites are wrapped in `ROLLBACK` — nothing persists to the database.
 `fte_analysis_runs` is append-only and is **not** rolled back; suites use
@@ -128,7 +128,7 @@ psql "$DATABASE_URL" -f tests/run_all_validations.sql
 This runner loads both fixtures, then executes all fifteen suites in the correct
 order. See `tests/run_all_validations.sql` for the exact sequence.
 
-Expected output: 159 `PASS` NOTICE lines across fifteen suites, plus a banner
+Expected output: 160 `PASS` NOTICE lines across fifteen suites, plus a banner
 after each suite. Each suite is independent — a failure in one suite does not
 prevent the next from running, but scroll up to find the EXCEPTION output from
 any failed suite.
