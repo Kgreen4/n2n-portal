@@ -30,7 +30,7 @@
 -- The reconciler (CREATE OR REPLACE FUNCTION) is safe to rerun; do so
 -- whenever fte_reconcile.sql changes.
 --
--- Expected output: 160 PASS NOTICE lines across fifteen suites.
+-- Expected output: 178 PASS NOTICE lines across sixteen suites.
 -- A FAIL raises an EXCEPTION that aborts the current suite's transaction.
 -- Subsequent \i calls still execute — scroll up to find any EXCEPTION output.
 --
@@ -51,6 +51,9 @@
 
 \echo 'Loading synthetic fixture: 96c5c357'
 \i fixtures/synthetic_96c5c357_failure_modes.sql
+
+\echo 'Loading synthetic fixture: phase3a_extraction'
+\i fixtures/synthetic_phase3a_extraction_fixture.sql
 
 -- ---------------------------------------------------------------------------
 -- Validation suites (each wraps in ROLLBACK — nothing persists)
@@ -117,5 +120,9 @@
 \i tests/validate_assert_check_identity.sql
 
 \echo ''
-\echo '=== All suites complete. Expected: 160 PASS checks. ==='
+\echo '--- validate_extraction_pipeline ---'
+\i tests/validate_extraction_pipeline.sql
+
+\echo ''
+\echo '=== All suites complete. Expected: 178 PASS checks. ==='
 \echo ''

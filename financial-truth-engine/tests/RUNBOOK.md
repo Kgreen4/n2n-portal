@@ -25,8 +25,9 @@ errors in the Supabase SQL Editor, and missing fixture loads.
 | `tests/validate_mark_position_resolved.sql` | 14 | `mark_position_resolved` — Phase 7 queue suppression for unbalanced only, Phase 8 preserved, in_review invariant, notes/claim_id/target_type shape constraints, uniqueness, supersession |
 | `tests/validate_reject_payment_event.sql` | 18 | `reject_payment_event` — Phase 5c payment_applied suppression, open_balance recalc to full billed, Phase 7/8 not suppressed, observation remains trusted, CLM-APC-2000 isolation, notes/claim_id constraints, cross-action conflict, supersession |
 | `tests/validate_assert_check_identity.sql` | 13 | `assert_check_identity` — durable note only, payment_applied not suppressed, position/balance unchanged, corrected_identifier stored, notes/claim_id/observation_id/corrected_identifier/target_type shape constraints, per-observation uniqueness (duplicate rejected for same observation_id), CLM-APC-2000 isolation, supersession |
+| `tests/validate_extraction_pipeline.sql` | 18 | Phase 3A extraction pipeline — evidence count, observation count, balanced/unbalanced positions, short_pay_detected, review-queue routing, two-link event evidence, [SYNTHETIC] prefix invariant |
 
-**Total numeric checks: 160**
+**Total numeric checks: 178**
 
 All suites are wrapped in `ROLLBACK` — nothing persists to the database.
 `fte_analysis_runs` is append-only and is **not** rolled back; suites use
@@ -40,6 +41,7 @@ run-count delta logic so the absolute count does not matter.
 |---|---|---|
 | `fixtures/synthetic_ccdbe216_failure_modes.sql` | `c0000000-0000-4000-8000-0000000000fe` | phantom duplicate, section-delimiter double-count, null-check crossbleed, summary-row exclusion, late-retry/page contradiction |
 | `fixtures/synthetic_96c5c357_failure_modes.sql` | `96000000-0000-4000-8000-0000000000fe` | check-spacing fragmentation variants, short-pay (CLM-APC-1000) |
+| `fixtures/synthetic_phase3a_extraction_fixture.sql` | `a3000000-0000-4000-8000-0000000000fe` | 3-claim balanced/unbalanced baseline, summary-row exclusion, check_payment stub for two-link event evidence |
 
 Fixture files use `INSERT ... ON CONFLICT DO NOTHING` — safe to load more than
 once. Fixtures are **not** wrapped in ROLLBACK; they commit and remain available
@@ -64,6 +66,7 @@ Suite → fixture dependency:
 | `validate_mark_position_resolved.sql` | 96c5c357 |
 | `validate_reject_payment_event.sql` | 96c5c357 |
 | `validate_assert_check_identity.sql` | 96c5c357 |
+| `validate_extraction_pipeline.sql` | phase3a_extraction |
 
 ---
 
@@ -125,10 +128,10 @@ Run in this order every time. Migrations are **not** repeated here.
 psql "$DATABASE_URL" -f tests/run_all_validations.sql
 ```
 
-This runner loads both fixtures, then executes all fifteen suites in the correct
+This runner loads all fixtures, then executes all sixteen suites in the correct
 order. See `tests/run_all_validations.sql` for the exact sequence.
 
-Expected output: 160 `PASS` NOTICE lines across fifteen suites, plus a banner
+Expected output: 178 `PASS` NOTICE lines across sixteen suites, plus a banner
 after each suite. Each suite is independent — a failure in one suite does not
 prevent the next from running, but scroll up to find the EXCEPTION output from
 any failed suite.
@@ -144,24 +147,26 @@ starting from the `begin;` block.
 
 1. Paste + execute `fixtures/synthetic_ccdbe216_failure_modes.sql`
 2. Paste + execute `fixtures/synthetic_96c5c357_failure_modes.sql`
+3. Paste + execute `fixtures/synthetic_phase3a_extraction_fixture.sql`
 
 **Step 2 — Run validation suites** (execute each separately):
 
-3. Paste + execute `tests/validate_schema.sql`
-4. Paste + execute `tests/validate_reconciler.sql`
-5. Paste + execute `tests/validate_review_resolution.sql`
-6. Paste + execute `tests/validate_observation_resolution.sql`
-7. Paste + execute `tests/validate_corrected_value.sql`
-8. Paste + execute `tests/validate_corrected_value_supersession.sql`
-9. Paste + execute `tests/validate_corrected_contractual_adjustment.sql`
-10. Paste + execute `tests/validate_corrected_billed_amount.sql`
-11. Paste + execute `tests/validate_dismiss_short_pay.sql`
-12. Paste + execute `tests/validate_confirm_short_pay.sql`
-13. Paste + execute `tests/validate_request_more_evidence.sql`
-14. Paste + execute `tests/validate_mark_position_needs_correction.sql`
-15. Paste + execute `tests/validate_mark_position_resolved.sql`
-16. Paste + execute `tests/validate_reject_payment_event.sql`
-17. Paste + execute `tests/validate_assert_check_identity.sql`
+4. Paste + execute `tests/validate_schema.sql`
+5. Paste + execute `tests/validate_reconciler.sql`
+6. Paste + execute `tests/validate_review_resolution.sql`
+7. Paste + execute `tests/validate_observation_resolution.sql`
+8. Paste + execute `tests/validate_corrected_value.sql`
+9. Paste + execute `tests/validate_corrected_value_supersession.sql`
+10. Paste + execute `tests/validate_corrected_contractual_adjustment.sql`
+11. Paste + execute `tests/validate_corrected_billed_amount.sql`
+12. Paste + execute `tests/validate_dismiss_short_pay.sql`
+13. Paste + execute `tests/validate_confirm_short_pay.sql`
+14. Paste + execute `tests/validate_request_more_evidence.sql`
+15. Paste + execute `tests/validate_mark_position_needs_correction.sql`
+16. Paste + execute `tests/validate_mark_position_resolved.sql`
+17. Paste + execute `tests/validate_reject_payment_event.sql`
+18. Paste + execute `tests/validate_assert_check_identity.sql`
+19. Paste + execute `tests/validate_extraction_pipeline.sql`
 
 **What to expect in the SQL Editor:**
 

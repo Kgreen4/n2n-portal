@@ -1,6 +1,6 @@
 # Financial Truth Engine
 
-**Status:** Active — schema, reconciler, corrected-value resolutions, position-level resolutions (dismiss_short_pay + confirm_short_pay), durable evidence-request workflow (request_more_evidence), durable correction-needed marker (mark_position_needs_correction), Phase 7 queue-suppression marker (mark_position_resolved), payment-event-level suppression (reject_payment_event), and durable check-identity assertion (assert_check_identity) proven on synthetic data (Tasks 001–005H merged)
+**Status:** Active — schema, reconciler, corrected-value resolutions, position-level resolutions (dismiss_short_pay + confirm_short_pay), durable evidence-request workflow (request_more_evidence), durable correction-needed marker (mark_position_needs_correction), Phase 7 queue-suppression marker (mark_position_resolved), payment-event-level suppression (reject_payment_event), durable check-identity assertion (assert_check_identity), and Phase 3A extraction baseline fixture + pipeline validation (Tasks 001–006B merged)
 **Owner:** Keith Green / N2N Analytics  
 **Created:** 2026-06-16  
 **Important:** This effort is intentionally separate from the current EOB extraction project.
@@ -186,7 +186,7 @@ This proves whether the ledger architecture reduces fragility before UI, reports
 
 ## Current Capabilities
 
-As of Task 005H (2026-06-26):
+As of Task 006B (2026-06-26):
 
 - 11-table ledger schema with RLS, tenant isolation, and immutable evidence
 - Deterministic 9-phase reconciler (`fte_reconcile_practice`) — idempotent, evidence-linked
@@ -202,7 +202,8 @@ As of Task 005H (2026-06-26):
   - `mark_position_resolved` — Phase 7 queue-suppression marker for `unbalanced` positions only; requires non-null/non-blank `notes` and a stable `claim_id` anchor; at most one active resolved marker per claim (partial unique index, migration 009); suppresses Phase 7 `unbalanced_financial_position` queue row (added to the `dismiss_short_pay` + `confirm_short_pay` IN-list); Phase 8 `short_pay_detected` event is preserved (contrast: `dismiss_short_pay` suppresses Phase 8 too); `in_review` positions are never suppressed — the `unbalanced`-only guard is enforced at the Phase 7 level; reconciliation_status and open_balance_amount are unchanged — see `reconciler/README.md §5.14`
   - `reject_payment_event` — payment-event-level suppression: Phase 5c `payment_applied` event is not emitted for the claim; the payment observation remains classified `'trusted'` (Phase 1 unchanged); Phase 6 open_balance_amount recalculates to full billed amount (no paid amount applied); Phase 7 and Phase 8 are NOT suppressed — the claim remains `unbalanced` and `short_pay_detected` still emits with the recalculated balance; requires non-null/non-blank `notes` and a stable `claim_id` anchor (migration 010); cross-action partial unique index prevents simultaneous active `confirm_payment_event` + `reject_payment_event` for the same claim (mirrors migration 006 pattern) — see `reconciler/README.md §5.15`
   - `assert_check_identity` — durable check-identity note (payment-event-level, group 2 action #3): reviewer asserts the canonical check number for an OCR-garbled or fragmented payment event identifier; requires non-null/non-blank `notes`, a stable `claim_id` anchor, a stable `observation_id` anchor (FK to `fte_observations`, the specific payment observation being identified — a claim may have multiple payment observations, so uniqueness is per observation), and a non-blank `corrected_identifier` (the canonical check number — migration 011); target_type must be `'payment_event'`; single-action partial unique index `idx_fte_resolutions_single_active_check_identity_observation` on `(practice_id, observation_id)` prevents duplicate simultaneous active assertions for the same payment observation; **reconciler behavior is UNCHANGED** — payment_applied event still emits, position/balance are not modified, Phase 7/8 not suppressed; the corrected_identifier is stored in `fte_review_resolutions` for human review and future phase integration; supersede the row to replace the canonical identifier — see `reconciler/README.md §5.16`
-- 160 numeric checks across 15 test suites, all passing in a disposable Supabase project
+- Phase 3A extraction baseline: 3-claim balanced/unbalanced fixture (`synthetic_phase3a_extraction_fixture.sql`) — 6 evidence rows, 10 observations, check_payment stub (SYN-4001) enabling two-link event evidence; pipeline validation suite (`validate_extraction_pipeline.sql`) — 18 checks covering evidence/observation counts, payment amounts, balanced/unbalanced positions, short_pay_detected, review-queue routing, two-link event evidence, and [SYNTHETIC] raw_text prefix invariant
+- 178 numeric checks across 16 test suites, all passing in a disposable Supabase project
 
 Not yet implemented: AI extraction layer, UI, API, Edge Functions.
 
@@ -234,6 +235,7 @@ event-derived math) is not implemented.
 | `tests/validate_mark_position_resolved.sql` | 14 | 005F |
 | `tests/validate_reject_payment_event.sql` | 18 | 005G |
 | `tests/validate_assert_check_identity.sql` | 13 | 005H |
+| `tests/validate_extraction_pipeline.sql` | 18 | 006B |
 
 All suites wrap in `ROLLBACK` — nothing persists. See `tests/RUNBOOK.md` for run order.
 
