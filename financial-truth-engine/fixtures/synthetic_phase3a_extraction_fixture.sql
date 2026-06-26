@@ -8,8 +8,8 @@
 --
 -- Scenario:
 --   A 4-page remittance from Synthetic Payer A, check SYN-4001 ($354.00).
---   Page 1: CLM-P3A-0001 — billed $250, adj $50, paid $150 → balanced (0.00)   CPT 99213
---   Page 2: CLM-P3A-0002 — billed $180, adj $36, paid $104 → balanced (0.00)   CPT 93000
+--   Page 1: CLM-P3A-0001 — billed $250, adj $100, paid $150 → balanced (0.00)  CPT 99213
+--   Page 2: CLM-P3A-0002 — billed $180, adj $76,  paid $104 → balanced (0.00)  CPT 93000
 --   Page 3: CLM-P3A-0003 — billed $350, adj $70, paid $100 → unbalanced ($180.00) CPT 99213
 --   Page 4: summary row  — total paid $354.00, is_summary_row=true → excluded
 --   + check_payment stub for SYN-4001 (enables two-link fte_event_evidence check)
@@ -87,7 +87,7 @@ values
    'private://fte/phase3a/remittance-syn-4001.pdf#page=1',
    'sha256:SYNTHETIC_PHASE3A_PAGE1',
    1,
-   '[SYNTHETIC] Remittance Advice Page 1 of 4 | Payer: Synthetic Payer A | Claim: CLM-P3A-0001 | Patient: SYNTHETIC PATIENT A | DOS: 2026-05-15 | CPT 99213 | Billed: $250.00 | Allowed: $200.00 | Adj: $50.00 | Paid: $150.00',
+   '[SYNTHETIC] Remittance Advice Page 1 of 4 | Payer: Synthetic Payer A | Claim: CLM-P3A-0001 | Patient: SYNTHETIC PATIENT A | DOS: 2026-05-15 | CPT 99213 | Billed: $250.00 | Allowed: $150.00 | Adj: $100.00 | Paid: $150.00',
    '{}'),
 
   -- page 2 — CLM-P3A-0002 (CPT 93000 — intentionally distinct from CLM-P3A-0001/0003)
@@ -98,7 +98,7 @@ values
    'private://fte/phase3a/remittance-syn-4001.pdf#page=2',
    'sha256:SYNTHETIC_PHASE3A_PAGE2',
    2,
-   '[SYNTHETIC] Remittance Advice Page 2 of 4 | Payer: Synthetic Payer A | Claim: CLM-P3A-0002 | Patient: SYNTHETIC PATIENT B | DOS: 2026-05-15 | CPT 93000 | Billed: $180.00 | Allowed: $144.00 | Adj: $36.00 | Paid: $104.00',
+   '[SYNTHETIC] Remittance Advice Page 2 of 4 | Payer: Synthetic Payer A | Claim: CLM-P3A-0002 | Patient: SYNTHETIC PATIENT B | DOS: 2026-05-15 | CPT 93000 | Billed: $180.00 | Allowed: $104.00 | Adj: $76.00 | Paid: $104.00',
    '{}'),
 
   -- page 3 — CLM-P3A-0003 (CPT 99213, underpaid — synthetic short pay, no CARC codes)
@@ -189,9 +189,9 @@ values
   ('0b3a0000-0000-4000-8000-000000000002',
    'a3000000-0000-4000-8000-0000000000fe',
    'e3a00000-0000-4000-8000-000000000002',
-   'contractual_adjustment', 50.00, 'contractual_adjustment',
+   'contractual_adjustment', 100.00, 'contractual_adjustment',
    'CLM-P3A-0001', 'Synthetic Payer A', '2026-05-15', '99213', null,
-   0.97, 'SYN:50.00', '50.00', 1, false, false, '{}'),
+   0.97, 'SYN:100.00', '100.00', 1, false, false, '{}'),
 
   -- CLM-P3A-0001 (page 1, CPT 99213) — payment (check_eft_identifier triggers check stub link)
   ('0b3a0000-0000-4000-8000-000000000003',
@@ -213,9 +213,9 @@ values
   ('0b3a0000-0000-4000-8000-000000000005',
    'a3000000-0000-4000-8000-0000000000fe',
    'e3a00000-0000-4000-8000-000000000003',
-   'contractual_adjustment', 36.00, 'contractual_adjustment',
+   'contractual_adjustment', 76.00, 'contractual_adjustment',
    'CLM-P3A-0002', 'Synthetic Payer A', '2026-05-15', '93000', null,
-   0.97, 'SYN:36.00', '36.00', 2, false, false, '{}'),
+   0.97, 'SYN:76.00', '76.00', 2, false, false, '{}'),
 
   -- CLM-P3A-0002 (page 2, CPT 93000) — payment
   ('0b3a0000-0000-4000-8000-000000000006',
