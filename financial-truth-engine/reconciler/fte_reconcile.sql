@@ -97,6 +97,16 @@ BEGIN
   WHERE action IN ('reject_observation', 'mark_duplicate')
     AND observation_id IS NOT NULL;
 
+  -- Rejected payment-event claims: observations remain classifiable/trusted;
+  -- only Phase 5c payment_applied event emission is suppressed.
+  DROP TABLE IF EXISTS _fte_rejected_payment_event_claims;
+
+  CREATE TEMP TABLE _fte_rejected_payment_event_claims ON COMMIT DROP AS
+  SELECT DISTINCT claim_id
+  FROM _fte_active_resolutions
+  WHERE action = 'reject_payment_event'
+    AND claim_id IS NOT NULL;
+
 
   -- =========================================================================
   -- PHASE 1: Classify every observation for this practice.
@@ -339,6 +349,18 @@ BEGIN
     WHERE cl.classification   = 'trusted'
       AND cl.observation_type = 'payment'
   ) LOOP
+
+    -- Skip payment_applied event emission when reviewer has rejected this payment.
+    -- The observation remains 'trusted' and participates in Phase 1 classification;
+    -- only the Phase 5c INSERT is suppressed, so Phase 6 recalculates open_balance
+    -- as billed − adj − 0 (full billed amount), and Phases 7/8 are not suppressed.
+    IF EXISTS (
+      SELECT 1
+      FROM _fte_rejected_payment_event_claims r
+      WHERE r.claim_id = v_obs.claim_uuid
+    ) THEN
+      CONTINUE;
+    END IF;
 
     INSERT INTO fte_claim_events
       (practice_id, claim_id, event_type, event_date, amount, amount_type,

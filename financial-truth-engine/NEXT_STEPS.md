@@ -2,7 +2,7 @@
 
 **Status:** Execution checklist  
 **Created:** 2026-06-17  
-**Updated:** 2026-06-24
+**Updated:** 2026-06-25
 **Purpose:** Start the Financial Truth Engine cleanly while preserving the current EOB project as a reference only.
 
 ---
@@ -464,6 +464,85 @@ Supabase project.
 
 ---
 
+### Task 005G — `reject_payment_event` Payment-Event-Level Suppression ✅ Complete
+
+**Delivered:**
+- `migrations/010_reject_payment_event_constraints.sql` — 3 CHECK constraints and 1
+  cross-action partial unique index enforcing valid shape for `reject_payment_event`:
+  `fte_review_resolutions_rpe_needs_notes` (`notes IS NOT NULL AND btrim(notes) <> ''` —
+  whitespace-only notes rejected; rejecting a payment event is a financially significant
+  decision requiring an actionable explanation), `fte_review_resolutions_rpe_needs_claim_id`
+  (`claim_id IS NOT NULL` — `source_claim_event_id` goes stale on Phase 0 reset; `claim_id`
+  is a hard FK to `fte_claims`, the only stable anchor), and
+  `fte_review_resolutions_rpe_needs_payment_event_type` (`target_type = 'payment_event'`).
+  Cross-action partial unique index `idx_fte_resolutions_single_active_payment_event_decision`
+  on `(practice_id, claim_id) WHERE is_superseded = false AND action IN
+  ('confirm_payment_event', 'reject_payment_event')` — prevents simultaneous active rows of
+  both actions (logically contradictory); mirrors the migration 006 cross-action pattern for
+  `confirm_short_pay` + `dismiss_short_pay`.
+- `reconciler/fte_reconcile.sql` (Phase 0.5 and Phase 5c only modified) — Phase 0.5 now
+  builds a second temp table `_fte_rejected_payment_event_claims ON COMMIT DROP` containing
+  `DISTINCT claim_id` from all active `reject_payment_event` rows for the practice. Phase 5c
+  checks `EXISTS (SELECT 1 FROM _fte_rejected_payment_event_claims r WHERE r.claim_id =
+  v_obs.claim_uuid)` before each `payment_applied` INSERT; when the claim matches, `CONTINUE`
+  skips the INSERT. The payment observation is not mutated — `fte_observations.classification`
+  remains `'trusted'`. Phase 6, Phase 7, and Phase 8 are not modified.
+- `tests/validate_reject_payment_event.sql` — 18-check ROLLBACK-wrapped suite. CLM-APC-1000
+  (`c1a90000-0000-4000-8000-000000001000`, practice `96000000-0000-4000-8000-0000000000fe`)
+  as primary vehicle — baseline: billed=$1,600.00, paid=$351.89, open_balance=$1,248.11,
+  `unbalanced`, `short_pay_detected` emitted, queue row present; with active
+  `reject_payment_event`: payment_applied suppressed, paid_amount=NULL (SUM of empty
+  payment_applied set), open_balance=$1,600.00 (full billed), `short_pay_detected`
+  amount=$1,600.00, status remains `unbalanced`, queue row remains present, observation
+  remains `'trusted'`. CLM-APC-2000 as isolation vehicle. Checks 15–17 verify migration 010
+  constraints (blank notes, null claim_id, wrong target_type) and cross-action conflict
+  (simultaneous `confirm_payment_event` blocked by unique index). Check 18 proves supersession
+  restores all baseline values. Brings total to 147 numeric checks across 14 suites.
+- `tests/run_all_validations.sql` (updated) — added `\i tests/validate_reject_payment_event.sql`
+  block; updated header prerequisites to include migration 010; updated expected count
+  from 129 to 147 and from thirteen to fourteen suites.
+- `tests/RUNBOOK.md` (updated) — added suite table row (18 checks), fixture dependency row
+  (96c5c357), migration 010 to first-time setup (psql + Supabase SQL Editor step 10),
+  step 16 to Supabase manual sequence, updated totals to 147 / fourteen suites.
+- `README.md` (updated) — status line Tasks 001–005G, ninth action category bullet
+  (`reject_payment_event`), suite table row, check count 129→147 / 13→14 suites.
+- `README_SCHEMA.md` (updated) — migrations frontmatter (migration 010 appended), status
+  line Tasks 001–005G, Invariant 16 (`reject_payment_event` shape/uniqueness constraints,
+  Phase 5c suppression behavior, Phase 7/8 not suppressed, observation remains 'trusted',
+  claim_id anchor rationale, cross-action index mirrors migration 006, supersession workflow,
+  reference to reconciler/README.md §5.15), How-To-Apply psql block (migration 010 +
+  `validate_reject_payment_event.sql`).
+- `reconciler/README.md` (updated) — Phase 0.5 table entry extended to mention
+  `_fte_rejected_payment_event_claims`; Phase 5c table entry extended to mention CONTINUE
+  guard; `reject_payment_event` row added to §5.14 contrast table (with note that it is a
+  payment-event-level action, not a position-level action, so the Phase 7/8 columns reflect
+  "Not suppressed"); §5.15 added documenting `reject_payment_event` in full (overview,
+  Phase 0.5 temp table SQL, Phase 5c CONTINUE guard SQL, behavior per phase, migration 010
+  DB constraints table, claim_id anchor rationale, cross-action index rationale, supersession
+  workflow, distinction from position-level actions, validation suite reference).
+- `NEXT_STEPS.md` (this file) — Task 005G entry and Current Capabilities/Suites updates.
+
+**Reconciler behavior: Phase 0.5 and Phase 5c only.** `_fte_rejected_payment_event_claims`
+temp table built in Phase 0.5 alongside `_fte_suppressed_observations`; Phase 5c adds a
+`CONTINUE` guard before each `payment_applied` INSERT. No other phase was touched. The
+payment observation retains `classification = 'trusted'` (Phase 1 unchanged). Phase 6
+open_balance_amount derives as `GREATEST(0, billed − adj − 0)` — equals the full billed
+amount because no paid amount was applied. Phase 7 and Phase 8 behavior is unchanged from
+the no-resolution baseline — the claim remains `unbalanced` and `short_pay_detected` still
+emits. Financial truth is preserved; only the payment event is suppressed from the ledger.
+
+**Safety:** no PHI, no real patient data, no production data, no legacy EOB DB or code
+accessed. No new `reconciliation_status` values. No new queue reason values. No new claim
+event types. No new event vocabulary. No fixture files modified. `reject_payment_event` was
+NOT added to `_fte_suppressed_observations` (observation suppression is a Phase 1 action;
+`reject_payment_event` is a payment-event-level action targeting Phase 5c). No frozen files
+touched (migrations 001–009, fixtures, all existing test files, and all CODEX_TASK_*.md
+files are unchanged). All shape enforcement is DB-level (migration 010 constraints + cross-
+action partial unique index). Tested via ROLLBACK-wrapped 15-check suite against synthetic
+96c5c357 fixture in a disposable Supabase project.
+
+---
+
 ### Task 005C — `confirm_position_balanced` — Planning/Docs Only ✅ Decision Recorded
 
 **Decision: deferred. `confirm_position_balanced` is not implemented.**
@@ -587,7 +666,7 @@ project accessed.
 
 ## Current Capabilities
 
-As of Task 005F complete (2026-06-25), the FTE can:
+As of Task 005G complete (2026-06-25), the FTE can:
 
 - **Represent the full claim ledger.** Eleven tables covering practices, evidence,
   observations, claims, claim events, event-evidence audit links, financial positions,
@@ -670,6 +749,17 @@ As of Task 005F complete (2026-06-25), the FTE can:
   `reconciliation_status` and `open_balance_amount` are unchanged. Financial math is
   unchanged. Supersede the row to restore queue visibility. Proven across 14 validation
   checks (Task 005F).
+- **Reject a payment event.** `reject_payment_event` suppresses the Phase 5c
+  `payment_applied` event emission for the claim. The payment observation retains
+  `classification = 'trusted'` (Phase 1 is unchanged). Phase 6 open-balance math
+  derives as `GREATEST(0, billed − adj − 0)` — the full billed amount — because no
+  paid amount was applied. Phase 7 and Phase 8 are NOT suppressed: the claim remains
+  `unbalanced` and `short_pay_detected` still emits with the recalculated balance.
+  Requires a non-null, non-blank `notes` field (the reviewer's rationale for suppressing
+  the event) and a stable `claim_id` anchor. A cross-action partial unique index
+  (migration 010) prevents simultaneous active `confirm_payment_event` + `reject_payment_event`
+  for the same claim — logically contradictory decisions. Proven across 15 validation
+  checks (Task 005G).
 
 **Not yet implemented:** extraction layer (AI observations from real PDFs), UI,
 API endpoints, Edge Functions, denial/contract intelligence.
@@ -696,8 +786,9 @@ Apply migrations and register the reconciler before running.
 | `tests/validate_request_more_evidence.sql` | 12 | `request_more_evidence` — durable note only, no reconciler/queue/event change, notes/claim_id/target_type shape constraints, uniqueness, CLM-APC-1000 isolation |
 | `tests/validate_mark_position_needs_correction.sql` | 12 | `mark_position_needs_correction` — durable correction-needed marker, no reconciler/queue/event change, notes/claim_id/target_type shape constraints, uniqueness, CLM-APC-2000 isolation |
 | `tests/validate_mark_position_resolved.sql` | 14 | `mark_position_resolved` — Phase 7 queue suppression for unbalanced only, Phase 8 preserved, in_review invariant, notes/claim_id/target_type shape constraints, uniqueness, supersession |
+| `tests/validate_reject_payment_event.sql` | 18 | `reject_payment_event` — Phase 5c payment_applied suppression, paid_amount=NULL, open_balance recalc to full billed, Phase 7/8 not suppressed, observation remains trusted, CLM-APC-2000 isolation, constraints, cross-action conflict, supersession |
 
-**Total numeric checks: 129** (structure checks in validate_schema.sql not counted)
+**Total numeric checks: 147** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
 manually before running the test body. The `tests/RUNBOOK.md` documents the run order.
@@ -947,14 +1038,18 @@ Deliver:
 
 ## Immediate Next Action
 
-**Tasks 001 through 004E are complete.**
+**Tasks 001 through 005G are complete.**
 
-The schema layer (migrations 001–004), deterministic reconciler (9 phases +
-Phase 0.5), five reviewer action categories (payment-event confirmation,
-observation confirm/reject/mark_duplicate, corrected-value attachment and
-supersession), and corrected-value replacement ergonomics are all proven on
-synthetic data across 52 numeric validation checks across 5 suites — all PASS
-in a disposable Supabase project.
+The schema layer (migrations 001–010), deterministic reconciler (9 phases +
+Phase 0.5), and nine reviewer action categories are all proven on synthetic
+data across 147 numeric validation checks across 14 suites — all PASS in a
+disposable Supabase project.
+
+**Proven reviewer actions:** `confirm_payment_event`, `reject_payment_event`,
+`confirm_observation`, `reject_observation`, `mark_duplicate`,
+`attach_corrected_value` (payment, contractual adjustment, billed amount),
+`dismiss_short_pay`, `confirm_short_pay`, `request_more_evidence`,
+`mark_position_needs_correction`, `mark_position_resolved`.
 
 The next slice should come from Phase 3 or Phase 4 of the roadmap above:
 
