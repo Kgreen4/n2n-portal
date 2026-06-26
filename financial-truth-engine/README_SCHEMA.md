@@ -1,7 +1,7 @@
 # Financial Truth Engine — Schema (README_SCHEMA)
 
-**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`, `migrations/006_confirm_short_pay_constraints.sql`, `migrations/007_request_more_evidence_constraints.sql`, `migrations/008_mark_position_needs_correction_constraints.sql`, `migrations/009_mark_position_resolved_constraints.sql`, `migrations/010_reject_payment_event_constraints.sql`
-**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + position-level resolutions (dismiss_short_pay + confirm_short_pay + request_more_evidence + mark_position_needs_correction + mark_position_resolved) + payment-event-level suppression (reject_payment_event) (Tasks 001–005G)
+**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`, `migrations/006_confirm_short_pay_constraints.sql`, `migrations/007_request_more_evidence_constraints.sql`, `migrations/008_mark_position_needs_correction_constraints.sql`, `migrations/009_mark_position_resolved_constraints.sql`, `migrations/010_reject_payment_event_constraints.sql`, `migrations/011_assert_check_identity_constraints.sql`
+**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + position-level resolutions (dismiss_short_pay + confirm_short_pay + request_more_evidence + mark_position_needs_correction + mark_position_resolved) + payment-event-level suppression (reject_payment_event) + durable check-identity assertion (assert_check_identity) (Tasks 001–005H)
 **Scope:** Schema, RLS, indexes, comments, constraints. No UI, no extraction code, no PDF parsing.
 
 ---
@@ -215,6 +215,44 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    `short_pay_detected` still emits, with `open_balance_amount` equal to the full billed
    amount. Supersede the row to restore payment-event emission on the next reconciler run.
    See `reconciler/README.md §5.15`.
+17. **`assert_check_identity` resolutions enforce shape and store a canonical check number,
+   but do not change reconciler behavior.** Migration 011 adds four CHECK constraints and one
+   single-action partial unique index to `fte_review_resolutions` for
+   `action = 'assert_check_identity'`:
+   `fte_review_resolutions_aci_needs_notes` (`notes IS NOT NULL AND btrim(notes) <> ''` —
+   asserting a canonical check identity is a financially significant decision that requires
+   an auditable explanation; whitespace-only notes are rejected),
+   `fte_review_resolutions_aci_needs_claim_id` (`claim_id IS NOT NULL` — `fte_claim_events`
+   rows are deleted and re-derived on every Phase 0 reset; `source_claim_event_id` becomes
+   stale after each reprocess; `claim_id` is a hard FK to `fte_claims`, which Phase 0 never
+   deletes, and is the only stable anchor for payment-event-level decisions — mirrors the
+   `claim_id` anchor rationale for position-level actions in migrations 005–009 and the other
+   payment-event-level action in migration 010),
+   `fte_review_resolutions_aci_needs_corrected_identifier`
+   (`corrected_identifier IS NOT NULL AND btrim(corrected_identifier) <> ''` — the assertion
+   without a canonical value is meaningless; the `corrected_identifier` column, added in
+   migration 002, exists specifically to hold the reviewer-supplied canonical check number;
+   asserting identity without providing the corrected value is not a complete resolution), and
+   `fte_review_resolutions_aci_needs_payment_event_type` (`target_type = 'payment_event'` —
+   targets a payment event check/EFT identifier, not an observation or position row; consistent
+   with the other two payment-event-level actions). A single-action partial unique index
+   `idx_fte_resolutions_single_active_check_identity` on `(practice_id, claim_id)
+   WHERE is_superseded = false AND action = 'assert_check_identity'` prevents duplicate
+   simultaneous active assertions for the same claim. Unlike the cross-action index in
+   migration 010 (`confirm_payment_event` + `reject_payment_event`), this is a single-action
+   index because `assert_check_identity` has no logically contradictory counterpart — an
+   active assertion coexists correctly with an active `confirm_payment_event` or
+   `reject_payment_event`. **Reconciler behavior: UNCHANGED.** Phase 0.5 loads the row into
+   `_fte_active_resolutions` (all non-superseded rows are loaded unconditionally) but no
+   downstream phase acts on it. The `payment_applied` event still emits; `open_balance_amount`
+   and `reconciliation_status` are not modified; Phase 7 queue routing is not suppressed;
+   Phase 8 `short_pay_detected` event is not suppressed. `review_resolutions_applied`
+   increments by 1 (reporting counter only). The corrected_identifier is stored in
+   `fte_review_resolutions` as a durable reviewer note for human review and future phase
+   integration (e.g., a future Phase 5c variant that substitutes the canonical check number
+   when grouping payment events). To replace an active assertion: UPDATE SET
+   `is_superseded = true`, then INSERT a new row with the revised `corrected_identifier`.
+   See `reconciler/README.md §5.16`.
 
 ---
 
