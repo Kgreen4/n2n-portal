@@ -73,7 +73,7 @@ produces `suspected_summary_row`, even if failure_mode is also set.
 | **5c** | Emit `payment_applied` events from TRUSTED `payment` observations. Each event gets two `supports` evidence links: (1) the page observation, and (2) the matching `check_payment` stub (if one exists with `metadata->>'check_number' = check_eft_identifier`). A reviewer-supplied corrected payment amount is applied via `COALESCE` — see §4. |
 | **5** (late/retry) | For each `late_retry_page_contradiction` review entry that has an `observation_id`, find the `payment_applied` event for the same claim, then: **(a)** if an active `confirm_payment_event` resolution exists for the claim in `_fte_active_resolutions`, mark the event `reconciled`; otherwise mark it `ambiguous`; **(b)** wire the review entry's `claim_event_id` (unconditional); **(c)** insert a `contradicts` evidence link (unconditional — the contradiction record is always preserved even when the reviewer has confirmed the payment). If no payment event exists the loop is a no-op for that entry. |
 | **6** | Derive `fte_financial_positions` for every claim that has at least one event OR at least one review queue entry. `reconciliation_status` CASE (evaluated in priority order): (1) no events → `in_review`; (2) any linked event has `reconciliation_status = 'ambiguous'` → `in_review` — **this applies even when the math balances to zero** (gap = 0). Financial truth cannot be finalized while contradicting evidence is unresolved; the claim must go to human review. Note: `'ambiguous'` is valid on `fte_claim_events` but is **not** a valid `fte_financial_positions.reconciliation_status` value (schema CHECK forbids it) — `in_review` is the correct surrogate; (3) any unbalanced event or positive open balance → `unbalanced`; (4) else → `balanced`. `open_balance_amount` is NULL when billed is unknown; otherwise `GREATEST(0, billed − adj − paid)`. `position_confidence_score` = MIN(confidence_score) across non–short_pay events, falling back to `0.0000`. |
-| **7** | Route every `unbalanced` or `in_review` position to `fte_review_queue` with reason `unbalanced_financial_position`. **dismiss_short_pay / confirm_short_pay suppression:** `unbalanced` positions are skipped when an active `dismiss_short_pay` or `confirm_short_pay` resolution exists for the claim in `_fte_active_resolutions`. The `fte_financial_positions` row is NOT changed — `reconciliation_status = 'unbalanced'` and `open_balance_amount` remain correct. `in_review` positions are always routed regardless of any resolution. |
+| **7** | Route every `unbalanced` or `in_review` position to `fte_review_queue` with reason `unbalanced_financial_position`. **dismiss_short_pay / confirm_short_pay / mark_position_resolved suppression:** `unbalanced` positions are skipped when an active `dismiss_short_pay`, `confirm_short_pay`, or `mark_position_resolved` resolution exists for the claim in `_fte_active_resolutions`. The `fte_financial_positions` row is NOT changed — `reconciliation_status = 'unbalanced'` and `open_balance_amount` remain correct. `in_review` positions are always routed regardless of any resolution. |
 | **8** | For each unbalanced position with `open_balance_amount > 0`, emit a `short_pay_detected` event and inherit the `derived_from` evidence link from the corresponding `claim_adjudicated` event. **dismiss_short_pay suppression only:** the `short_pay_detected` event is not emitted when an active `dismiss_short_pay` resolution exists for the claim. `confirm_short_pay` does NOT suppress this event — the short-pay signal remains active so downstream workflows can act on the confirmed recovery need. The position row retains `reconciliation_status = 'unbalanced'` and the correct `open_balance_amount` — math is preserved as financial truth. |
 | **9** | Insert a `fte_analysis_runs` row with status `succeeded` and return a summary JSON with keys `run_id`, `practice_id`, `claims_processed`, `events_emitted`, `positions_derived`, `review_entries`, `review_resolutions_applied`. |
 
@@ -533,6 +533,111 @@ simultaneously for the same claim — there is no conflict index between them.
 using the 96c5c357 fixture (CLM-APC-1000 as the primary vehicle, CLM-APC-2000 as
 the shape-violation and isolation target). Requires migration 008 applied before
 running (check 9 uses the partial unique index).
+
+---
+
+### 5.14 `mark_position_resolved` — Phase 7 queue suppression for `unbalanced` positions
+
+`mark_position_resolved` is a durable position-level reviewer decision that
+signals: "I have reviewed this position and determined it no longer needs generic
+queue routing — without committing to write it off (`dismiss_short_pay`) or
+actively pursue recovery (`confirm_short_pay`)." It requires an explanatory note
+so the reasoning is auditable.
+
+#### Reconciler behavior (Phase 7 only)
+
+When a non-superseded `mark_position_resolved` row is active for a claim, Phase 7
+skips the `unbalanced_financial_position` review queue row for that claim. It is
+added to the existing suppression IN-list alongside `dismiss_short_pay` and
+`confirm_short_pay`:
+
+```sql
+fp.reconciliation_status <> 'unbalanced'
+OR NOT EXISTS (
+  SELECT 1
+  FROM   _fte_active_resolutions ar
+  WHERE  ar.claim_id = fp.claim_id
+    AND  ar.action   IN ('dismiss_short_pay', 'confirm_short_pay',
+                         'mark_position_resolved')
+)
+```
+
+No other phase is affected:
+
+- **Phase 0** — deletes `fte_financial_positions` / `fte_claim_events` / `fte_review_queue` / `fte_event_evidence` as normal. `fte_review_resolutions` is never touched by Phase 0.
+- **Phase 0.5** — loads the `mark_position_resolved` row into `_fte_active_resolutions` alongside all other non-superseded resolutions (unconditional load).
+- **Phase 6** — `reconciliation_status` and `open_balance_amount` are derived from events. `mark_position_resolved` does not change Phase 6 math. A resolved claim retains `reconciliation_status = 'unbalanced'` and the correct `open_balance_amount` — financial truth is preserved.
+- **Phase 7** — suppresses the queue row for `unbalanced` positions only (see above). `in_review` positions are **never** suppressed — the Phase 7 guard explicitly checks `reconciliation_status = 'unbalanced'`. Unknown or ambiguous financial state must remain visible regardless of any resolution.
+- **Phase 8** — `short_pay_detected` event emission is **not** suppressed. Contrast with `dismiss_short_pay`, which suppresses both Phase 7 and Phase 8. `mark_position_resolved` (and `confirm_short_pay`) preserve Phase 8 so downstream workflows can act on the confirmed short-pay signal if needed.
+
+#### Shape constraints (migration 009)
+
+| Constraint | Rule |
+|---|---|
+| `fte_review_resolutions_mpr_needs_notes` | `notes IS NOT NULL AND btrim(notes) <> ''` when `action = 'mark_position_resolved'` |
+| `fte_review_resolutions_mpr_needs_claim_id` | `claim_id IS NOT NULL` when `action = 'mark_position_resolved'` |
+| `fte_review_resolutions_mpr_needs_position_type` | `target_type = 'position'` when `action = 'mark_position_resolved'` |
+| `idx_fte_resolutions_single_active_position_resolved` | `UNIQUE (practice_id, claim_id) WHERE is_superseded = false AND action = 'mark_position_resolved'` — at most one active resolved marker per claim |
+
+**Why notes is required:** `mark_position_resolved` records a subjective workflow
+closure decision. Without a written explanation the reviewer's reasoning is lost.
+A future reviewer or auditor cannot determine why the position was considered
+resolved (e.g., "claim paid in full per ERA 2026-06-01", "write-off approved by
+billing director").
+
+**Why `claim_id` is the stable anchor:** `fte_financial_positions` rows are deleted
+by Phase 0 on every reprocess; `source_position_id` becomes stale after each run.
+`claim_id` is a hard FK to `fte_claims`, which Phase 0 never deletes. Identical
+rationale to `dismiss_short_pay` (§5.1), `confirm_short_pay` (§5.6),
+`request_more_evidence` (§5.12), and `mark_position_needs_correction` (§5.13).
+
+**Why a partial unique index (not a cross-action conflict index):** `mark_position_resolved`
+has no logical conflict partner in the current action vocabulary. It coexists
+correctly with an active `dismiss_short_pay` or `confirm_short_pay` for the same
+claim — all three suppress Phase 7 for `unbalanced` positions (different intent,
+same suppression effect). The index only prevents duplicate simultaneous active
+resolved markers.
+
+#### Supersession workflow
+
+To replace an active `mark_position_resolved`:
+
+```sql
+-- Step 1: supersede the current active row
+UPDATE fte_review_resolutions
+SET    is_superseded = true
+WHERE  practice_id   = '<practice_id>'
+  AND  claim_id      = '<claim_id>'
+  AND  action        = 'mark_position_resolved'
+  AND  is_superseded = false;
+
+-- Step 2: insert the new marker (now the only active row)
+INSERT INTO fte_review_resolutions (
+  practice_id, claim_id, action, target_type, notes, resolved_by
+) VALUES (
+  '<practice_id>', '<claim_id>', 'mark_position_resolved', 'position',
+  '<updated rationale>', '<reviewer_id>'
+);
+```
+
+Superseded rows are retained as an audit trail. Phase 0.5 loads only
+`WHERE is_superseded = false`, so the superseded row has no reconciler effect.
+
+#### Contrast with all other position-level actions
+
+| Action | Phase 7 (`unbalanced`) | Phase 7 (`in_review`) | Phase 8 (`short_pay_detected`) | Notes required |
+|---|---|---|---|---|
+| `dismiss_short_pay` | Suppressed | Never suppressed | **Suppressed** | No |
+| `confirm_short_pay` | Suppressed | Never suppressed | Preserved | No |
+| `mark_position_resolved` | **Suppressed** | **Never suppressed** | **Preserved** | **Yes** |
+| `request_more_evidence` | Not suppressed | Not suppressed | Not suppressed | Yes |
+| `mark_position_needs_correction` | Not suppressed | Not suppressed | Not suppressed | Yes |
+
+**Validation:** `tests/validate_mark_position_resolved.sql` — 14 checks using the
+96c5c357 fixture (CLM-APC-1000 as the primary vehicle for Phase 7 suppression and
+Phase 8 preservation; CLM-APC-2000 as the `in_review` invariant and shape-violation
+target). Requires migration 009 applied before running (check 11 uses the partial
+unique index).
 
 ---
 

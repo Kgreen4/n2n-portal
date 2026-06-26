@@ -401,6 +401,69 @@ disposable Supabase project.
 
 ---
 
+### Task 005F — `mark_position_resolved` Phase 7 Queue Suppression ✅ Complete
+
+**Delivered:**
+- `migrations/009_mark_position_resolved_constraints.sql` — 3 CHECK constraints and 1
+  partial unique index enforcing valid shape for `mark_position_resolved`:
+  `fte_review_resolutions_mpr_needs_notes` (`notes IS NOT NULL AND btrim(notes) <> ''` —
+  whitespace-only notes rejected), `fte_review_resolutions_mpr_needs_claim_id` (`claim_id
+  IS NOT NULL` — stable anchor, `source_position_id` goes stale on Phase 0), and
+  `fte_review_resolutions_mpr_needs_position_type` (`target_type = 'position'`). Partial
+  unique index `idx_fte_resolutions_single_active_position_resolved` on
+  `(practice_id, claim_id) WHERE is_superseded = false AND action =
+  'mark_position_resolved'` prevents simultaneous duplicate active resolved markers for
+  the same claim.
+- `reconciler/fte_reconcile.sql` (Phase 7 only modified) — `'mark_position_resolved'`
+  added to the suppression IN-list alongside `'dismiss_short_pay'` and
+  `'confirm_short_pay'` in the `unbalanced` position guard. No other phase touched.
+- `tests/validate_mark_position_resolved.sql` — 14-check ROLLBACK-wrapped suite. CLM-APC-1000
+  (unbalanced, `short_pay_detected`, queued) as primary vehicle — proves Phase 7 IS
+  suppressed (check 9) and Phase 8 is preserved (check 8) when `mark_position_resolved`
+  is active. CLM-APC-2000 as `in_review` invariant and shape-violation target. Checks:
+  baseline state (1–5), valid insert + reconciler rerun (6–10), unique-violation on second
+  active marker (11), notes/claim_id/target_type constraint violations (12–13), supersession
+  + in_review invariant (14). Brings total to 129 numeric checks across 13 suites.
+- `tests/run_all_validations.sql` (updated) — added `\i tests/validate_mark_position_resolved.sql`
+  block; updated header prerequisites to include migration 009; updated expected count
+  from 115 to 129 and from twelve to thirteen suites.
+- `tests/RUNBOOK.md` (updated) — added suite table row (14 checks), fixture dependency row
+  (96c5c357), migration 009 to first-time setup (psql + Supabase SQL Editor step 9,
+  reconciler shifted to step 10), step 15 to Supabase manual sequence, updated totals to
+  129 / thirteen suites.
+- `README.md` (updated) — status line Tasks 001–005F, eighth action category bullet
+  (`mark_position_resolved`), suite table row, check count 115→129 / 12→13 suites.
+- `README_SCHEMA.md` (updated) — migrations frontmatter (migration 009 appended), status
+  line Tasks 001–005F, Invariant 15 (`mark_position_resolved` Phase 7 suppression for
+  `unbalanced` only, Phase 8 preserved, `in_review` invariant, notes/claim_id/target_type
+  constraints, uniqueness, supersession, no financial math changes, migration 009),
+  How-To-Apply psql block (migration 009 + `validate_mark_position_resolved.sql`).
+- `reconciler/README.md` (updated) — Phase 7 table row extended to mention
+  `mark_position_resolved` in the suppression IN-list; §5.14 `mark_position_resolved`
+  added: Phase 7-only behavior per phase, DB constraints table (migration 009), `claim_id`
+  anchor rationale, partial-unique-index rationale (no cross-action conflict partner),
+  supersession workflow SQL, contrast table with all other position-level actions,
+  validation suite reference.
+- `NEXT_STEPS.md` (this file) — Task 005F entry and Current Capabilities/Suites updates.
+
+**Reconciler behavior: Phase 7 only.** `reconciler/fte_reconcile.sql` was modified in
+Phase 7 only — `'mark_position_resolved'` added to the `IN('dismiss_short_pay',
+'confirm_short_pay', 'mark_position_resolved')` IN-list in the `unbalanced` position
+suppression guard. No other phase was touched. Phase 6 math (`reconciliation_status`,
+`open_balance_amount`) is unchanged. Phase 8 `short_pay_detected` event emission is
+unchanged (not suppressed). `in_review` positions are never suppressed — the guard checks
+`fp.reconciliation_status <> 'unbalanced'` first. Financial truth is preserved.
+
+**Safety:** no PHI, no real patient data, no production data, no legacy EOB DB or code
+accessed. No new `reconciliation_status` values. No new queue reason values. No new claim
+event types. No fixture files modified. No frozen files touched (migrations 001–008,
+fixtures, all existing test files, and all CODEX_TASK_*.md files are unchanged). All
+shape enforcement is DB-level (migration 009 constraints + partial unique index). Tested
+via ROLLBACK-wrapped 14-check suite against synthetic 96c5c357 fixture in a disposable
+Supabase project.
+
+---
+
 ### Task 005C — `confirm_position_balanced` — Planning/Docs Only ✅ Decision Recorded
 
 **Decision: deferred. `confirm_position_balanced` is not implemented.**
@@ -524,7 +587,7 @@ project accessed.
 
 ## Current Capabilities
 
-As of Task 005E complete (2026-06-24), the FTE can:
+As of Task 005F complete (2026-06-25), the FTE can:
 
 - **Represent the full claim ledger.** Eleven tables covering practices, evidence,
   observations, claims, claim events, event-evidence audit links, financial positions,
@@ -595,6 +658,18 @@ As of Task 005E complete (2026-06-24), the FTE can:
   suppresses Phase 8); no claim events emitted; financial math unchanged. Supersede the
   row once the underlying correction is applied (e.g. via `attach_corrected_value` on the
   affected observation). Proven across 12 validation checks (Task 005E).
+- **Mark a position as resolved.** `mark_position_resolved` records a durable reviewer
+  decision that a position no longer needs generic queue routing — without committing to
+  write it off (`dismiss_short_pay`) or actively pursue recovery (`confirm_short_pay`).
+  Requires a non-null, non-blank `notes` field (the reviewer's rationale) and a stable
+  `claim_id` anchor. At most one active resolved marker per claim (partial unique index,
+  migration 009). Phase 7 queue routing is suppressed for `unbalanced` positions only
+  (added to the `dismiss_short_pay` + `confirm_short_pay` IN-list); `in_review` positions
+  are never suppressed — the guard is `unbalanced`-only. Phase 8 `short_pay_detected`
+  event is preserved (contrast: `dismiss_short_pay` suppresses Phase 8). Position
+  `reconciliation_status` and `open_balance_amount` are unchanged. Financial math is
+  unchanged. Supersede the row to restore queue visibility. Proven across 14 validation
+  checks (Task 005F).
 
 **Not yet implemented:** extraction layer (AI observations from real PDFs), UI,
 API endpoints, Edge Functions, denial/contract intelligence.
@@ -620,8 +695,9 @@ Apply migrations and register the reconciler before running.
 | `tests/validate_confirm_short_pay.sql` | 10 | `confirm_short_pay` — Phase 7 suppression only, short_pay_detected preserved, conflict-prevention index, CLM-APC-2000 isolation, supersession |
 | `tests/validate_request_more_evidence.sql` | 12 | `request_more_evidence` — durable note only, no reconciler/queue/event change, notes/claim_id/target_type shape constraints, uniqueness, CLM-APC-1000 isolation |
 | `tests/validate_mark_position_needs_correction.sql` | 12 | `mark_position_needs_correction` — durable correction-needed marker, no reconciler/queue/event change, notes/claim_id/target_type shape constraints, uniqueness, CLM-APC-2000 isolation |
+| `tests/validate_mark_position_resolved.sql` | 14 | `mark_position_resolved` — Phase 7 queue suppression for unbalanced only, Phase 8 preserved, in_review invariant, notes/claim_id/target_type shape constraints, uniqueness, supersession |
 
-**Total numeric checks: 115** (structure checks in validate_schema.sql not counted)
+**Total numeric checks: 129** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
 manually before running the test body. The `tests/RUNBOOK.md` documents the run order.
