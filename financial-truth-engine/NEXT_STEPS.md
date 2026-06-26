@@ -855,17 +855,19 @@ As of Task 005G complete (2026-06-25), the FTE can:
   one physical check split across multiple payment rows because different EOB pages
   display different per-page reference/control numbers). Requires a non-null, non-blank
   `notes` field (the reviewer's rationale for the canonical identifier), a stable
-  `claim_id` anchor, and a non-blank `corrected_identifier` (the canonical check number
-  — an assertion without a value is meaningless). `target_type` must be `'payment_event'`.
-  A single-action partial unique index (migration 011) prevents duplicate simultaneous
-  active assertions for the same claim (no contradictory counterpart exists in the current
+  `claim_id` anchor (claim context), a non-null `observation_id` anchor (the specific
+  payment observation — a FK to `fte_observations`, which Phase 0 never deletes), and a
+  non-blank `corrected_identifier` (the canonical check number — an assertion without a
+  value is meaningless). `target_type` must be `'payment_event'`. A single-action partial
+  unique index (migration 011) prevents duplicate simultaneous active assertions for the
+  same payment observation (no contradictory counterpart exists in the current
   action vocabulary, so a cross-action index is not applicable). **All reconciler phases
   are UNCHANGED:** `payment_applied` still emits (Phase 5c), `open_balance_amount` and
   `reconciliation_status` are unchanged (Phase 6), Phase 7 queue routing is NOT suppressed,
   Phase 8 `short_pay_detected` is NOT suppressed. The `corrected_identifier` is stored
   in `fte_review_resolutions` for human review and future phase integration (Phase 5c
   check-number substitution is not yet wired). Supersede the row to replace the canonical
-  identifier. Proven across 12 validation checks (Task 005H).
+  identifier. Proven across 13 validation checks (Task 005H).
 
 **Not yet implemented:** extraction layer (AI observations from real PDFs), UI,
 API endpoints, Edge Functions, denial/contract intelligence.
@@ -893,9 +895,9 @@ Apply migrations and register the reconciler before running.
 | `tests/validate_mark_position_needs_correction.sql` | 12 | `mark_position_needs_correction` — durable correction-needed marker, no reconciler/queue/event change, notes/claim_id/target_type shape constraints, uniqueness, CLM-APC-2000 isolation |
 | `tests/validate_mark_position_resolved.sql` | 14 | `mark_position_resolved` — Phase 7 queue suppression for unbalanced only, Phase 8 preserved, in_review invariant, notes/claim_id/target_type shape constraints, uniqueness, supersession |
 | `tests/validate_reject_payment_event.sql` | 18 | `reject_payment_event` — Phase 5c payment_applied suppression, paid_amount=NULL, open_balance recalc to full billed, Phase 7/8 not suppressed, observation remains trusted, CLM-APC-2000 isolation, constraints, cross-action conflict, supersession |
-| `tests/validate_assert_check_identity.sql` | 12 | `assert_check_identity` — durable note only, payment_applied not suppressed, position/balance unchanged, corrected_identifier stored, notes/claim_id/corrected_identifier/target_type shape constraints, single-action uniqueness, CLM-APC-2000 isolation, supersession |
+| `tests/validate_assert_check_identity.sql` | 13 | `assert_check_identity` — durable note only, payment_applied not suppressed, position/balance unchanged, corrected_identifier stored, notes/claim_id/observation_id/corrected_identifier/target_type shape constraints, per-observation uniqueness, CLM-APC-2000 isolation, supersession |
 
-**Total numeric checks: 159** (structure checks in validate_schema.sql not counted)
+**Total numeric checks: 160** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
 manually before running the test body. The `tests/RUNBOOK.md` documents the run order.
@@ -1149,7 +1151,7 @@ Deliver:
 
 The schema layer (migrations 001–011), deterministic reconciler (9 phases +
 Phase 0.5), and ten reviewer action categories are all proven on synthetic
-data across 159 numeric validation checks across 15 suites — all PASS in a
+data across 160 numeric validation checks across 15 suites — all PASS in a
 disposable Supabase project.
 
 **Proven reviewer actions:** `confirm_payment_event`, `reject_payment_event`,
