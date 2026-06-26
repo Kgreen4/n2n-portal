@@ -1,7 +1,7 @@
 # Financial Truth Engine — Schema (README_SCHEMA)
 
-**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`, `migrations/006_confirm_short_pay_constraints.sql`, `migrations/007_request_more_evidence_constraints.sql`, `migrations/008_mark_position_needs_correction_constraints.sql`
-**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + position-level resolutions (dismiss_short_pay + confirm_short_pay + request_more_evidence + mark_position_needs_correction) (Tasks 001–005E)
+**Migrations:** `migrations/001_create_financial_truth_schema.sql`, `migrations/002_add_review_resolutions.sql`, `migrations/003_add_observation_resolution_target.sql`, `migrations/004_corrected_value_constraints.sql`, `migrations/005_dismiss_short_pay_constraints.sql`, `migrations/006_confirm_short_pay_constraints.sql`, `migrations/007_request_more_evidence_constraints.sql`, `migrations/008_mark_position_needs_correction_constraints.sql`, `migrations/009_mark_position_resolved_constraints.sql`
+**Status:** Ledger foundation + review resolutions + observation-level resolution constraints + corrected-value enforcement + position-level resolutions (dismiss_short_pay + confirm_short_pay + request_more_evidence + mark_position_needs_correction + mark_position_resolved) (Tasks 001–005F)
 **Scope:** Schema, RLS, indexes, comments, constraints. No UI, no extraction code, no PDF parsing.
 
 ---
@@ -159,6 +159,30 @@ tables even if temporarily deployed into the same Supabase project. The migratio
    (contrast: `dismiss_short_pay` suppresses Phase 8; `confirm_short_pay` does not). This
    differs from `request_more_evidence` only in intent — both are durable workflow notes
    with identical reconciler impact (none). See `reconciler/README.md §5.13`.
+15. **`mark_position_resolved` resolutions enforce shape and uniqueness and suppress Phase 7
+   queue routing for `unbalanced` positions only.** Migration 009 adds three CHECK constraints
+   to `fte_review_resolutions` for `action = 'mark_position_resolved'`:
+   `fte_review_resolutions_mpr_needs_notes` (`notes IS NOT NULL AND btrim(notes) <> ''` —
+   the reviewer's rationale is required; a resolved marker without an explanation is not
+   auditable), `fte_review_resolutions_mpr_needs_claim_id` (`claim_id IS NOT NULL` —
+   `fte_financial_positions` rows are deleted by Phase 0; only `claim_id`, a hard FK to
+   `fte_claims`, is a stable anchor), and `fte_review_resolutions_mpr_needs_position_type`
+   (`target_type = 'position'`). A partial unique index
+   `idx_fte_resolutions_single_active_position_resolved` on `(practice_id, claim_id)
+   WHERE is_superseded = false AND action = 'mark_position_resolved'` prevents multiple
+   simultaneous active resolved markers for the same claim. **Phase 7 only:** an active
+   `mark_position_resolved` for a claim whose position has
+   `reconciliation_status = 'unbalanced'` suppresses the `unbalanced_financial_position`
+   review queue row in Phase 7 (added to the existing IN-list alongside `dismiss_short_pay`
+   and `confirm_short_pay`). `in_review` positions are never suppressed — the Phase 7
+   suppression guard explicitly checks `reconciliation_status = 'unbalanced'`; unknown or
+   ambiguous financial state must remain visible. **Phase 8 preserved:** the
+   `short_pay_detected` event is not suppressed by `mark_position_resolved` (contrast:
+   `dismiss_short_pay` suppresses Phase 8; `confirm_short_pay` and `mark_position_resolved`
+   both preserve it). `reconciliation_status` and `open_balance_amount` are unchanged —
+   financial truth is preserved; only queue visibility is affected. To replace an active
+   resolved marker: UPDATE SET `is_superseded = true`, then INSERT a new row.
+   See `reconciler/README.md §5.14`.
 
 ---
 
@@ -202,6 +226,7 @@ psql "$DATABASE_URL" -f migrations/005_dismiss_short_pay_constraints.sql
 psql "$DATABASE_URL" -f migrations/006_confirm_short_pay_constraints.sql
 psql "$DATABASE_URL" -f migrations/007_request_more_evidence_constraints.sql
 psql "$DATABASE_URL" -f migrations/008_mark_position_needs_correction_constraints.sql
+psql "$DATABASE_URL" -f migrations/009_mark_position_resolved_constraints.sql
 
 # Register the reconciler
 psql "$DATABASE_URL" -f reconciler/fte_reconcile.sql
@@ -223,6 +248,7 @@ psql "$DATABASE_URL" -f tests/validate_dismiss_short_pay.sql                 # 9
 psql "$DATABASE_URL" -f tests/validate_confirm_short_pay.sql                 # 96c5c357 fixture required
 psql "$DATABASE_URL" -f tests/validate_request_more_evidence.sql             # 96c5c357 fixture required
 psql "$DATABASE_URL" -f tests/validate_mark_position_needs_correction.sql    # 96c5c357 fixture required
+psql "$DATABASE_URL" -f tests/validate_mark_position_resolved.sql            # 96c5c357 fixture required
 ```
 
 Use the Supabase `service_role` / `postgres` connection. For the Supabase SQL Editor,

@@ -20,6 +20,7 @@
 --   psql "$DATABASE_URL" -f migrations/006_confirm_short_pay_constraints.sql
 --   psql "$DATABASE_URL" -f migrations/007_request_more_evidence_constraints.sql
 --   psql "$DATABASE_URL" -f migrations/008_mark_position_needs_correction_constraints.sql
+--   psql "$DATABASE_URL" -f migrations/009_mark_position_resolved_constraints.sql
 --   psql "$DATABASE_URL" -f reconciler/fte_reconcile.sql
 --
 -- Migrations are one-time DDL. Do not include them here — rerunning them
@@ -27,7 +28,7 @@
 -- The reconciler (CREATE OR REPLACE FUNCTION) is safe to rerun; do so
 -- whenever fte_reconcile.sql changes.
 --
--- Expected output: 115 PASS NOTICE lines across twelve suites.
+-- Expected output: 129 PASS NOTICE lines across thirteen suites.
 -- A FAIL raises an EXCEPTION that aborts the current suite's transaction.
 -- Subsequent \i calls still execute — scroll up to find any EXCEPTION output.
 --
@@ -102,5 +103,9 @@
 \i tests/validate_mark_position_needs_correction.sql
 
 \echo ''
-\echo '=== All suites complete. Expected: 115 PASS checks. ==='
+\echo '--- validate_mark_position_resolved ---'
+\i tests/validate_mark_position_resolved.sql
+
+\echo ''
+\echo '=== All suites complete. Expected: 129 PASS checks. ==='
 \echo ''

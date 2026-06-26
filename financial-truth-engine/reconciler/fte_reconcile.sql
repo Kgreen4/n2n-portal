@@ -564,17 +564,23 @@ BEGIN
     AND (
       -- Only suppress queue routing for unbalanced positions;
       -- in_review positions always route regardless of any resolution.
-      -- dismiss_short_pay and confirm_short_pay both suppress the generic
-      -- unbalanced-position queue row: dismiss because the reviewer has
-      -- decided not to pursue it; confirm because the reviewer has already
-      -- triaged it and confirmed the short pay is real/actionable.
-      -- Neither changes Phase 6 math or the position row itself.
+      -- dismiss_short_pay, confirm_short_pay, and mark_position_resolved all
+      -- suppress the generic unbalanced-position queue row: dismiss because
+      -- the reviewer has decided not to pursue it; confirm because the
+      -- reviewer has triaged it and confirmed the short pay is real/actionable;
+      -- mark_position_resolved because the reviewer has reviewed the position
+      -- and determined it no longer needs generic queue routing (without
+      -- committing to dismiss or pursue).  None of these changes Phase 6 math
+      -- or the position row itself.  Phase 8 (short_pay_detected) is suppressed
+      -- only by dismiss_short_pay — confirm_short_pay and mark_position_resolved
+      -- both preserve the event.
       fp.reconciliation_status <> 'unbalanced'
       OR NOT EXISTS (
         SELECT 1
         FROM   _fte_active_resolutions ar
         WHERE  ar.claim_id = fp.claim_id
-          AND  ar.action   IN ('dismiss_short_pay', 'confirm_short_pay')
+          AND  ar.action   IN ('dismiss_short_pay', 'confirm_short_pay',
+                               'mark_position_resolved')
       )
     );
 
