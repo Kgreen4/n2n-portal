@@ -2,7 +2,7 @@
 
 **Status:** Execution checklist  
 **Created:** 2026-06-17  
-**Updated:** 2026-06-25
+**Updated:** 2026-06-26
 **Purpose:** Start the Financial Truth Engine cleanly while preserving the current EOB project as a reference only.
 
 ---
@@ -543,6 +543,96 @@ action partial unique index). Tested via ROLLBACK-wrapped 15-check suite against
 
 ---
 
+### Task 005H — `assert_check_identity` Shape Constraints and Validation ✅ Complete
+
+**Delivered:**
+- `migrations/011_assert_check_identity_constraints.sql` — 5 CHECK constraints and 1
+  partial unique index enforcing valid shape for `assert_check_identity`:
+  `fte_review_resolutions_aci_needs_notes` (`notes IS NOT NULL AND btrim(notes) <> ''` —
+  whitespace-only notes rejected; the reviewer must record why the asserted identifier is
+  canonical), `fte_review_resolutions_aci_needs_claim_id` (`claim_id IS NOT NULL` —
+  `source_claim_event_id` goes stale on Phase 0 reset; `claim_id` is a hard FK to
+  `fte_claims`, never deleted by Phase 0; provides claim context),
+  `fte_review_resolutions_aci_needs_observation_id` (`observation_id IS NOT NULL` — a claim
+  may have multiple payment observations; the reviewer must anchor to a specific observed
+  payment row; `observation_id` is a FK to `fte_observations`, the evidence layer never
+  deleted by Phase 0; `claim_id` provides claim context, `observation_id` provides the
+  specific payment-observation anchor),
+  `fte_review_resolutions_aci_needs_corrected_identifier`
+  (`corrected_identifier IS NOT NULL AND btrim(corrected_identifier) <> ''` — an identity
+  assertion without a canonical identifier is meaningless), and
+  `fte_review_resolutions_aci_needs_payment_event_type` (`target_type = 'payment_event'`).
+  Partial unique index `idx_fte_resolutions_single_active_check_identity_observation` on
+  `(practice_id, observation_id) WHERE is_superseded = false AND action = 'assert_check_identity'`
+  prevents duplicate simultaneous active assertions for the same payment observation
+  (per-observation, not per-claim, because a claim may have multiple payment observations,
+  each independently needing an assertion). Single-action index (not cross-action) because
+  `assert_check_identity` has no logically contradictory counterpart in the current
+  action vocabulary.
+- `tests/validate_assert_check_identity.sql` — 13-check ROLLBACK-wrapped suite.
+  CLM-APC-1000 (`c1a90000-0000-4000-8000-000000001000`, practice
+  `96000000-0000-4000-8000-0000000000fe`) with payment observation
+  `0b590000-0000-4000-8000-0000000000a2` as primary vehicle — baseline:
+  billed=$1,600.00, paid=$351.89, open_balance=$1,248.11, `unbalanced`,
+  `review_resolutions_applied=0`; with active `assert_check_identity`
+  (claim_id + observation_id=a2, corrected_identifier='CK-0001'):
+  `review_resolutions_applied=1`, `payment_applied` still emits (Phase 5c unchanged),
+  position still `unbalanced` at `open_balance_amount=$1,248.11` (durable note only — no
+  reconciler phase changes), `corrected_identifier` stored correctly. CLM-APC-2000 obs
+  (b1, b2, b3) as isolation vehicle for constraint checks.
+  Check 7: duplicate active assertion on same `(practice_id, observation_id=a2)` →
+  unique_violation; Check 8: blank corrected_identifier (obs b1) → check_violation;
+  Check 9: blank notes (obs b2) → check_violation; Check 10: null claim_id (obs b3) →
+  check_violation; Check 11: null observation_id → check_violation; Check 12: wrong
+  target_type='observation' (obs a1, the billed_amount obs) → check_violation. Check 13
+  proves supersession: UPDATE is_superseded=true for obs a2, INSERT new row for obs a2
+  with corrected_identifier='CK-0002'; `review_resolutions_applied=1`, one active row,
+  new identifier stored. Brings total to 160 numeric checks across 15 suites.
+- `tests/run_all_validations.sql` (updated) — added `\i tests/validate_assert_check_identity.sql`
+  block; updated header prerequisites to include migration 011; updated expected count
+  from 147 to 160 and from fourteen to fifteen suites.
+- `tests/RUNBOOK.md` (updated) — added suite table row (13 checks), fixture dependency row
+  (96c5c357), migration 011 to first-time setup (psql + Supabase SQL Editor step 11),
+  step 17 to Supabase manual sequence, updated totals to 160 / fifteen suites.
+- `README.md` (updated) — status line Tasks 001–005H, tenth action category bullet
+  (`assert_check_identity`), suite table row (13 checks), check count 147→160 / 14→15 suites.
+- `README_SCHEMA.md` (updated) — migrations frontmatter (migration 011 appended), status
+  line Tasks 001–005H, Invariant 17 (`assert_check_identity` — 5 CHECK constraints including
+  `observation_id IS NOT NULL`, per-observation uniqueness rationale, single-action index
+  `idx_fte_resolutions_single_active_check_identity_observation` on `(practice_id, observation_id)`,
+  reconciler-unchanged invariant across all phases, corrected_identifier storage purpose,
+  supersession workflow, reference to `reconciler/README.md §5.16`).
+- `reconciler/README.md` (updated) — `assert_check_identity` row added to §5.14 contrast
+  table; §5.16 added documenting `assert_check_identity` in full (overview, Root Cause #7
+  motivating use case, reconciler-unchanged behavior per phase, migration 011 DB constraints
+  table with 5 CHECK constraints + observation_id row, corrected_identifier rationale, notes
+  rationale, claim_id anchor rationale, observation_id anchor rationale, single-action index
+  on `(practice_id, observation_id)` rationale vs. cross-action, supersession workflow SQL
+  with observation_id, future extension note for Phase 5c check-number substitution,
+  coexistence table vs. confirm/reject_payment_event, 13-check validation suite reference).
+- `NEXT_STEPS.md` (this file) — Task 005H entry and Current Capabilities/Suites updates.
+
+**Reconciler behavior: NONE.** No reconciler phase was modified. No frozen file was
+touched. `assert_check_identity` is a durable note only: the row is loaded by Phase 0.5
+(incrementing `review_resolutions_applied`) but no downstream phase acts on it. Phase 5c
+`payment_applied` event still emits (contrast with `reject_payment_event`, which suppresses
+Phase 5c). Phase 6 open_balance_amount and reconciliation_status are unchanged — financial
+truth is preserved exactly. Phase 7 and Phase 8 are not suppressed. The canonical check
+identifier is stored in `fte_review_resolutions.corrected_identifier` for human review
+and future Phase 5c integration.
+
+**Safety:** no PHI, no real patient data, no production data, no legacy EOB DB or code
+accessed. No new `reconciliation_status` values. No new queue reason values. No new claim
+event types. `assert_check_identity` was NOT added to `_fte_suppressed_observations`
+(observation suppression is a Phase 1 action; `assert_check_identity` is a durable note
+with no phase suppression). No fixture files modified. No frozen files touched (migrations
+001–010, reconciler, fixtures, all existing test files, and all CODEX_TASK_*.md files are
+unchanged). All shape enforcement is DB-level (migration 011 constraints + partial unique
+index). Tested via ROLLBACK-wrapped 13-check suite against synthetic 96c5c357 fixture in a
+disposable Supabase project.
+
+---
+
 ### Task 005C — `confirm_position_balanced` — Planning/Docs Only ✅ Decision Recorded
 
 **Decision: deferred. `confirm_position_balanced` is not implemented.**
@@ -760,6 +850,22 @@ As of Task 005G complete (2026-06-25), the FTE can:
   (migration 010) prevents simultaneous active `confirm_payment_event` + `reject_payment_event`
   for the same claim — logically contradictory decisions. Proven across 15 validation
   checks (Task 005G).
+- **Assert check identity.** `assert_check_identity` records the canonical check number
+  for an OCR-garbled or fragmented payment event identifier (Root Cause #7 pattern:
+  one physical check split across multiple payment rows because different EOB pages
+  display different per-page reference/control numbers). Requires a non-null, non-blank
+  `notes` field (the reviewer's rationale for the canonical identifier), a stable
+  `claim_id` anchor, and a non-blank `corrected_identifier` (the canonical check number
+  — an assertion without a value is meaningless). `target_type` must be `'payment_event'`.
+  A single-action partial unique index (migration 011) prevents duplicate simultaneous
+  active assertions for the same claim (no contradictory counterpart exists in the current
+  action vocabulary, so a cross-action index is not applicable). **All reconciler phases
+  are UNCHANGED:** `payment_applied` still emits (Phase 5c), `open_balance_amount` and
+  `reconciliation_status` are unchanged (Phase 6), Phase 7 queue routing is NOT suppressed,
+  Phase 8 `short_pay_detected` is NOT suppressed. The `corrected_identifier` is stored
+  in `fte_review_resolutions` for human review and future phase integration (Phase 5c
+  check-number substitution is not yet wired). Supersede the row to replace the canonical
+  identifier. Proven across 12 validation checks (Task 005H).
 
 **Not yet implemented:** extraction layer (AI observations from real PDFs), UI,
 API endpoints, Edge Functions, denial/contract intelligence.
@@ -787,8 +893,9 @@ Apply migrations and register the reconciler before running.
 | `tests/validate_mark_position_needs_correction.sql` | 12 | `mark_position_needs_correction` — durable correction-needed marker, no reconciler/queue/event change, notes/claim_id/target_type shape constraints, uniqueness, CLM-APC-2000 isolation |
 | `tests/validate_mark_position_resolved.sql` | 14 | `mark_position_resolved` — Phase 7 queue suppression for unbalanced only, Phase 8 preserved, in_review invariant, notes/claim_id/target_type shape constraints, uniqueness, supersession |
 | `tests/validate_reject_payment_event.sql` | 18 | `reject_payment_event` — Phase 5c payment_applied suppression, paid_amount=NULL, open_balance recalc to full billed, Phase 7/8 not suppressed, observation remains trusted, CLM-APC-2000 isolation, constraints, cross-action conflict, supersession |
+| `tests/validate_assert_check_identity.sql` | 12 | `assert_check_identity` — durable note only, payment_applied not suppressed, position/balance unchanged, corrected_identifier stored, notes/claim_id/corrected_identifier/target_type shape constraints, single-action uniqueness, CLM-APC-2000 isolation, supersession |
 
-**Total numeric checks: 147** (structure checks in validate_schema.sql not counted)
+**Total numeric checks: 159** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
 manually before running the test body. The `tests/RUNBOOK.md` documents the run order.
@@ -1038,18 +1145,19 @@ Deliver:
 
 ## Immediate Next Action
 
-**Tasks 001 through 005G are complete.**
+**Tasks 001 through 005H are complete.**
 
-The schema layer (migrations 001–010), deterministic reconciler (9 phases +
-Phase 0.5), and nine reviewer action categories are all proven on synthetic
-data across 147 numeric validation checks across 14 suites — all PASS in a
+The schema layer (migrations 001–011), deterministic reconciler (9 phases +
+Phase 0.5), and ten reviewer action categories are all proven on synthetic
+data across 159 numeric validation checks across 15 suites — all PASS in a
 disposable Supabase project.
 
 **Proven reviewer actions:** `confirm_payment_event`, `reject_payment_event`,
-`confirm_observation`, `reject_observation`, `mark_duplicate`,
-`attach_corrected_value` (payment, contractual adjustment, billed amount),
-`dismiss_short_pay`, `confirm_short_pay`, `request_more_evidence`,
-`mark_position_needs_correction`, `mark_position_resolved`.
+`assert_check_identity`, `confirm_observation`, `reject_observation`,
+`mark_duplicate`, `attach_corrected_value` (payment, contractual adjustment,
+billed amount), `dismiss_short_pay`, `confirm_short_pay`,
+`request_more_evidence`, `mark_position_needs_correction`,
+`mark_position_resolved`.
 
 The next slice should come from Phase 3 or Phase 4 of the roadmap above:
 

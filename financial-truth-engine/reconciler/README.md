@@ -778,6 +778,173 @@ constraints).
 
 ---
 
+### 5.16 `assert_check_identity` — durable check-identity note (no reconciler phase changes)
+
+`assert_check_identity` is a **payment-event-level** durable reviewer note that signals:
+"The canonical check number for this payment event is `<corrected_identifier>` — the
+identifier stored in the source extraction is an OCR variant, a per-page reference
+number, or a fragmented sub-identifier that does not represent the physical check."
+The reviewer asserts the correct identity without modifying any ledger amounts.
+
+This action is a **durable note only**: no reconciler phase changes. The corrected
+identifier is stored in `fte_review_resolutions.corrected_identifier` for human
+review and future phase integration (see Future Extension below). Phase 0.5 loads the
+row into `_fte_active_resolutions`, but no downstream phase acts on it — payment events
+still emit, positions and balances are unchanged, and Phase 7/8 are not suppressed.
+
+The primary use case is Root Cause #7 (check fragmentation): one physical check split
+across multiple `eob_payments` rows because EOB pages display different per-page
+reference/control numbers. A reviewer who has confirmed the canonical check number
+records it here so the assertion is auditable and available to future tooling that
+can perform programmatic re-grouping.
+
+#### Reconciler behavior — all phases UNCHANGED
+
+- **Phase 0** — deletes `fte_financial_positions` / `fte_claim_events` / `fte_review_queue` /
+  `fte_event_evidence` as normal. `fte_review_resolutions` is never touched by Phase 0.
+- **Phase 0.5** — loads the `assert_check_identity` row into `_fte_active_resolutions`
+  alongside all other non-superseded resolutions (unconditional load). The row
+  increments the `review_resolutions_applied` counter that Phase 0.5 returns.
+  No additional temp table (like `_fte_rejected_payment_event_claims`) is created —
+  `assert_check_identity` has no downstream phase effect.
+- **Phase 1** — observation classification is unchanged. The `assert_check_identity`
+  action is NOT added to the `_fte_suppressed_observations` IN-list (contrast:
+  `reject_observation`, `mark_duplicate`, `confirm_observation`). The payment
+  observation remains classified as `'trusted'`.
+- **Phase 5c** — `payment_applied` INSERT is not suppressed. Contrast with
+  `reject_payment_event`, which skips the INSERT via `_fte_rejected_payment_event_claims`.
+  `assert_check_identity` makes no change to Phase 5c — the event emits exactly as it
+  would without the resolution.
+- **Phase 6** — `open_balance_amount` and `reconciliation_status` derive from events
+  as normal. An `assert_check_identity` row does not change Phase 6 math. Financial
+  truth is preserved exactly.
+- **Phase 7** — the `unbalanced_financial_position` queue row is NOT suppressed.
+  `assert_check_identity` is not in the `dismiss_short_pay` / `confirm_short_pay` /
+  `mark_position_resolved` IN-list.
+- **Phase 8** — `short_pay_detected` event emission is NOT suppressed.
+
+#### Shape constraints (migration 011)
+
+| Constraint | Rule |
+|---|---|
+| `fte_review_resolutions_aci_needs_notes` | `notes IS NOT NULL AND btrim(notes) <> ''` when `action = 'assert_check_identity'` |
+| `fte_review_resolutions_aci_needs_claim_id` | `claim_id IS NOT NULL` when `action = 'assert_check_identity'` |
+| `fte_review_resolutions_aci_needs_observation_id` | `observation_id IS NOT NULL` when `action = 'assert_check_identity'` |
+| `fte_review_resolutions_aci_needs_corrected_identifier` | `corrected_identifier IS NOT NULL AND btrim(corrected_identifier) <> ''` when `action = 'assert_check_identity'` |
+| `fte_review_resolutions_aci_needs_payment_event_type` | `target_type = 'payment_event'` when `action = 'assert_check_identity'` |
+| `idx_fte_resolutions_single_active_check_identity_observation` | `UNIQUE (practice_id, observation_id) WHERE is_superseded = false AND action = 'assert_check_identity'` — at most one active check identity assertion per payment observation (per-observation, not per-claim, because a claim may have multiple payment observations) |
+
+**Why `corrected_identifier` is required:** an identity assertion without a canonical
+identifier is meaningless — if the reviewer cannot supply the correct check number
+they cannot assert identity. A NULL or blank `corrected_identifier` would store a
+row that looks like an identity assertion but carries no actionable information.
+
+**Why `notes` is required:** consistent with all financially-relevant reviewer actions
+(`request_more_evidence`, `mark_position_needs_correction`, `mark_position_resolved`,
+`reject_payment_event`). The notes field captures the reasoning — e.g., "confirmed
+with payer: check #CK-0001 is the canonical check; page 3 displays the per-page
+remittance reference number instead."
+
+**Why `claim_id` is required:** `fte_claim_events` rows are deleted by Phase 0 on every
+reprocess; `source_claim_event_id` goes stale after the first Phase 0 reset. `claim_id`
+is a hard FK to `fte_claims`, which Phase 0 never deletes, and provides claim context for
+the assertion. Same rationale as all other claim-anchored resolutions (§5.1, §5.6, §5.12,
+§5.13, §5.14, §5.15).
+
+**Why `observation_id` is the durable payment-observation anchor:** a claim may later have
+multiple payment observations (multiple checks, EFT payments, or check-fragmentation
+variants). Uniqueness must therefore be per observation, not per claim — the reviewer is
+asserting the canonical identifier for a specific observed payment row, not for the claim
+as a whole. `observation_id` is a FK to `fte_observations` (evidence layer, never deleted
+by Phase 0), making it the stable, fine-grained anchor. `claim_id` gives claim context;
+`observation_id` gives the specific payment-observation anchor.
+
+**Why a single-action partial unique index on `(practice_id, observation_id)` (not a cross-action index):**
+`assert_check_identity` has no logically contradictory counterpart in the current action
+vocabulary. It coexists correctly with an active `confirm_payment_event` or
+`reject_payment_event` on the same claim — asserting the canonical identifier does not
+conflict with accepting or rejecting the payment event. Per-observation uniqueness is
+correct because a claim may have multiple payment observations, each independently needing
+an assertion. The index only prevents duplicate simultaneous active assertions for the
+same observation (which would produce ambiguity about which identifier is canonical).
+Contrast with the cross-action index in migration 006 (`confirm_short_pay` +
+`dismiss_short_pay`) and migration 010 (`confirm_payment_event` + `reject_payment_event`),
+both of which guard against logically contradictory decision pairs.
+
+#### Supersession workflow
+
+To replace an active `assert_check_identity` (e.g., after payer confirmation changes
+the canonical check number):
+
+```sql
+-- Step 1: supersede the current active row
+UPDATE fte_review_resolutions
+SET    is_superseded = true
+WHERE  practice_id   = '<practice_id>'
+  AND  observation_id = '<observation_id>'
+  AND  action        = 'assert_check_identity'
+  AND  is_superseded = false;
+
+-- Step 2: insert the corrected assertion (now the only active row)
+INSERT INTO fte_review_resolutions (
+  practice_id, claim_id, observation_id, action, target_type,
+  corrected_identifier, notes, resolved_by
+) VALUES (
+  '<practice_id>', '<claim_id>', '<observation_id>', 'assert_check_identity', 'payment_event',
+  '<canonical_check_number>', '<updated rationale>', '<reviewer_id>'
+);
+```
+
+Superseded rows are retained as an audit trail — they are never deleted. Phase 0.5
+loads only `WHERE is_superseded = false`, so superseded rows have no reconciler effect.
+
+#### Future extension (Phase 5c check-number substitution)
+
+The current implementation stores `corrected_identifier` as a passive record. A
+future Phase 5c extension could read the active `assert_check_identity` row's
+`corrected_identifier` and substitute it as the canonical `check_number` on the
+`payment_applied` event — grouping fragmented payment events under a single
+canonical identifier. This substitution is not yet wired. The current
+per-observation unique index (`practice_id`, `observation_id`) already models
+sub-claim granularity correctly: each payment observation may independently
+receive an assertion, so the constraint is ready for Phase 5c integration
+without modification.
+
+#### Coexistence with other payment-event-level actions
+
+| Action | Phase 5c (`payment_applied`) | Phase 7 (`unbalanced`) | Phase 8 (`short_pay_detected`) | Notes required |
+|---|---|---|---|---|
+| `confirm_payment_event` | **Preserved** (promotes ambiguous→reconciled) | Not suppressed | Not suppressed | No |
+| `reject_payment_event` | **Suppressed** (event not emitted) | Not suppressed | Not suppressed | Yes |
+| `assert_check_identity` | **Preserved** (no suppression) | Not suppressed | Not suppressed | **Yes** |
+
+#### Validation
+
+`tests/validate_assert_check_identity.sql` — 13 checks using the 96c5c357 fixture
+(`fixtures/synthetic_96c5c357_failure_modes.sql`):
+
+- **Check 1** — baseline: `payment_applied` event emits (count >= 1).
+- **Check 2** — baseline: `status=unbalanced`, `open_balance_amount=$1,248.11`.
+- **Check 3** — valid assertion with dual anchors (`claim_id` + `observation_id=a2`,
+  `corrected_identifier='CK-0001'`): `review_resolutions_applied=1`.
+- **Check 4** — `payment_applied` still emits after assertion (Phase 5c unchanged).
+- **Check 5** — position unchanged: `status=unbalanced`, `open_balance_amount=$1,248.11`.
+- **Check 6** — `corrected_identifier='CK-0001'` stored correctly in `fte_review_resolutions`.
+- **Check 7** — duplicate active assertion on same `(practice_id, observation_id=a2)` → `unique_violation`.
+- **Check 8** — blank `corrected_identifier` (uses obs b1) → `check_violation`.
+- **Check 9** — blank `notes` (uses obs b2) → `check_violation`.
+- **Check 10** — null `claim_id` (uses obs b3) → `check_violation`.
+- **Check 11** — null `observation_id` → `check_violation`.
+- **Check 12** — wrong `target_type='observation'` (uses obs a1, the billed_amount obs) → `check_violation`.
+- **Check 13** — supersession: UPDATE is_superseded=true for obs a2, INSERT new row for obs a2
+  with `corrected_identifier='CK-0002'`; `review_resolutions_applied=1`, one active row,
+  new identifier stored.
+
+Requires migration 011 applied before running (checks 8–9 exercise the CHECK constraints
+and partial unique index).
+
+---
+
 ## 7. How to run against fixtures
 
 Prerequisites:
