@@ -13,7 +13,7 @@
 --   paid_amount=NULL, open_balance=$1,600.00 (full billed),
 --   short_pay_detected amount=$1,600.00, status remains unbalanced,
 --   queue row remains present.
---   fte_observations.classification remains 'trusted' throughout.
+--   _fte_classified.classification remains 'trusted' during the reconciler run.
 --   Supersession: restores all baseline values.
 --
 -- Isolation vehicle: CLM-APC-2000 (c1a90000-0000-4000-8000-000000002000)
@@ -208,17 +208,22 @@ begin
     || coalesce(v_short_pay_amount::text, 'NULL');
   raise notice 'PASS [12/18] reject active: short_pay_detected amount = $1,600.00 (Phase 8 not suppressed)';
 
-  -- 13/18 — fte_observations.classification remains 'trusted' (Phase 1 unchanged).
+  -- 13/18 — payment observation remains classified trusted in Phase 1.
+  -- reject_payment_event must suppress only Phase 5c payment_applied event
+  -- emission; it must not add the observation to _fte_suppressed_observations
+  -- or otherwise prevent trusted classification.
   select count(*) into v_obs_count
-    from fte_observations
+    from _fte_classified
    where practice_id       = '96000000-0000-4000-8000-0000000000fe'
      and claim_identifier  = 'CLM-APC-1000'
      and observation_type  = 'payment'
      and classification    = 'trusted';
+
   assert v_obs_count >= 1,
-    'FAIL [13/18] expected payment observation to remain trusted after reject, got count: '
+    'FAIL [13/18] expected payment observation to remain classified trusted after reject, got count: '
     || v_obs_count::text;
-  raise notice 'PASS [13/18] reject active: payment observation classification = trusted (Phase 1 unchanged)';
+
+  raise notice 'PASS [13/18] reject active: payment observation remains classified trusted (Phase 1 unchanged)';
 
   -- 14/18 — CLM-APC-2000 isolation: reject on CLM-APC-1000 does not affect CLM-APC-2000.
   select count(*) into v_event_count
