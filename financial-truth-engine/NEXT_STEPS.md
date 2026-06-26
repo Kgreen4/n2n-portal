@@ -633,6 +633,65 @@ disposable Supabase project.
 
 ---
 
+### Task 006B — Phase 3A Extraction Fixture + Pipeline Validation Suite ✅ Complete
+
+**Delivered:**
+- `fixtures/synthetic_phase3a_extraction_fixture.sql` — new synthetic fixture for the
+  Phase 3A extraction baseline practice (`a3000000-0000-4000-8000-0000000000fe`). Covers
+  a 3-claim remittance: 2 balanced claims (CLM-P3A-0001, CLM-P3A-0002) and 1 cleanly
+  unbalanced claim (CLM-P3A-0003). Contains 6 evidence rows (1 pdf_document parent, 4
+  pdf_page rows with `[SYNTHETIC]` raw_text, 1 check_payment stub with
+  `check_number=SYN-4001` and `check_amount=354.00`), 3 claim rows, and 10 observation
+  rows (3 observation types × 3 claims + 1 summary-row observation). CLM-P3A-0003 is a
+  clean synthetic underpayment (billed=350.00, adj=70.00, paid=100.00, open=180.00) with
+  no CARC=1, PR-1, deductible, coinsurance, copay, or patient-responsibility language.
+  Check SYN-4001 total: 150.00 + 104.00 + 100.00 = $354.00. The check_payment stub
+  enables the Phase 5c two-link event evidence pattern (payment_applied events link to
+  both the pdf_page observation and the matching check_payment stub via
+  `ev.evidence_type = 'check_payment' AND ev.metadata->>'check_number' = v_obs.check_eft_identifier`).
+  Idempotent cleanup block deletes all derived + fixture rows in dependency order before
+  inserting. All raw_text values prefixed `[SYNTHETIC]`. All `source_uri` values use
+  `private://fte/...` scheme. No PHI, no real check numbers, no real patient data.
+- `tests/validate_extraction_pipeline.sql` — 18-check ROLLBACK-wrapped validation suite
+  for the Phase 3A extraction pipeline. Loads the phase3a fixture via `\i` at the top.
+  18 checks: evidence count=6 (check 1), observation count=10 (check 2), base event
+  count=9 filtered to `claim_adjudicated` + `contractual_adjustment_applied` +
+  `payment_applied` (check 3), total event count=10 including `short_pay_detected`
+  (check 4), CLM-P3A-0001 `payment_applied` amount=150.00 (check 5), CLM-P3A-0002
+  amount=104.00 (check 6), CLM-P3A-0003 amount=100.00 (check 7), CLM-P3A-0001
+  `balanced` status (check 8) + `open_balance_amount=0.00` (check 9), CLM-P3A-0002
+  `balanced` (check 10) + `open_balance_amount=0.00` (check 11), CLM-P3A-0003
+  `unbalanced` (check 12) + `open_balance_amount=180.00` (check 13),
+  `short_pay_detected` count=1 + amount=180.00 for CLM-P3A-0003 (check 14),
+  `fte_review_queue` rows where `reason='suspected_summary_row'`=1 (check 15),
+  `reason='unbalanced_financial_position'` for CLM-P3A-0003=1 (check 16),
+  CLM-P3A-0001 `payment_applied` event has exactly 2 `fte_event_evidence` links with
+  `link_role='supports'` (check 17), all non-null raw_text evidence rows for this
+  practice start with `'[SYNTHETIC]'` (check 18, expected count=4). All 18 checks use
+  `reason` (the persisted `fte_review_queue` column), never `review_reason` (the
+  reconciler's internal alias only).
+- `tests/run_all_validations.sql` (updated) — added fixture load block for phase3a and
+  `\i tests/validate_extraction_pipeline.sql` block; updated header expected count from
+  160 to 178 and from fifteen to sixteen suites.
+- `tests/RUNBOOK.md` (updated) — added `validate_extraction_pipeline.sql` suite table
+  row (18 checks), phase3a fixture row, fixture dependency row, Supabase manual step 19;
+  updated totals to 178 / sixteen suites.
+- `README.md` (updated) — status line Tasks 001–006B, Phase 3A capability bullet,
+  suite table row (18 checks), check count 160→178 / 15→16 suites.
+- `NEXT_STEPS.md` (this file) — Task 006B entry, Phase 3 checklist item checked,
+  Current Capabilities section updated, validation suites table row added (178 total),
+  Immediate Next Action updated.
+
+**Safety:** no PHI, no real patient data, no real check numbers, no real payer data, no
+production data, no legacy EOB DB or code accessed. No AI calls. No Edge Functions. No
+UI. No migrations. No reconciler changes. No existing fixture files modified. No
+existing validation suite files modified except `run_all_validations.sql`. No
+`review_reason` column mistake — all queue column references use `reason`. Tested via
+ROLLBACK-wrapped 18-check suite against synthetic phase3a fixture in a disposable
+Supabase project.
+
+---
+
 ### Task 005C — `confirm_position_balanced` — Planning/Docs Only ✅ Decision Recorded
 
 **Decision: deferred. `confirm_position_balanced` is not implemented.**
@@ -756,7 +815,7 @@ project accessed.
 
 ## Current Capabilities
 
-As of Task 005G complete (2026-06-25), the FTE can:
+As of Task 006B complete (2026-06-26), the FTE can:
 
 - **Represent the full claim ledger.** Eleven tables covering practices, evidence,
   observations, claims, claim events, event-evidence audit links, financial positions,
@@ -896,8 +955,9 @@ Apply migrations and register the reconciler before running.
 | `tests/validate_mark_position_resolved.sql` | 14 | `mark_position_resolved` — Phase 7 queue suppression for unbalanced only, Phase 8 preserved, in_review invariant, notes/claim_id/target_type shape constraints, uniqueness, supersession |
 | `tests/validate_reject_payment_event.sql` | 18 | `reject_payment_event` — Phase 5c payment_applied suppression, paid_amount=NULL, open_balance recalc to full billed, Phase 7/8 not suppressed, observation remains trusted, CLM-APC-2000 isolation, constraints, cross-action conflict, supersession |
 | `tests/validate_assert_check_identity.sql` | 13 | `assert_check_identity` — durable note only, payment_applied not suppressed, position/balance unchanged, corrected_identifier stored, notes/claim_id/observation_id/corrected_identifier/target_type shape constraints, per-observation uniqueness, CLM-APC-2000 isolation, supersession |
+| `tests/validate_extraction_pipeline.sql` | 18 | Phase 3A extraction pipeline — evidence count, observation count, balanced/unbalanced positions, short_pay_detected, review-queue routing, two-link event evidence, [SYNTHETIC] prefix invariant |
 
-**Total numeric checks: 160** (structure checks in validate_schema.sql not counted)
+**Total numeric checks: 178** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
 manually before running the test body. The `tests/RUNBOOK.md` documents the run order.
@@ -1020,7 +1080,7 @@ One difficult AZHS EOB
 - [x] Define synthetic evidence and observation records.
 - [x] Reconcile observations into claim events via deterministic 9-phase reconciler.
 - [x] Derive financial positions from claim events.
-- [ ] Load a real (de-identified or explicitly approved synthetic) EOB as evidence.
+- [x] Load a real (de-identified or explicitly approved synthetic) EOB as evidence.
 - [ ] Run AI observation extraction against real evidence.
 - [ ] Produce a plain-English explanation with evidence references.
 
@@ -1147,12 +1207,13 @@ Deliver:
 
 ## Immediate Next Action
 
-**Tasks 001 through 005H are complete.**
+**Tasks 001 through 006B are complete.**
 
 The schema layer (migrations 001–011), deterministic reconciler (9 phases +
-Phase 0.5), and ten reviewer action categories are all proven on synthetic
-data across 160 numeric validation checks across 15 suites — all PASS in a
-disposable Supabase project.
+Phase 0.5), ten reviewer action categories, and the Phase 3A synthetic
+extraction fixture + 18-check pipeline validation suite are all proven on
+synthetic data across 178 numeric validation checks across 16 suites — all
+PASS in a disposable Supabase project.
 
 **Proven reviewer actions:** `confirm_payment_event`, `reject_payment_event`,
 `assert_check_identity`, `confirm_observation`, `reject_observation`,
@@ -1161,11 +1222,18 @@ billed amount), `dismiss_short_pay`, `confirm_short_pay`,
 `request_more_evidence`, `mark_position_needs_correction`,
 `mark_position_resolved`.
 
+**Phase 3A extraction baseline proven:** 3-claim fixture (2 balanced, 1
+unbalanced), summary-row routing, two-link event evidence (pdf_page +
+check_payment stub), `[SYNTHETIC]` raw_text prefix invariant — all 18 checks
+pass. The reconciler routes the unbalanced claim and summary observation
+correctly via `fte_review_queue.reason` without any reconciler or migration
+changes.
+
 The next slice should come from Phase 3 or Phase 4 of the roadmap above:
 
-- **Phase 3** — real (de-identified or explicitly approved synthetic) EOB as
-  evidence; AI observation extraction against real evidence; plain-English
-  explanation with evidence references.
+- **Phase 3** (remaining) — AI observation extraction against synthetic or
+  approved evidence; plain-English explanation with evidence references
+  (`fte_explain_claim()` SQL function, Task 006C).
 - **Phase 4** — reviewer workflow for confirming or correcting ambiguous/
   unbalanced positions (UI-facing, requires Phase 3 evidence first).
 
