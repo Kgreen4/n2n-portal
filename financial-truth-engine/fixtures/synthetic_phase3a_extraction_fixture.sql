@@ -8,13 +8,17 @@
 --
 -- Scenario:
 --   A 4-page remittance from Synthetic Payer A, check SYN-4001 ($354.00).
---   Page 1: CLM-P3A-0001 — billed $250, adj $50, paid $150 → balanced (0.00)
---   Page 2: CLM-P3A-0002 — billed $180, adj $36, paid $104 → balanced (0.00)
---   Page 3: CLM-P3A-0003 — billed $350, adj $70, paid $100 → unbalanced ($180.00)
+--   Page 1: CLM-P3A-0001 — billed $250, adj $50, paid $150 → balanced (0.00)   CPT 99213
+--   Page 2: CLM-P3A-0002 — billed $180, adj $36, paid $104 → balanced (0.00)   CPT 93000
+--   Page 3: CLM-P3A-0003 — billed $350, adj $70, paid $100 → unbalanced ($180.00) CPT 99213
 --   Page 4: summary row  — total paid $354.00, is_summary_row=true → excluded
 --   + check_payment stub for SYN-4001 (enables two-link fte_event_evidence check)
 --
--- Evidence rows  : 6  (1 document + 4 pages + 1 check_payment stub)
+-- CPT note: CLM-P3A-0001 and CLM-P3A-0003 use CPT 99213 (office visit).
+--           CLM-P3A-0002 uses CPT 93000 (EKG) — intentionally distinct to
+--           verify the reconciler does not conflate claims by CPT code.
+--
+-- Evidence rows  : 6  (1 document + 4 page + 1 check_payment stub)
 -- Claim rows     : 3
 -- Observation rows: 10  (9 claim-level + 1 summary)
 --
@@ -52,15 +56,15 @@ delete from fte_practices        where id = 'a3000000-0000-4000-8000-0000000000f
 -- ---------------------------------------------------------------------------
 -- Practice
 -- ---------------------------------------------------------------------------
-insert into fte_practices (id, name, npi, tax_id, contact_email) values
+insert into fte_practices (id, name, external_ref) values
   ('a3000000-0000-4000-8000-0000000000fe',
-   'Synthetic Practice Phase3A', '9000000003', '90-0000003', 'test-p3a@fte.local')
+   'Synthetic Practice Phase3A', 'phase3a_extraction_fixture')
 on conflict do nothing;
 
 -- ---------------------------------------------------------------------------
 -- Evidence — 6 rows
--- Row 1: parent pdf_document (raw_text null — not scanned text, just a handle)
--- Rows 2–5: pdf_page children (raw_text prefixed [SYNTHETIC])
+-- Row 1: parent document (raw_text null — not scanned text, just a handle)
+-- Rows 2–5: page children (raw_text prefixed [SYNTHETIC])
 -- Row 6: check_payment stub (raw_text null — structured record, not OCR text)
 -- ---------------------------------------------------------------------------
 insert into fte_evidence
@@ -70,15 +74,15 @@ values
   -- parent document
   ('e3a00000-0000-4000-8000-000000000001',
    'a3000000-0000-4000-8000-0000000000fe',
-   null, 'pdf_document', 'synthetic_phase3a_extraction_fixture',
+   null, 'document', 'synthetic_phase3a_extraction_fixture',
    'private://fte/phase3a/remittance-syn-4001.pdf',
    'sha256:SYNTHETIC_PHASE3A_DOC_001',
    null, null, '{}'),
 
-  -- page 1 — CLM-P3A-0001
+  -- page 1 — CLM-P3A-0001 (CPT 99213)
   ('e3a00000-0000-4000-8000-000000000002',
    'a3000000-0000-4000-8000-0000000000fe',
-   'e3a00000-0000-4000-8000-000000000001', 'pdf_page',
+   'e3a00000-0000-4000-8000-000000000001', 'page',
    'synthetic_phase3a_extraction_fixture',
    'private://fte/phase3a/remittance-syn-4001.pdf#page=1',
    'sha256:SYNTHETIC_PHASE3A_PAGE1',
@@ -86,21 +90,21 @@ values
    '[SYNTHETIC] Remittance Advice Page 1 of 4 | Payer: Synthetic Payer A | Claim: CLM-P3A-0001 | Patient: SYNTHETIC PATIENT A | DOS: 2026-05-15 | CPT 99213 | Billed: $250.00 | Allowed: $200.00 | Adj: $50.00 | Paid: $150.00',
    '{}'),
 
-  -- page 2 — CLM-P3A-0002
+  -- page 2 — CLM-P3A-0002 (CPT 93000 — intentionally distinct from CLM-P3A-0001/0003)
   ('e3a00000-0000-4000-8000-000000000003',
    'a3000000-0000-4000-8000-0000000000fe',
-   'e3a00000-0000-4000-8000-000000000001', 'pdf_page',
+   'e3a00000-0000-4000-8000-000000000001', 'page',
    'synthetic_phase3a_extraction_fixture',
    'private://fte/phase3a/remittance-syn-4001.pdf#page=2',
    'sha256:SYNTHETIC_PHASE3A_PAGE2',
    2,
-   '[SYNTHETIC] Remittance Advice Page 2 of 4 | Payer: Synthetic Payer A | Claim: CLM-P3A-0002 | Patient: SYNTHETIC PATIENT B | DOS: 2026-05-15 | CPT 99213 | Billed: $180.00 | Allowed: $144.00 | Adj: $36.00 | Paid: $104.00',
+   '[SYNTHETIC] Remittance Advice Page 2 of 4 | Payer: Synthetic Payer A | Claim: CLM-P3A-0002 | Patient: SYNTHETIC PATIENT B | DOS: 2026-05-15 | CPT 93000 | Billed: $180.00 | Allowed: $144.00 | Adj: $36.00 | Paid: $104.00',
    '{}'),
 
-  -- page 3 — CLM-P3A-0003 (underpaid — synthetic short pay, no CARC codes)
+  -- page 3 — CLM-P3A-0003 (CPT 99213, underpaid — synthetic short pay, no CARC codes)
   ('e3a00000-0000-4000-8000-000000000004',
    'a3000000-0000-4000-8000-0000000000fe',
-   'e3a00000-0000-4000-8000-000000000001', 'pdf_page',
+   'e3a00000-0000-4000-8000-000000000001', 'page',
    'synthetic_phase3a_extraction_fixture',
    'private://fte/phase3a/remittance-syn-4001.pdf#page=3',
    'sha256:SYNTHETIC_PHASE3A_PAGE3',
@@ -111,7 +115,7 @@ values
   -- page 4 — summary (do not use for individual claim adjudication)
   ('e3a00000-0000-4000-8000-000000000005',
    'a3000000-0000-4000-8000-0000000000fe',
-   'e3a00000-0000-4000-8000-000000000001', 'pdf_page',
+   'e3a00000-0000-4000-8000-000000000001', 'page',
    'synthetic_phase3a_extraction_fixture',
    'private://fte/phase3a/remittance-syn-4001.pdf#page=4',
    'sha256:SYNTHETIC_PHASE3A_PAGE4',
@@ -173,72 +177,73 @@ insert into fte_observations
    is_summary_row, is_superseded, metadata)
 values
 
-  -- CLM-P3A-0001 (page 1) — billed
-  ('ob3a0000-0000-4000-8000-000000000001',
+  -- CLM-P3A-0001 (page 1, CPT 99213) — billed
+  ('0b3a0000-0000-4000-8000-000000000001',
    'a3000000-0000-4000-8000-0000000000fe',
    'e3a00000-0000-4000-8000-000000000002',
    'billed_amount', 250.00, 'billed',
    'CLM-P3A-0001', 'Synthetic Payer A', '2026-05-15', '99213', null,
    0.97, 'SYN:250.00', '250.00', 1, false, false, '{}'),
 
-  -- CLM-P3A-0001 (page 1) — contractual adjustment
-  ('ob3a0000-0000-4000-8000-000000000002',
+  -- CLM-P3A-0001 (page 1, CPT 99213) — contractual adjustment
+  ('0b3a0000-0000-4000-8000-000000000002',
    'a3000000-0000-4000-8000-0000000000fe',
    'e3a00000-0000-4000-8000-000000000002',
-   'contractual_adjustment', 50.00, 'adjusted',
+   'contractual_adjustment', 50.00, 'contractual_adjustment',
    'CLM-P3A-0001', 'Synthetic Payer A', '2026-05-15', '99213', null,
    0.97, 'SYN:50.00', '50.00', 1, false, false, '{}'),
 
-  -- CLM-P3A-0001 (page 1) — payment (check_eft_identifier triggers check stub link)
-  ('ob3a0000-0000-4000-8000-000000000003',
+  -- CLM-P3A-0001 (page 1, CPT 99213) — payment (check_eft_identifier triggers check stub link)
+  ('0b3a0000-0000-4000-8000-000000000003',
    'a3000000-0000-4000-8000-0000000000fe',
    'e3a00000-0000-4000-8000-000000000002',
    'payment', 150.00, 'paid',
    'CLM-P3A-0001', 'Synthetic Payer A', '2026-05-15', '99213', 'SYN-4001',
    0.97, 'SYN:150.00', '150.00', 1, false, false, '{}'),
 
-  -- CLM-P3A-0002 (page 2) — billed
-  ('ob3a0000-0000-4000-8000-000000000004',
+  -- CLM-P3A-0002 (page 2, CPT 93000) — billed
+  ('0b3a0000-0000-4000-8000-000000000004',
    'a3000000-0000-4000-8000-0000000000fe',
    'e3a00000-0000-4000-8000-000000000003',
    'billed_amount', 180.00, 'billed',
-   'CLM-P3A-0002', 'Synthetic Payer A', '2026-05-15', '99213', null,
+   'CLM-P3A-0002', 'Synthetic Payer A', '2026-05-15', '93000', null,
    0.97, 'SYN:180.00', '180.00', 2, false, false, '{}'),
 
-  -- CLM-P3A-0002 (page 2) — contractual adjustment
-  ('ob3a0000-0000-4000-8000-000000000005',
+  -- CLM-P3A-0002 (page 2, CPT 93000) — contractual adjustment
+  ('0b3a0000-0000-4000-8000-000000000005',
    'a3000000-0000-4000-8000-0000000000fe',
    'e3a00000-0000-4000-8000-000000000003',
-   'contractual_adjustment', 36.00, 'adjusted',
-   'CLM-P3A-0002', 'Synthetic Payer A', '2026-05-15', '99213', null,
+   'contractual_adjustment', 36.00, 'contractual_adjustment',
+   'CLM-P3A-0002', 'Synthetic Payer A', '2026-05-15', '93000', null,
    0.97, 'SYN:36.00', '36.00', 2, false, false, '{}'),
 
-  -- CLM-P3A-0002 (page 2) — payment
-  ('ob3a0000-0000-4000-8000-000000000006',
+  -- CLM-P3A-0002 (page 2, CPT 93000) — payment
+  ('0b3a0000-0000-4000-8000-000000000006',
    'a3000000-0000-4000-8000-0000000000fe',
    'e3a00000-0000-4000-8000-000000000003',
    'payment', 104.00, 'paid',
-   'CLM-P3A-0002', 'Synthetic Payer A', '2026-05-15', '99213', 'SYN-4001',
+   'CLM-P3A-0002', 'Synthetic Payer A', '2026-05-15', '93000', 'SYN-4001',
    0.97, 'SYN:104.00', '104.00', 2, false, false, '{}'),
 
-  -- CLM-P3A-0003 (page 3) — billed (synthetic underpayment: open=$180.00)
-  ('ob3a0000-0000-4000-8000-000000000007',
+  -- CLM-P3A-0003 (page 3, CPT 99213) — billed (synthetic underpayment: open=$180.00)
+  ('0b3a0000-0000-4000-8000-000000000007',
    'a3000000-0000-4000-8000-0000000000fe',
    'e3a00000-0000-4000-8000-000000000004',
    'billed_amount', 350.00, 'billed',
    'CLM-P3A-0003', 'Synthetic Payer A', '2026-05-15', '99213', null,
    0.97, 'SYN:350.00', '350.00', 3, false, false, '{}'),
 
-  -- CLM-P3A-0003 (page 3) — contractual adjustment
-  ('ob3a0000-0000-4000-8000-000000000008',
+  -- CLM-P3A-0003 (page 3, CPT 99213) — contractual adjustment
+  ('0b3a0000-0000-4000-8000-000000000008',
    'a3000000-0000-4000-8000-0000000000fe',
    'e3a00000-0000-4000-8000-000000000004',
-   'contractual_adjustment', 70.00, 'adjusted',
+   'contractual_adjustment', 70.00, 'contractual_adjustment',
    'CLM-P3A-0003', 'Synthetic Payer A', '2026-05-15', '99213', null,
    0.97, 'SYN:70.00', '70.00', 3, false, false, '{}'),
 
-  -- CLM-P3A-0003 (page 3) — payment (underpaid: 350−70−100=180 open)
-  ('ob3a0000-0000-4000-8000-000000000009',
+  -- CLM-P3A-0003 (page 3, CPT 99213) — payment (underpaid: 350−70−100=180 open)
+  -- No CARC codes, no patient-responsibility language — clean synthetic short pay.
+  ('0b3a0000-0000-4000-8000-000000000009',
    'a3000000-0000-4000-8000-0000000000fe',
    'e3a00000-0000-4000-8000-000000000004',
    'payment', 100.00, 'paid',
@@ -247,7 +252,7 @@ values
 
   -- Summary row (page 4) — excluded by Phase 1 (is_summary_row=true)
   -- No claim_identifier — Phase 2 LEFT JOIN yields claim_id=NULL in review queue
-  ('ob3a0000-0000-4000-8000-00000000000a',
+  ('0b3a0000-0000-4000-8000-00000000000a',
    'a3000000-0000-4000-8000-0000000000fe',
    'e3a00000-0000-4000-8000-000000000005',
    'payment', 354.00, 'paid',

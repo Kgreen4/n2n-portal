@@ -639,15 +639,15 @@ disposable Supabase project.
 - `fixtures/synthetic_phase3a_extraction_fixture.sql` — new synthetic fixture for the
   Phase 3A extraction baseline practice (`a3000000-0000-4000-8000-0000000000fe`). Covers
   a 3-claim remittance: 2 balanced claims (CLM-P3A-0001, CLM-P3A-0002) and 1 cleanly
-  unbalanced claim (CLM-P3A-0003). Contains 6 evidence rows (1 pdf_document parent, 4
-  pdf_page rows with `[SYNTHETIC]` raw_text, 1 check_payment stub with
+  unbalanced claim (CLM-P3A-0003). Contains 6 evidence rows (1 document parent, 4
+  page rows with `[SYNTHETIC]` raw_text, 1 check_payment stub with
   `check_number=SYN-4001` and `check_amount=354.00`), 3 claim rows, and 10 observation
   rows (3 observation types × 3 claims + 1 summary-row observation). CLM-P3A-0003 is a
   clean synthetic underpayment (billed=350.00, adj=70.00, paid=100.00, open=180.00) with
   no CARC=1, PR-1, deductible, coinsurance, copay, or patient-responsibility language.
   Check SYN-4001 total: 150.00 + 104.00 + 100.00 = $354.00. The check_payment stub
   enables the Phase 5c two-link event evidence pattern (payment_applied events link to
-  both the pdf_page observation and the matching check_payment stub via
+  both the page observation and the matching check_payment stub via
   `ev.evidence_type = 'check_payment' AND ev.metadata->>'check_number' = v_obs.check_eft_identifier`).
   Idempotent cleanup block deletes all derived + fixture rows in dependency order before
   inserting. All raw_text values prefixed `[SYNTHETIC]`. All `source_uri` values use
@@ -1223,7 +1223,7 @@ billed amount), `dismiss_short_pay`, `confirm_short_pay`,
 `mark_position_resolved`.
 
 **Phase 3A extraction baseline proven:** 3-claim fixture (2 balanced, 1
-unbalanced), summary-row routing, two-link event evidence (pdf_page +
+unbalanced), summary-row routing, two-link event evidence (page +
 check_payment stub), `[SYNTHETIC]` raw_text prefix invariant — all 18 checks
 pass. The reconciler routes the unbalanced claim and summary observation
 correctly via `fte_review_queue.reason` without any reconciler or migration

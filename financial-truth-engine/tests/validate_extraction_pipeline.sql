@@ -37,7 +37,7 @@
 --
 -- Test vehicle: fixtures/synthetic_phase3a_extraction_fixture.sql
 --   Practice:       a3000000-0000-4000-8000-0000000000fe
---   Evidence rows:  6  (1 document + 4 pages + 1 check_payment stub)
+--   Evidence rows:  6  (1 document + 4 page + 1 check_payment stub)
 --   Observation rows: 10 (9 claim-level + 1 summary)
 --   Claims:         CLM-P3A-0001 / CLM-P3A-0002 / CLM-P3A-0003
 --   Check stub:     SYN-4001 ($354.00)
@@ -87,7 +87,7 @@ declare
   v_obs_count  int;
 begin
   -- CHECK 1/18: evidence count = 6
-  -- (1 pdf_document + 4 pdf_page + 1 check_payment stub)
+  -- (1 document + 4 page + 1 check_payment stub)
   select count(*) into v_evid_count
   from   fte_evidence
   where  practice_id = 'a3000000-0000-4000-8000-0000000000fe';
@@ -341,7 +341,7 @@ $$;
 --
 -- Phase 5c creates two fte_event_evidence rows for each payment_applied event
 -- whose observation has a check_eft_identifier:
---   Link 1: the pdf_page evidence (observation.evidence_id)
+--   Link 1: the page evidence (observation.evidence_id)
 --   Link 2: the check_payment stub matched by metadata->>'check_number'
 -- CLM-P3A-0001 payment observation has check_eft_identifier = 'SYN-4001',
 -- and the fixture includes a check_payment stub with that check_number, so
