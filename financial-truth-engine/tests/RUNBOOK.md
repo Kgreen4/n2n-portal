@@ -26,8 +26,9 @@ errors in the Supabase SQL Editor, and missing fixture loads.
 | `tests/validate_reject_payment_event.sql` | 18 | `reject_payment_event` — Phase 5c payment_applied suppression, open_balance recalc to full billed, Phase 7/8 not suppressed, observation remains trusted, CLM-APC-2000 isolation, notes/claim_id constraints, cross-action conflict, supersession |
 | `tests/validate_assert_check_identity.sql` | 13 | `assert_check_identity` — durable note only, payment_applied not suppressed, position/balance unchanged, corrected_identifier stored, notes/claim_id/observation_id/corrected_identifier/target_type shape constraints, per-observation uniqueness (duplicate rejected for same observation_id), CLM-APC-2000 isolation, supersession |
 | `tests/validate_extraction_pipeline.sql` | 18 | Phase 3A extraction pipeline — evidence count, observation count, balanced/unbalanced positions, short_pay_detected, review-queue routing, two-link event evidence, [SYNTHETIC] prefix invariant |
+| `tests/validate_explain_claim.sql` | 14 | `fte_explain_claim` — deterministic JSON explanation: function exists, claim identity, reconciliation_status, open_balance_amount, summary sentence, events/evidence/review_queue arrays, evidence_count on payment_applied, raw_text_snippet ≤ 500 chars |
 
-**Total numeric checks: 178**
+**Total numeric checks: 192**
 
 All suites are wrapped in `ROLLBACK` — nothing persists to the database.
 `fte_analysis_runs` is append-only and is **not** rolled back; suites use
@@ -67,6 +68,7 @@ Suite → fixture dependency:
 | `validate_reject_payment_event.sql` | 96c5c357 |
 | `validate_assert_check_identity.sql` | 96c5c357 |
 | `validate_extraction_pipeline.sql` | phase3a_extraction |
+| `validate_explain_claim.sql` | phase3a_extraction |
 
 ---
 
@@ -91,8 +93,9 @@ psql "$DATABASE_URL" -f migrations/009_mark_position_resolved_constraints.sql
 psql "$DATABASE_URL" -f migrations/010_reject_payment_event_constraints.sql
 psql "$DATABASE_URL" -f migrations/011_assert_check_identity_constraints.sql
 
-# Register the reconciler function (CREATE OR REPLACE — safe to rerun)
+# Register the reconciler functions (CREATE OR REPLACE — safe to rerun)
 psql "$DATABASE_URL" -f reconciler/fte_reconcile.sql
+psql "$DATABASE_URL" -f reconciler/fte_explain_claim.sql
 ```
 
 ### Supabase SQL Editor
@@ -112,6 +115,7 @@ to the next — do not batch them.
 10. Paste + execute `migrations/010_reject_payment_event_constraints.sql`
 11. Paste + execute `migrations/011_assert_check_identity_constraints.sql`
 12. Paste + execute `reconciler/fte_reconcile.sql`
+13. Paste + execute `reconciler/fte_explain_claim.sql`
 
 "Success. No rows returned" after each step is correct — DDL and
 `CREATE OR REPLACE FUNCTION` produce no result rows.
@@ -128,10 +132,10 @@ Run in this order every time. Migrations are **not** repeated here.
 psql "$DATABASE_URL" -f tests/run_all_validations.sql
 ```
 
-This runner loads all fixtures, then executes all sixteen suites in the correct
+This runner loads all fixtures, then executes all seventeen suites in the correct
 order. See `tests/run_all_validations.sql` for the exact sequence.
 
-Expected output: 178 `PASS` NOTICE lines across sixteen suites, plus a banner
+Expected output: 192 `PASS` NOTICE lines across seventeen suites, plus a banner
 after each suite. Each suite is independent — a failure in one suite does not
 prevent the next from running, but scroll up to find the EXCEPTION output from
 any failed suite.
@@ -167,6 +171,9 @@ starting from the `begin;` block.
 17. Paste + execute `tests/validate_reject_payment_event.sql`
 18. Paste + execute `tests/validate_assert_check_identity.sql`
 19. Paste + execute `tests/validate_extraction_pipeline.sql`
+20. Paste + execute `tests/validate_explain_claim.sql`
+    - Before running, ensure `reconciler/fte_explain_claim.sql` has been registered (step 13 above).
+    - Remove or comment out the `\i` psql lines at the top if present; paste from the `BEGIN;` block.
 
 **What to expect in the SQL Editor:**
 

@@ -633,6 +633,87 @@ disposable Supabase project.
 
 ---
 
+### Task 006C — `fte_explain_claim` Planning ✅ Design Spec Only
+
+**Decision: implementation approved as Task 006D.**
+
+Produced and approved the planning memo for a deterministic, read-only
+`fte_explain_claim(p_practice_id uuid, p_claim_id uuid) RETURNS jsonb`
+SQL function with no AI calls, no Edge Functions, no UI, and no migration
+changes. Key decisions recorded in the memo: `STABLE` (no `SECURITY DEFINER`),
+monetary fields as `to_char(value, 'FM999999999999990.00')` strings, missing
+position returns partial JSON (not raise), events ordered by `created_at` then
+`event_type`, evidence ordered `page_number ASC NULLS LAST` then
+`evidence_type` then `evidence_id`, review queue uses `reason` column (not
+`review_reason`), 14-check validation suite targeting CLM-P3A-0001 and
+CLM-P3A-0003 from the phase3a fixture.
+
+---
+
+### Task 006D — `fte_explain_claim` Explanation Function + Validation Suite ✅ Complete
+
+**Delivered:**
+- `reconciler/fte_explain_claim.sql` — `CREATE OR REPLACE FUNCTION
+  fte_explain_claim(p_practice_id uuid, p_claim_id uuid) RETURNS jsonb`.
+  `STABLE`, no `SECURITY DEFINER`, `SET search_path = public`. Seven steps:
+  (1) load claim identity from `fte_claims` — return NULL if not found;
+  (2) load financial position from `fte_financial_positions` — v_pos fields
+  all NULL if no position row; (3) build events array with `evidence_count`
+  subquery per event, ordered by `created_at, event_type`; (4) build distinct
+  evidence array via `SELECT DISTINCT` subquery, ordered `page_number ASC
+  NULLS LAST, evidence_type, ev.id`, `raw_text_snippet = left(raw_text, 500)`;
+  (5) build review queue array ordered by `created_at`, column name `reason`;
+  (6) compose summary sentence — advisory when `v_pos IS NULL`, formatted
+  sentence including all four monetary fields otherwise; (7) return
+  `jsonb_build_object` with `CASE WHEN v_pos IS NULL THEN NULL ELSE
+  to_char(...)` guards on all monetary fields. No AI calls. Does not call
+  `fte_reconcile_practice`. Caller must run reconciler first.
+- `tests/validate_explain_claim.sql` — 14-check `ROLLBACK`-wrapped
+  `DO $$...$$` suite. Calls `fte_reconcile_practice` once at top to
+  materialize positions before invoking `fte_explain_claim`. Checks:
+  (1) function exists in `pg_proc`; (2) returns non-null jsonb for
+  CLM-P3A-0001; (3) `claim_number = 'CLM-P3A-0001'`; (4)
+  `reconciliation_status = 'balanced'`; (5) `open_balance_amount = '0.00'`;
+  (6) summary contains `'balanced'`; (7) events array length = 3; (8) evidence
+  array length = 2; (9) CLM-P3A-0003 `reconciliation_status = 'unbalanced'`;
+  (10) CLM-P3A-0003 `open_balance_amount = '180.00'`; (11) CLM-P3A-0003
+  summary contains `'180.00'`; (12) CLM-P3A-0003 `review_queue` length = 1
+  and `reason = 'unbalanced_financial_position'`; (13) CLM-P3A-0001
+  `payment_applied` event has `evidence_count = 2` (page observation link +
+  check_payment stub link from Phase 5c two-link pattern); (14) all non-null
+  `raw_text_snippet` values in both results have `length <= 500`. Brings total
+  to 192 numeric checks across 17 suites.
+- `tests/run_all_validations.sql` (updated) — `\i
+  tests/validate_explain_claim.sql` added after
+  `validate_extraction_pipeline`; prerequisites comment updated to include
+  `reconciler/fte_explain_claim.sql`; expected count updated to 192 /
+  seventeen suites.
+- `tests/RUNBOOK.md` (updated) — `validate_explain_claim.sql` added to suite
+  table (14 checks), fixture dependency table (`phase3a_extraction`), first-
+  time-setup psql and Supabase SQL Editor sequences (step 13 for
+  `reconciler/fte_explain_claim.sql`), step 20 to Supabase manual sequence
+  with note to remove `\i` lines and register `fte_explain_claim.sql` first;
+  totals updated to 192 / seventeen suites.
+- `README.md` (updated) — status line tasks 001–006D, `fte_explain_claim`
+  capability bullet, suite table row (14 checks / 006D), check count 178→192 /
+  16→17 suites.
+- `NEXT_STEPS.md` (this file) — Task 006C design spec entry, Task 006D
+  implementation entry, Current Capabilities section updated, validation suites
+  table updated (192 total / 17 suites), Immediate Next Action updated.
+
+**Safety:** no PHI, no real patient data, no production data, no legacy EOB DB
+or code accessed. No AI calls. No Edge Functions. No UI. No migrations. No
+reconciler changes. No existing fixture files modified. `fte_explain_claim` is
+`STABLE`, not `SECURITY DEFINER` — caller must hold ordinary read access to the
+FTE tables. All monetary fields are fixed two-decimal strings via
+`to_char(value, 'FM999999999999990.00')` — never raw JSON numerics. `reason`
+column used throughout (not `review_reason`). Two-link evidence pattern for
+`payment_applied` events produces `evidence_count=2` and `evidence` array
+length=2 as expected by checks 8 and 13. Tested via ROLLBACK-wrapped 14-check
+suite against synthetic phase3a fixture in a disposable Supabase project.
+
+---
+
 ### Task 006B — Phase 3A Extraction Fixture + Pipeline Validation Suite ✅ Complete
 
 **Delivered:**
@@ -815,7 +896,7 @@ project accessed.
 
 ## Current Capabilities
 
-As of Task 006B complete (2026-06-26), the FTE can:
+As of Task 006D complete (2026-06-26), the FTE can:
 
 - **Represent the full claim ledger.** Eleven tables covering practices, evidence,
   observations, claims, claim events, event-evidence audit links, financial positions,
@@ -928,6 +1009,16 @@ As of Task 006B complete (2026-06-26), the FTE can:
   check-number substitution is not yet wired). Supersede the row to replace the canonical
   identifier. Proven across 13 validation checks (Task 005H).
 
+- **Explain a claim deterministically.** `fte_explain_claim(practice_id, claim_id)`
+  returns a structured JSON payload: claim identity (`claim_number`, `payer_name`),
+  reconciled financial position (all monetary fields as fixed two-decimal strings),
+  a human-readable summary sentence, an events array with `evidence_count` per
+  event, a distinct evidence array with `raw_text_snippet` (≤ 500 chars), and a
+  review queue array. Returns `NULL` for unknown claims. Returns partial JSON with an
+  advisory summary when the position has not yet been materialized (caller must run
+  `fte_reconcile_practice` first). `STABLE`, no `SECURITY DEFINER`. Proven across
+  14 validation checks (Task 006D).
+
 **Not yet implemented:** extraction layer (AI observations from real PDFs), UI,
 API endpoints, Edge Functions, denial/contract intelligence.
 
@@ -956,8 +1047,9 @@ Apply migrations and register the reconciler before running.
 | `tests/validate_reject_payment_event.sql` | 18 | `reject_payment_event` — Phase 5c payment_applied suppression, paid_amount=NULL, open_balance recalc to full billed, Phase 7/8 not suppressed, observation remains trusted, CLM-APC-2000 isolation, constraints, cross-action conflict, supersession |
 | `tests/validate_assert_check_identity.sql` | 13 | `assert_check_identity` — durable note only, payment_applied not suppressed, position/balance unchanged, corrected_identifier stored, notes/claim_id/observation_id/corrected_identifier/target_type shape constraints, per-observation uniqueness, CLM-APC-2000 isolation, supersession |
 | `tests/validate_extraction_pipeline.sql` | 18 | Phase 3A extraction pipeline — evidence count, observation count, balanced/unbalanced positions, short_pay_detected, review-queue routing, two-link event evidence, [SYNTHETIC] prefix invariant |
+| `tests/validate_explain_claim.sql` | 14 | `fte_explain_claim` — deterministic JSON explanation: function exists, claim identity, reconciliation_status, open_balance_amount, summary sentence, events/evidence/review_queue arrays, evidence_count on payment_applied, raw_text_snippet ≤ 500 chars |
 
-**Total numeric checks: 178** (structure checks in validate_schema.sql not counted)
+**Total numeric checks: 192** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
 manually before running the test body. The `tests/RUNBOOK.md` documents the run order.
@@ -1207,13 +1299,14 @@ Deliver:
 
 ## Immediate Next Action
 
-**Tasks 001 through 006B are complete.**
+**Tasks 001 through 006D are complete.**
 
 The schema layer (migrations 001–011), deterministic reconciler (9 phases +
-Phase 0.5), ten reviewer action categories, and the Phase 3A synthetic
-extraction fixture + 18-check pipeline validation suite are all proven on
-synthetic data across 178 numeric validation checks across 16 suites — all
-PASS in a disposable Supabase project.
+Phase 0.5), ten reviewer action categories, the Phase 3A synthetic extraction
+fixture + 18-check pipeline validation suite, and the deterministic
+`fte_explain_claim` SQL function are all proven on synthetic data across 192
+numeric validation checks across 17 suites — all PASS in a disposable Supabase
+project.
 
 **Proven reviewer actions:** `confirm_payment_event`, `reject_payment_event`,
 `assert_check_identity`, `confirm_observation`, `reject_observation`,
@@ -1225,15 +1318,18 @@ billed amount), `dismiss_short_pay`, `confirm_short_pay`,
 **Phase 3A extraction baseline proven:** 3-claim fixture (2 balanced, 1
 unbalanced), summary-row routing, two-link event evidence (page +
 check_payment stub), `[SYNTHETIC]` raw_text prefix invariant — all 18 checks
-pass. The reconciler routes the unbalanced claim and summary observation
-correctly via `fte_review_queue.reason` without any reconciler or migration
-changes.
+pass.
+
+**Claim explanation proven:** `fte_explain_claim` returns structured JSON with
+claim identity, financial position (fixed two-decimal monetary strings), human-
+readable summary, events array with per-event `evidence_count`, distinct
+evidence array with `raw_text_snippet` (≤ 500 chars), and review queue array
+— all 14 checks pass.
 
 The next slice should come from Phase 3 or Phase 4 of the roadmap above:
 
 - **Phase 3** (remaining) — AI observation extraction against synthetic or
-  approved evidence; plain-English explanation with evidence references
-  (`fte_explain_claim()` SQL function, Task 006C).
+  approved evidence. Write a CODEX task spec, get Keith's approval first.
 - **Phase 4** — reviewer workflow for confirming or correcting ambiguous/
   unbalanced positions (UI-facing, requires Phase 3 evidence first).
 
