@@ -20,7 +20,7 @@
 --   Does not raise an exception.
 --
 -- Prerequisites: migrations 001–011 applied; fte_reconcile_practice registered.
--- Run as a role with BYPASSRLS (Supabase service_role / postgres).
+-- Run as a database role with ordinary read access to the FTE tables in the target environment.
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION fte_explain_claim(

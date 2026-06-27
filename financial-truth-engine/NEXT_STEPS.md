@@ -704,8 +704,8 @@ CLM-P3A-0003 from the phase3a fixture.
 **Safety:** no PHI, no real patient data, no production data, no legacy EOB DB
 or code accessed. No AI calls. No Edge Functions. No UI. No migrations. No
 reconciler changes. No existing fixture files modified. `fte_explain_claim` is
-`STABLE`, not `SECURITY DEFINER` — caller must hold RLS bypass (Supabase
-service_role / postgres). All monetary fields are fixed two-decimal strings via
+`STABLE`, not `SECURITY DEFINER` — caller must hold ordinary read access to the
+FTE tables. All monetary fields are fixed two-decimal strings via
 `to_char(value, 'FM999999999999990.00')` — never raw JSON numerics. `reason`
 column used throughout (not `review_reason`). Two-link evidence pattern for
 `payment_applied` events produces `evidence_count=2` and `evidence` array

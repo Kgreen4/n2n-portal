@@ -31,11 +31,10 @@
 --   4. fixtures/synthetic_phase3a_extraction_fixture.sql loaded (committed)
 --
 -- Supabase SQL Editor note:
---   The \i lines below are psql-only metacommands. Remove them when running
---   in the Supabase SQL Editor. Instead:
---     a. Paste and execute fixtures/synthetic_phase3a_extraction_fixture.sql first.
---     b. Paste and execute reconciler/fte_explain_claim.sql to register the function.
---     c. Then paste and execute this file (starting from the BEGIN block).
+--   This suite assumes the Phase 3A fixture has already been loaded and
+--   reconciler/fte_explain_claim.sql has already been registered. When running in
+--   the Supabase SQL Editor, paste and execute this file starting from the BEGIN
+--   block.
 --
 -- psql convenience (from repo root):
 --   \i fixtures/synthetic_phase3a_extraction_fixture.sql
