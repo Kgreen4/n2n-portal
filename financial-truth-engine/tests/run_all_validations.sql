@@ -24,13 +24,14 @@
 --   psql "$DATABASE_URL" -f migrations/010_reject_payment_event_constraints.sql
 --   psql "$DATABASE_URL" -f migrations/011_assert_check_identity_constraints.sql
 --   psql "$DATABASE_URL" -f reconciler/fte_reconcile.sql
+--   psql "$DATABASE_URL" -f reconciler/fte_explain_claim.sql
 --
 -- Migrations are one-time DDL. Do not include them here — rerunning them
 -- against an already-migrated DB causes duplicate-object errors.
--- The reconciler (CREATE OR REPLACE FUNCTION) is safe to rerun; do so
--- whenever fte_reconcile.sql changes.
+-- The reconciler functions (CREATE OR REPLACE) are safe to rerun; do so
+-- whenever fte_reconcile.sql or fte_explain_claim.sql changes.
 --
--- Expected output: 178 PASS NOTICE lines across sixteen suites.
+-- Expected output: 192 PASS NOTICE lines across seventeen suites.
 -- A FAIL raises an EXCEPTION that aborts the current suite's transaction.
 -- Subsequent \i calls still execute — scroll up to find any EXCEPTION output.
 --
@@ -124,5 +125,9 @@
 \i tests/validate_extraction_pipeline.sql
 
 \echo ''
-\echo '=== All suites complete. Expected: 178 PASS checks. ==='
+\echo '--- validate_explain_claim ---'
+\i tests/validate_explain_claim.sql
+
+\echo ''
+\echo '=== All suites complete. Expected: 192 PASS checks. ==='
 \echo ''
