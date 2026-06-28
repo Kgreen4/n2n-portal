@@ -34,6 +34,11 @@ Sample Docs/
 # Claude Code session files
 .claude/
 
+# Allow committed Claude Code subagent definitions while keeping session files ignored
+!.claude/
+!.claude/agents/
+!.claude/agents/*.md
+
 # Windows artifacts
 nul
 .vercel
