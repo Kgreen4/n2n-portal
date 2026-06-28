@@ -1405,25 +1405,32 @@ complete. No AI calls, Edge Functions, migrations, or SQL changes were included
 in Task 006G.
 
 **Task 006H — Real AI Observation Extractor External Script Implementation Spec
-(current):** `CODEX_TASK_006H.md` resolves the nine open decisions from Task
+(merged):** `CODEX_TASK_006H.md` resolves the nine open decisions from Task
 006G and defines the provider-configurable external script contract,
 de-identification requirements, prerequisite approval gates, prompt contract,
 error handling, and three-tier validation strategy. Real AI extraction is NOT
 complete. No script is delivered, no AI calls are made, no model or vendor is
 locked, and no SQL, fixtures, tests, migrations, reconciler files, or config
-files are changed by this spec.
+files are changed by that spec.
 
-The three remaining prerequisite approvals before any AI call:
-1. Keith approves the named de-identified evidence batch.
-2. Keith approves the final prompt text.
-3. Keith selects the model and provider at implementation time.
+**Task 006I — Real AI Observation Extractor Implementation Spec (current):**
+`CODEX_TASK_006I.md` defines the full implementation scope for the extractor
+script, provider adapter layer, pre-gate dry-run, stop gates, and validation
+plan. It distinguishes this spec-only PR (3 doc files) from the future
+implementation task (script, adapters, `.env.example`, Tier 1 SQL).
+Real AI extraction is NOT complete. No script is delivered in this spec PR.
+
+The three remaining prerequisite approvals before any live AI call:
+1. Keith approves the named de-identified evidence batch (B1).
+2. Keith approves the final prompt text (B2).
+3. Keith selects the runtime provider and model (B3).
 
 The remaining Phase 3 item is real AI observation extraction. Everything after
 that (Phase 4 UI, Phase 5 analytics) depends on it:
 
 - **Phase 3** (remaining) — implement the real AI extractor after Keith approves
-  a separate CODEX implementation task referencing `CODEX_TASK_006H.md` and
-  after the three prerequisite approvals above are obtained.
+  a separate CODEX implementation task referencing `CODEX_TASK_006I.md` and
+  after all three B-gate approvals are obtained.
 - **Phase 4** — reviewer workflow for confirming or correcting ambiguous/
   unbalanced positions (UI-facing, requires Phase 3 evidence first).
 
