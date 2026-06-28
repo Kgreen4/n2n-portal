@@ -32,11 +32,9 @@ Sample Docs/
 *.log
 
 # Claude Code session files
-.claude/
-
-# Allow committed Claude Code subagent definitions while keeping session files ignored
-!.claude/
+.claude/*
 !.claude/agents/
+.claude/agents/*
 !.claude/agents/*.md
 
 # Windows artifacts
