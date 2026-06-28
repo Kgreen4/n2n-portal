@@ -1,6 +1,6 @@
 # Financial Truth Engine
 
-**Status:** Active — schema, reconciler, corrected-value resolutions, position-level resolutions (dismiss_short_pay + confirm_short_pay), durable evidence-request workflow (request_more_evidence), durable correction-needed marker (mark_position_needs_correction), Phase 7 queue-suppression marker (mark_position_resolved), payment-event-level suppression (reject_payment_event), durable check-identity assertion (assert_check_identity), Phase 3A extraction baseline fixture + pipeline validation, and deterministic claim explanation function (Tasks 001–006D merged)
+**Status:** Active — schema, reconciler, corrected-value resolutions, position-level resolutions (dismiss_short_pay + confirm_short_pay), durable evidence-request workflow (request_more_evidence), durable correction-needed marker (mark_position_needs_correction), Phase 7 queue-suppression marker (mark_position_resolved), payment-event-level suppression (reject_payment_event), durable check-identity assertion (assert_check_identity), Phase 3A extraction baseline fixture + pipeline validation, deterministic claim explanation function, and mocked AI observation extraction contract (Tasks 001–006F merged)
 **Owner:** Keith Green / N2N Analytics  
 **Created:** 2026-06-16  
 **Important:** This effort is intentionally separate from the current EOB extraction project.
@@ -204,7 +204,8 @@ As of Task 006D (2026-06-26):
   - `assert_check_identity` — durable check-identity note (payment-event-level, group 2 action #3): reviewer asserts the canonical check number for an OCR-garbled or fragmented payment event identifier; requires non-null/non-blank `notes`, a stable `claim_id` anchor, a stable `observation_id` anchor (FK to `fte_observations`, the specific payment observation being identified — a claim may have multiple payment observations, so uniqueness is per observation), and a non-blank `corrected_identifier` (the canonical check number — migration 011); target_type must be `'payment_event'`; single-action partial unique index `idx_fte_resolutions_single_active_check_identity_observation` on `(practice_id, observation_id)` prevents duplicate simultaneous active assertions for the same payment observation; **reconciler behavior is UNCHANGED** — payment_applied event still emits, position/balance are not modified, Phase 7/8 not suppressed; the corrected_identifier is stored in `fte_review_resolutions` for human review and future phase integration; supersede the row to replace the canonical identifier — see `reconciler/README.md §5.16`
 - Phase 3A extraction baseline: 3-claim balanced/unbalanced fixture (`synthetic_phase3a_extraction_fixture.sql`) — 6 evidence rows, 10 observations, check_payment stub (SYN-4001) enabling two-link event evidence; pipeline validation suite (`validate_extraction_pipeline.sql`) — 18 checks covering evidence/observation counts, payment amounts, balanced/unbalanced positions, short_pay_detected, review-queue routing, two-link event evidence, and [SYNTHETIC] raw_text prefix invariant
 - `fte_explain_claim(p_practice_id, p_claim_id)` — read-only, deterministic JSON explanation function: returns claim identity, reconciled financial position (monetary fields as fixed two-decimal strings), human-readable summary sentence, events array with evidence_count per event, distinct evidence array with raw_text_snippet (≤ 500 chars), and review_queue array; returns NULL for unknown claims; returns partial JSON (advisory summary, null monetary fields) when position not yet materialized
-- 192 numeric checks across 17 test suites, all passing in a disposable Supabase project
+- Phase 3B mock extraction contract: `fte_mock_extract_observations(p_practice_id)` — deterministic SQL-only mock of the AI extraction boundary; reads synthetic page evidence rows, inserts `fte_observations` with confidence_score=0.9500 and extractor metadata; proves the evidence→observations interface contract without live AI calls; 2-claim fixture (CLM-P3B-0001 balanced, CLM-P3B-0002 unbalanced+70.00); idempotent (skips already-extracted pages)
+- 209 numeric checks across 18 test suites, all passing in a disposable Supabase project
 
 Not yet implemented: AI extraction layer, UI, API, Edge Functions.
 
@@ -238,6 +239,7 @@ event-derived math) is not implemented.
 | `tests/validate_assert_check_identity.sql` | 13 | 005H |
 | `tests/validate_extraction_pipeline.sql` | 18 | 006B |
 | `tests/validate_explain_claim.sql` | 14 | 006D |
+| `tests/validate_mock_extraction.sql` | 17 | 006F |
 
 All suites wrap in `ROLLBACK` — nothing persists. See `tests/RUNBOOK.md` for run order.
 

@@ -25,13 +25,14 @@
 --   psql "$DATABASE_URL" -f migrations/011_assert_check_identity_constraints.sql
 --   psql "$DATABASE_URL" -f reconciler/fte_reconcile.sql
 --   psql "$DATABASE_URL" -f reconciler/fte_explain_claim.sql
+--   psql "$DATABASE_URL" -f reconciler/fte_mock_extract_observations.sql
 --
 -- Migrations are one-time DDL. Do not include them here — rerunning them
 -- against an already-migrated DB causes duplicate-object errors.
 -- The reconciler functions (CREATE OR REPLACE) are safe to rerun; do so
 -- whenever fte_reconcile.sql or fte_explain_claim.sql changes.
 --
--- Expected output: 192 PASS NOTICE lines across seventeen suites.
+-- Expected output: 209 PASS NOTICE lines across eighteen suites.
 -- A FAIL raises an EXCEPTION that aborts the current suite's transaction.
 -- Subsequent \i calls still execute — scroll up to find any EXCEPTION output.
 --
@@ -55,6 +56,9 @@
 
 \echo 'Loading synthetic fixture: phase3a_extraction'
 \i fixtures/synthetic_phase3a_extraction_fixture.sql
+
+\echo 'Loading synthetic fixture: phase3b_mock_extractor'
+\i fixtures/synthetic_phase3b_mock_extractor_fixture.sql
 
 -- ---------------------------------------------------------------------------
 -- Validation suites (each wraps in ROLLBACK — nothing persists)
@@ -129,5 +133,9 @@
 \i tests/validate_explain_claim.sql
 
 \echo ''
-\echo '=== All suites complete. Expected: 192 PASS checks. ==='
+\echo '--- validate_mock_extraction ---'
+\i tests/validate_mock_extraction.sql
+
+\echo ''
+\echo '=== All suites complete. Expected: 209 PASS checks. ==='
 \echo ''

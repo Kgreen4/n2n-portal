@@ -714,6 +714,59 @@ suite against synthetic phase3a fixture in a disposable Supabase project.
 
 ---
 
+### Task 006F — Mocked AI Observation Extraction Contract + Validation ✅ Complete
+
+**Delivered:**
+- `reconciler/fte_mock_extract_observations.sql` — deterministic SQL-only mock of
+  the AI extraction boundary. Signature: `fte_mock_extract_observations(p_practice_id uuid)
+  RETURNS integer LANGUAGE plpgsql VOLATILE SET search_path = public`. No `SECURITY DEFINER`.
+  Reads `fte_evidence` rows where `practice_id = p_practice_id`, `evidence_type = 'page'`,
+  `raw_text LIKE '[SYNTHETIC]%'`, and `fixture_id = 'synthetic_phase3b_mock_extractor'`.
+  Parses line-based key:value blocks (CLAIM, PAYER, SERVICE_DATE, CPT, BILLED, ADJ, PAID,
+  CHECK). Inserts 3 `fte_observations` rows per page: `billed_amount`, `contractual_adjustment`,
+  `payment`. All `confidence_score = 0.9500`. All `raw_value` prefixed `[SYNTHETIC]`.
+  `metadata = jsonb_build_object('extractor', 'fte_mock_extract_observations', 'fixture_id',
+  'synthetic_phase3b_mock_extractor', 'mock', true)`. Idempotent: skips pages where all 3
+  observations already exist for the same `practice_id/evidence_id/claim_identifier/extractor`.
+  Returns integer count of inserted observations.
+- `fixtures/synthetic_phase3b_mock_extractor_fixture.sql` — Phase 3B synthetic fixture.
+  Practice: `b3000000-0000-4000-8000-0000000000fe` ("Synthetic Practice Phase3B Mock
+  Extractor"). 4 evidence rows: 1 document parent, 2 page rows (CLM-P3B-0001 balanced
+  300/120/180; CLM-P3B-0002 unbalanced 200/50/80 open=70.00), 1 check_payment stub
+  (SYN-5001 $260.00). 2 claims. 0 preloaded observations (all produced by
+  `fte_mock_extract_observations` at test time). Idempotent cleanup block; `INSERT ... ON
+  CONFLICT DO NOTHING` throughout.
+- `tests/validate_mock_extraction.sql` — 17 ROLLBACK-wrapped checks: (1) function exists
+  in pg_proc; (2) returns 6 (3×2); (3) observation count=6; (4) confidence_score=0.9500;
+  (5) extractor metadata correct; (6) raw_value `[SYNTHETIC]%`; (7–8) CLM-P3B-0001
+  balanced + 0.00 open; (9–10) CLM-P3B-0002 unbalanced + 70.00 open; (11) review queue
+  row exists; (12) `fte_explain_claim` non-null; (13) claim_number correct; (14)
+  reconciliation_status=balanced; (15) events length=3; (16) evidence length=2; (17)
+  payment_applied evidence_count=2. Brings total to 209 numeric checks across 18 suites.
+- `tests/run_all_validations.sql` (updated) — Phase 3B fixture load block added;
+  `reconciler/fte_mock_extract_observations.sql` added to prerequisites comment;
+  `\i tests/validate_mock_extraction.sql` added after `validate_explain_claim`; expected
+  count updated to 209 / eighteen suites.
+- `tests/RUNBOOK.md` (updated) — `validate_mock_extraction.sql` added to suite table
+  (17 checks / 006F); `synthetic_phase3b_mock_extractor_fixture.sql` added to fixture
+  table; dependency row added; `fte_mock_extract_observations.sql` added to first-time
+  setup (both psql and Supabase steps); step 22 added to Supabase manual sequence;
+  totals updated to 209 / eighteen suites.
+- `README.md` (updated) — status line tasks 001–006F; Phase 3B mock extraction capability
+  bullet; suite table row (17 checks / 006F); check count 192→209 / 17→18 suites.
+- `NEXT_STEPS.md` (this file) — Task 006F entry, Current Capabilities section updated,
+  validation suites table updated (209 total / 18 suites), Immediate Next Action updated.
+
+**Safety:** no PHI, no real patient data, no production data, no legacy EOB DB or
+code accessed. No live AI calls. No Edge Functions. No UI. No migrations. No
+reconciler changes to `fte_reconcile.sql`. `fte_mock_extract_observations` is `VOLATILE`
+(inserts rows) with no `SECURITY DEFINER`. Fixture uses `private://fte/...` source URIs
+and `sha256:SYNTHETIC_...` content hashes throughout. All raw_text values prefixed
+`[SYNTHETIC]`. Tested via ROLLBACK-wrapped 17-check suite against synthetic phase3b
+fixture in a disposable Supabase project.
+
+---
+
 ### Task 006B — Phase 3A Extraction Fixture + Pipeline Validation Suite ✅ Complete
 
 **Delivered:**
@@ -896,7 +949,7 @@ project accessed.
 
 ## Current Capabilities
 
-As of Task 006D complete (2026-06-26), the FTE can:
+As of Task 006F complete (2026-06-28), the FTE can:
 
 - **Represent the full claim ledger.** Eleven tables covering practices, evidence,
   observations, claims, claim events, event-evidence audit links, financial positions,
@@ -1018,9 +1071,17 @@ As of Task 006D complete (2026-06-26), the FTE can:
   advisory summary when the position has not yet been materialized (caller must run
   `fte_reconcile_practice` first). `STABLE`, no `SECURITY DEFINER`. Proven across
   14 validation checks (Task 006D).
+- **Mock AI observation extraction.** `fte_mock_extract_observations(practice_id)`
+  is a deterministic SQL-only mock of the AI extraction boundary. Reads synthetic
+  page evidence rows, parses key:value blocks, and inserts `fte_observations` rows
+  with `confidence_score=0.9500` and extractor metadata — exactly the shape a real
+  AI extractor would produce. Proves the evidence→observations interface contract
+  without live AI calls. `VOLATILE`, no `SECURITY DEFINER`. Idempotent (skips pages
+  already extracted). Returns count of inserted observations. Proven across 17
+  validation checks end-to-end through reconciler + `fte_explain_claim` (Task 006F).
 
-**Not yet implemented:** extraction layer (AI observations from real PDFs), UI,
-API endpoints, Edge Functions, denial/contract intelligence.
+**Not yet implemented:** real AI extraction layer (AI observations from real PDFs),
+UI, API endpoints, Edge Functions, denial/contract intelligence.
 
 ---
 
@@ -1048,8 +1109,9 @@ Apply migrations and register the reconciler before running.
 | `tests/validate_assert_check_identity.sql` | 13 | `assert_check_identity` — durable note only, payment_applied not suppressed, position/balance unchanged, corrected_identifier stored, notes/claim_id/observation_id/corrected_identifier/target_type shape constraints, per-observation uniqueness, CLM-APC-2000 isolation, supersession |
 | `tests/validate_extraction_pipeline.sql` | 18 | Phase 3A extraction pipeline — evidence count, observation count, balanced/unbalanced positions, short_pay_detected, review-queue routing, two-link event evidence, [SYNTHETIC] prefix invariant |
 | `tests/validate_explain_claim.sql` | 14 | `fte_explain_claim` — deterministic JSON explanation: function exists, claim identity, reconciliation_status, open_balance_amount, summary sentence, events/evidence/review_queue arrays, evidence_count on payment_applied, raw_text_snippet ≤ 500 chars |
+| `tests/validate_mock_extraction.sql` | 17 | `fte_mock_extract_observations` — function exists, returns 6, observation count/confidence/extractor-metadata/raw_value, CLM-P3B-0001 balanced+0.00, CLM-P3B-0002 unbalanced+70.00, review-queue routing, fte_explain_claim end-to-end |
 
-**Total numeric checks: 192** (structure checks in validate_schema.sql not counted)
+**Total numeric checks: 209** (structure checks in validate_schema.sql not counted)
 
 For the Supabase SQL Editor (which does not support `\i`): load each fixture file
 manually before running the test body. The `tests/RUNBOOK.md` documents the run order.
@@ -1299,14 +1361,15 @@ Deliver:
 
 ## Immediate Next Action
 
-**Tasks 001 through 006D are complete.**
+**Tasks 001 through 006F are complete.**
 
 The schema layer (migrations 001–011), deterministic reconciler (9 phases +
 Phase 0.5), ten reviewer action categories, the Phase 3A synthetic extraction
-fixture + 18-check pipeline validation suite, and the deterministic
-`fte_explain_claim` SQL function are all proven on synthetic data across 192
-numeric validation checks across 17 suites — all PASS in a disposable Supabase
-project.
+fixture + 18-check pipeline validation suite, the deterministic
+`fte_explain_claim` SQL function, and the mocked AI observation extraction
+contract (`fte_mock_extract_observations`) are all proven on synthetic data
+across 209 numeric validation checks across 18 suites — all PASS in a
+disposable Supabase project.
 
 **Proven reviewer actions:** `confirm_payment_event`, `reject_payment_event`,
 `assert_check_identity`, `confirm_observation`, `reject_observation`,
@@ -1326,10 +1389,19 @@ readable summary, events array with per-event `evidence_count`, distinct
 evidence array with `raw_text_snippet` (≤ 500 chars), and review queue array
 — all 14 checks pass.
 
-The next slice should come from Phase 3 or Phase 4 of the roadmap above:
+**Mocked AI extraction contract proven:** `fte_mock_extract_observations`
+reads synthetic page evidence, produces correctly shaped `fte_observations`
+rows (confidence, extractor metadata, `[SYNTHETIC]` raw_value), feeds the
+reconciler end-to-end — balanced claim 0.00 open, unbalanced claim 70.00
+open, review queue routing correct, `fte_explain_claim` end-to-end — all 17
+checks pass.
 
-- **Phase 3** (remaining) — AI observation extraction against synthetic or
-  approved evidence. Write a CODEX task spec, get Keith's approval first.
+The remaining Phase 3 item is real AI observation extraction. Everything after
+that (Phase 4 UI, Phase 5 analytics) depends on it:
+
+- **Phase 3** (remaining) — replace `fte_mock_extract_observations` with a
+  real AI extractor that calls Gemini/Claude against approved evidence PDFs.
+  Write a CODEX task spec, get Keith's approval first.
 - **Phase 4** — reviewer workflow for confirming or correcting ambiguous/
   unbalanced positions (UI-facing, requires Phase 3 evidence first).
 
