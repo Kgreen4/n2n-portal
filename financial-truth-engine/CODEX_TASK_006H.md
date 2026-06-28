@@ -69,9 +69,10 @@ implementation task.
 
 **Amendment A — Provider-configurable, no model ID locked:**
 The implementation must accept the model identifier and provider as runtime parameters.
-No specific model name, version, or vendor is named in this spec. Final model and vendor
-selection happens only after prompt and evidence-batch approval, based on empirical
-accuracy on the approved test evidence at implementation time.
+No specific model name or version is selected or preferred in this spec. Provider names
+may appear only as generic adapter examples; final provider and model selection remains
+a runtime approval decision. Selection happens only after prompt and evidence-batch
+approval, based on empirical accuracy on the approved test evidence at implementation time.
 
 **Amendment B — PHI and PII scope extended:**
 The following fields are treated as potentially identifying regardless of whether they
@@ -116,8 +117,8 @@ fte_extract_observations.py
   --practice-id   <uuid>           required; target practice
   --evidence-id   <uuid>           optional; single page only; if omitted, process
                                    all unextracted page evidence rows for the practice
-  --provider      <name>           required; e.g. anthropic, openai, google
-  --model         <model-id>       required; runtime-selected, not hardcoded in the script
+  --provider      <provider-name>  required; runtime-selected; not hardcoded in the script
+  --model         <provider-model-id> required; runtime-selected, not hardcoded in the script
   --db-env        DATABASE_URL     required; names the environment variable holding the
                                    DB connection string — never the actual URL
   --dry-run                        optional; parse and validate prompt/evidence but do not
@@ -130,8 +131,8 @@ Supabase project using approved test evidence.
 
 ### Secrets Pattern
 
-- AI API keys are read from environment variables (e.g. `ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`). They are never passed as CLI arguments.
+- AI API keys are read from environment variables (e.g. `<PROVIDER>_API_KEY`).
+  They are never passed as CLI arguments.
 - The DB connection string is stored in an environment variable (e.g. `DATABASE_URL`).
   The `--db-env` flag names the environment variable; the actual URL is never a CLI
   argument and never committed to the repo.
@@ -218,8 +219,8 @@ The count of skipped pages must be reported in the final summary output.
 The script must not hardcode any model ID, vendor URL, or API base path. All of the
 following must be accepted as runtime parameters or environment variables:
 
-- Provider name (e.g. `--provider anthropic`)
-- Model identifier (e.g. `--model claude-opus-4-8`) — runtime-selected, not
+- Provider name (`--provider <provider-name>`) — runtime-selected, not hardcoded
+- Model identifier (`--model <provider-model-id>`) — runtime-selected, not
   hardcoded in the script source
 - API key — from environment variable only
 - API endpoint — optional override from environment variable; default to provider SDK
