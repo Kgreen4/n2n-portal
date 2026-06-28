@@ -1361,7 +1361,7 @@ Deliver:
 
 ## Immediate Next Action
 
-**Tasks 001 through 006F are complete. Task 006G is the current design
+**Tasks 001 through 006G are complete. Task 006H is the current design
 checkpoint.**
 
 The schema layer (migrations 001–011), deterministic reconciler (9 phases +
@@ -1397,22 +1397,34 @@ reconciler end-to-end — balanced claim 0.00 open, unbalanced claim 70.00
 open, review queue routing correct, `fte_explain_claim` end-to-end — all 17
 checks pass.
 
-**Task 006G — Real AI Extraction Boundary Design/Spec (current):**
+**Task 006G — Real AI Extraction Boundary Design/Spec (merged):**
 `CODEX_TASK_006G.md` defines the stable observation contract, three deployment
-pattern options, nine open decisions requiring Keith's approval, and the safety
-and privacy gates that govern any future real AI extraction implementation.
-Real AI extraction is NOT complete. No AI calls, Edge Functions, migrations,
-or SQL changes are included in Task 006G.
+pattern options, nine open decisions, and the safety and privacy gates that
+govern any future real AI extraction implementation. Real AI extraction is NOT
+complete. No AI calls, Edge Functions, migrations, or SQL changes were included
+in Task 006G.
+
+**Task 006H — Real AI Observation Extractor External Script Implementation Spec
+(current):** `CODEX_TASK_006H.md` resolves the nine open decisions from Task
+006G and defines the provider-configurable external script contract,
+de-identification requirements, prerequisite approval gates, prompt contract,
+error handling, and three-tier validation strategy. Real AI extraction is NOT
+complete. No script is delivered, no AI calls are made, no model or vendor is
+locked, and no SQL, fixtures, tests, migrations, reconciler files, or config
+files are changed by this spec.
+
+The three remaining prerequisite approvals before any AI call:
+1. Keith approves the named de-identified evidence batch.
+2. Keith approves the final prompt text.
+3. Keith selects the model and provider at implementation time.
 
 The remaining Phase 3 item is real AI observation extraction. Everything after
 that (Phase 4 UI, Phase 5 analytics) depends on it:
 
 - **Phase 3** (remaining) — implement the real AI extractor after Keith approves
-  the open decisions in `CODEX_TASK_006G.md`. A separate implementation task
-  spec is required before work begins.
+  a separate CODEX implementation task referencing `CODEX_TASK_006H.md` and
+  after the three prerequisite approvals above are obtained.
 - **Phase 4** — reviewer workflow for confirming or correcting ambiguous/
   unbalanced positions (UI-facing, requires Phase 3 evidence first).
 
-Before starting either implementation: resolve the open decisions in
-`CODEX_TASK_006G.md`, write a CODEX implementation task spec, get Keith's
-approval, then implement. Do not start without a written spec.
+Do not start implementation without a written task spec and Keith approval.
