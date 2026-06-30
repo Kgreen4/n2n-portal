@@ -1443,7 +1443,7 @@ a hand-rolled local schema validator (`schema_validator.py`), and Task
 006K preflight/fail-closed guardrails (`preflight.py`) — batch label,
 de-id prefix, source_uri convention, synthetic-vs-real identifier
 detection, prompt match, and B3 runtime config checks. All exercised via
-44 passing unit tests against synthetic fixtures and a mocked HTTP/SDK
+48 passing unit tests against synthetic fixtures and a mocked HTTP/SDK
 client only. The adapter requires an explicitly injected client and is
 not wired into the `--provider` CLI registry or `fte_extract_observations.py`,
 so no live-call-reachable path exists in Task 006K. Zero live AI calls,
