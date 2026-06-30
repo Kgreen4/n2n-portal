@@ -66,6 +66,10 @@ def validate_b2_response(response: dict) -> tuple[bool, list[str]]:
         if key not in response:
             errors.append(f"missing required top-level key: '{key}'")
 
+    extra_top_level = set(response.keys()) - set(_TOP_LEVEL_REQUIRED_KEYS)
+    if extra_top_level:
+        errors.append(f"unexpected top-level key(s) (additionalProperties: false): {sorted(extra_top_level)}")
+
     if errors:
         return False, errors
 
@@ -93,6 +97,11 @@ def validate_b2_response(response: dict) -> tuple[bool, list[str]]:
                 errors.append(f"safety_flags missing key: '{key}'")
             elif not isinstance(safety_flags[key], bool):
                 errors.append(f"safety_flags.{key} must be boolean")
+        extra_safety_flags = set(safety_flags.keys()) - set(_SAFETY_FLAG_KEYS)
+        if extra_safety_flags:
+            errors.append(
+                f"unexpected safety_flags key(s) (additionalProperties: false): {sorted(extra_safety_flags)}"
+            )
 
     extracted_items = response["extracted_items"]
     if not isinstance(extracted_items, list):
@@ -105,6 +114,12 @@ def validate_b2_response(response: dict) -> tuple[bool, list[str]]:
             for key in _EXTRACTED_ITEM_REQUIRED_KEYS:
                 if key not in item:
                     errors.append(f"extracted_items[{i}] missing key: '{key}'")
+            extra_item_keys = set(item.keys()) - set(_EXTRACTED_ITEM_REQUIRED_KEYS)
+            if extra_item_keys:
+                errors.append(
+                    f"extracted_items[{i}] unexpected key(s) (additionalProperties: false): "
+                    f"{sorted(extra_item_keys)}"
+                )
             if "confidence" in item and item["confidence"] not in _VALID_CONFIDENCE:
                 errors.append(
                     f"extracted_items[{i}].confidence must be one of "
@@ -122,6 +137,12 @@ def validate_b2_response(response: dict) -> tuple[bool, list[str]]:
             for key in _NON_EXTRACTED_REQUIRED_KEYS:
                 if key not in item:
                     errors.append(f"non_extracted_observations[{i}] missing key: '{key}'")
+            extra_non_extracted_keys = set(item.keys()) - set(_NON_EXTRACTED_REQUIRED_KEYS)
+            if extra_non_extracted_keys:
+                errors.append(
+                    f"non_extracted_observations[{i}] unexpected key(s) (additionalProperties: false): "
+                    f"{sorted(extra_non_extracted_keys)}"
+                )
 
     extraction_limits = response["extraction_limits"]
     if not isinstance(extraction_limits, list) or not all(

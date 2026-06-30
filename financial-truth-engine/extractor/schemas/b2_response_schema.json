@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "B2_PROMPT_DRAFT_001 response schema",
   "type": "object",
+  "additionalProperties": false,
   "required": [
     "output_schema_version",
     "batch_label",
@@ -19,6 +20,7 @@
     "status": { "type": "string", "enum": ["ok", "safety_blocked"] },
     "safety_flags": {
       "type": "object",
+      "additionalProperties": false,
       "required": [
         "phi_detected",
         "credentials_detected",
@@ -44,6 +46,7 @@
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "required": [
           "field_name",
           "field_category",
@@ -72,6 +75,7 @@
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["observation", "reason_not_extracted"],
         "properties": {
           "observation": { "type": "string" },
