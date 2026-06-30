@@ -1361,8 +1361,8 @@ Deliver:
 
 ## Immediate Next Action
 
-**Tasks 001 through 006G are complete. Task 006H is the current design
-checkpoint.**
+**Tasks 001 through 006I are complete and merged. Task 006J is the current
+implementation checkpoint — pre-gate dry-run milestone only.**
 
 The schema layer (migrations 001–011), deterministic reconciler (9 phases +
 Phase 0.5), ten reviewer action categories, the Phase 3A synthetic extraction
@@ -1413,14 +1413,23 @@ complete. No script is delivered, no AI calls are made, no model or vendor is
 locked, and no SQL, fixtures, tests, migrations, reconciler files, or config
 files are changed by that spec.
 
-**Task 006I — Real AI Observation Extractor Implementation Spec (current):**
+**Task 006I — Real AI Observation Extractor Implementation Spec (merged):**
 `CODEX_TASK_006I.md` defines the full implementation scope for the extractor
 script, provider adapter layer, pre-gate dry-run, stop gates, and validation
 plan. It distinguishes this spec-only PR (3 doc files) from the future
 implementation task (script, adapters, `.env.example`, Tier 1 SQL).
 Real AI extraction is NOT complete. No script is delivered in this spec PR.
 
-The three remaining prerequisite approvals before any live AI call:
+**Task 006J — Real AI Observation Extractor Script Skeleton (current,
+pre-gate milestone):** Delivers the extractor script skeleton
+(`fte_extract_observations.py`), abstract provider adapter base (`base.py`),
+neutral stub adapter (`stub.py`), adapter registry (`providers/__init__.py`),
+package marker (`extractor/__init__.py`), and placeholder `.env.example`.
+Pre-gate dry-run runs against Phase 3B synthetic fixture only. No INSERT path
+is implemented. Non-dry-run execution exits nonzero. No live AI call is made.
+
+STOP POINT reached after Task 006J dry-run milestone. Three B-gate approvals
+still required before any live AI call:
 1. Keith approves the named de-identified evidence batch (B1).
 2. Keith approves the final prompt text (B2).
 3. Keith selects the runtime provider and model (B3).
@@ -1428,10 +1437,10 @@ The three remaining prerequisite approvals before any live AI call:
 The remaining Phase 3 item is real AI observation extraction. Everything after
 that (Phase 4 UI, Phase 5 analytics) depends on it:
 
-- **Phase 3** (remaining) — implement the real AI extractor after Keith approves
-  a separate CODEX implementation task referencing `CODEX_TASK_006I.md` and
-  after all three B-gate approvals are obtained.
+- **Phase 3** (remaining) — obtain B1/B2/B3 approvals; implement real provider
+  adapter and INSERT path in Task 006K referencing `CODEX_TASK_006I.md`.
 - **Phase 4** — reviewer workflow for confirming or correcting ambiguous/
   unbalanced positions (UI-facing, requires Phase 3 evidence first).
 
-Do not start implementation without a written task spec and Keith approval.
+Do not start Task 006K without explicit B1/B2/B3 approvals and Keith approval
+of a written Task 006K spec.
