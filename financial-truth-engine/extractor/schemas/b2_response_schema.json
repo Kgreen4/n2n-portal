@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "B2_PROMPT_DRAFT_001 response schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "output_schema_version",
+    "batch_label",
+    "artifact_label",
+    "status",
+    "safety_flags",
+    "extracted_items",
+    "non_extracted_observations",
+    "extraction_limits"
+  ],
+  "properties": {
+    "output_schema_version": { "type": "string", "const": "B2_PROMPT_DRAFT_001" },
+    "batch_label": { "type": "string" },
+    "artifact_label": { "type": "string" },
+    "status": { "type": "string", "enum": ["ok", "safety_blocked"] },
+    "safety_flags": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phi_detected",
+        "credentials_detected",
+        "database_url_detected",
+        "project_url_detected",
+        "production_data_detected",
+        "payer_export_detected",
+        "raw_pdf_detected",
+        "other_disallowed_content_detected"
+      ],
+      "properties": {
+        "phi_detected": { "type": "boolean" },
+        "credentials_detected": { "type": "boolean" },
+        "database_url_detected": { "type": "boolean" },
+        "project_url_detected": { "type": "boolean" },
+        "production_data_detected": { "type": "boolean" },
+        "payer_export_detected": { "type": "boolean" },
+        "raw_pdf_detected": { "type": "boolean" },
+        "other_disallowed_content_detected": { "type": "boolean" }
+      }
+    },
+    "extracted_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "field_name",
+          "field_category",
+          "raw_value",
+          "normalized_value",
+          "unit_or_currency",
+          "date_context",
+          "source_evidence_quote",
+          "ambiguity_note",
+          "confidence"
+        ],
+        "properties": {
+          "field_name": { "type": "string" },
+          "field_category": { "type": "string" },
+          "raw_value": { "type": "string" },
+          "normalized_value": { "type": ["string", "null"] },
+          "unit_or_currency": { "type": ["string", "null"] },
+          "date_context": { "type": ["string", "null"] },
+          "source_evidence_quote": { "type": "string" },
+          "ambiguity_note": { "type": ["string", "null"] },
+          "confidence": { "type": "string", "enum": ["low", "medium", "high"] }
+        }
+      }
+    },
+    "non_extracted_observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["observation", "reason_not_extracted"],
+        "properties": {
+          "observation": { "type": "string" },
+          "reason_not_extracted": { "type": "string" }
+        }
+      }
+    },
+    "extraction_limits": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
