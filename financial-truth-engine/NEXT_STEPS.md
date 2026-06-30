@@ -1428,19 +1428,27 @@ package marker (`extractor/__init__.py`), and placeholder `.env.example`.
 Pre-gate dry-run runs against Phase 3B synthetic fixture only. No INSERT path
 is implemented. Non-dry-run execution exits nonzero. No live AI call is made.
 
-STOP POINT reached after Task 006J dry-run milestone. Three B-gate approvals
-still required before any live AI call:
-1. Keith approves the named de-identified evidence batch (B1).
-2. Keith approves the final prompt text (B2).
-3. Keith selects the runtime provider and model (B3).
+**B1/B2/B3 approval gates — all APPROVED:**
+1. B1 — named de-identified evidence batch `AZHS_DEID_TEST_BATCH_001` (BCBS AZ
+   sample; payer name retained, synthetic claim/check identifiers only).
+2. B2 — final prompt text `B2_PROMPT_DRAFT_001` (approved and ratified).
+3. B3 — runtime provider/model `B3_RUNTIME_DRAFT_003` (OpenAI, Responses API,
+   model `gpt-5.5`, strict JSON Schema structured output, tools/web/file
+   search/code interpreter disabled, single-turn/stateless).
 
-The remaining Phase 3 item is real AI observation extraction. Everything after
-that (Phase 4 UI, Phase 5 analytics) depends on it:
+**Task 006K — OpenAI Adapter + Structured Output Dry-Run Implementation
+(current):** Implements `OpenAIAdapter` (`providers/openai_adapter.py`),
+the B2_PROMPT_DRAFT_001 response JSON Schema (`schemas/b2_response_schema.json`),
+a hand-rolled local schema validator (`schema_validator.py`), and Task
+006K preflight/fail-closed guardrails (`preflight.py`) — batch label,
+de-id prefix, source_uri convention, synthetic-vs-real identifier
+detection, prompt match, and B3 runtime config checks. All exercised via
+44 passing unit tests against synthetic fixtures and a mocked HTTP/SDK
+client only. The adapter requires an explicitly injected client and is
+not wired into the `--provider` CLI registry or `fte_extract_observations.py`,
+so no live-call-reachable path exists in Task 006K. Zero live AI calls,
+zero database writes, zero evidence loaded into any database.
 
-- **Phase 3** (remaining) — obtain B1/B2/B3 approvals; implement real provider
-  adapter and INSERT path in Task 006K referencing `CODEX_TASK_006I.md`.
-- **Phase 4** — reviewer workflow for confirming or correcting ambiguous/
-  unbalanced positions (UI-facing, requires Phase 3 evidence first).
-
-Do not start Task 006K without explicit B1/B2/B3 approvals and Keith approval
-of a written Task 006K spec.
+The first live AI call is explicitly deferred to a future **Task 006L**,
+which requires its own separate implementation proposal and explicit
+written Keith approval. Do not start Task 006L without that approval.
