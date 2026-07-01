@@ -1452,3 +1452,23 @@ zero database writes, zero evidence loaded into any database.
 The first live AI call is explicitly deferred to a future **Task 006L**,
 which requires its own separate implementation proposal and explicit
 written Keith approval. Do not start Task 006L without that approval.
+
+**Task 006L-B — First Live OpenAI Call (executed, failed closed):**
+One live call was made against `AZHS_DEID_TEST_BATCH_001/page_001` under
+`B3_RUNTIME_DRAFT_003`. The call failed closed (no retry) with HTTP 400:
+`Unsupported parameter: 'top_p' is not supported with this model.`
+`live_call_count: 1`. No DB connection, no DB writes, no evidence loaded,
+no retry. This does NOT represent a successful extraction.
+
+**Task 006L-C — B3_RUNTIME_DRAFT_004 (runtime amendment, this PR):**
+Amends `B3_RUNTIME_DRAFT_003` to `B3_RUNTIME_DRAFT_004`: `top_p` is
+omitted from the OpenAI Responses API request entirely (not sent as
+`null`) because `gpt-5.5` rejects it. `preflight.py` now rejects any
+runtime config that includes `top_p`. All other B3 controls unchanged:
+provider `openai`, api_surface `responses`, model `gpt-5.5`,
+`max_output_tokens: 2000`, `reasoning.effort: "medium"`, `tools: []`,
+`tool_choice: "none"`, `previous_response_id` omitted, strict JSON
+Schema structured output, `B2_PROMPT_DRAFT_001` unchanged, B1-approved
+de-identified evidence only. This PR makes zero live AI calls; the
+006L-B live-call count remains 1. A second live call requires separate
+explicit approval.

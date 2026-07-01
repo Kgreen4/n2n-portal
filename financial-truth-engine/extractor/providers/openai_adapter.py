@@ -39,7 +39,6 @@ class OpenAIAdapter(BaseAdapter):
         system_prompt: str,
         json_schema: dict,
         max_output_tokens: int,
-        top_p: float,
         reasoning_effort: str,
     ):
         """
@@ -49,8 +48,13 @@ class OpenAIAdapter(BaseAdapter):
             silently fall back to constructing a live client.
         system_prompt: exact B2_PROMPT_DRAFT_001 system prompt text.
         json_schema: B2_PROMPT_DRAFT_001 response JSON Schema (strict mode).
-        max_output_tokens, top_p, reasoning_effort: pinned per
-            B3_RUNTIME_DRAFT_003 — must be explicitly supplied, no defaults.
+        max_output_tokens, reasoning_effort: pinned per
+            B3_RUNTIME_DRAFT_004 — must be explicitly supplied, no defaults.
+
+        `top_p` is intentionally not an accepted parameter here: the
+        gpt-5.5 Responses API rejects it with HTTP 400 ("Unsupported
+        parameter: 'top_p'"), confirmed by a live call under Task 006L-B.
+        It must be omitted from the request body, not sent as null.
         """
         if client is None:
             raise ValueError(
@@ -61,7 +65,6 @@ class OpenAIAdapter(BaseAdapter):
         self._system_prompt = system_prompt
         self._json_schema = json_schema
         self._max_output_tokens = max_output_tokens
-        self._top_p = top_p
         self._reasoning_effort = reasoning_effort
 
     def build_request(self, prompt: str, model: str) -> dict:
@@ -91,7 +94,6 @@ class OpenAIAdapter(BaseAdapter):
             "tools": [],
             "tool_choice": "none",
             "max_output_tokens": self._max_output_tokens,
-            "top_p": self._top_p,
             "reasoning": {"effort": self._reasoning_effort},
             # Single-turn/stateless: previous_response_id intentionally
             # never set on this request.

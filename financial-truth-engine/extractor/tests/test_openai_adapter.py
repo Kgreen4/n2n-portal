@@ -33,7 +33,6 @@ def _build_adapter(client):
         system_prompt=SYSTEM_PROMPT,
         json_schema=JSON_SCHEMA,
         max_output_tokens=2000,
-        top_p=1.0,
         reasoning_effort="medium",
     )
 
@@ -46,7 +45,6 @@ class TestAdapterConstruction(unittest.TestCase):
                 system_prompt=SYSTEM_PROMPT,
                 json_schema=JSON_SCHEMA,
                 max_output_tokens=2000,
-                top_p=1.0,
                 reasoning_effort="medium",
             )
 
@@ -62,7 +60,7 @@ class TestRequestConstruction(unittest.TestCase):
         self.assertEqual(request["tools"], [])
         self.assertEqual(request["tool_choice"], "none")
         self.assertEqual(request["max_output_tokens"], 2000)
-        self.assertEqual(request["top_p"], 1.0)
+        self.assertNotIn("top_p", request)
         self.assertEqual(request["reasoning"], {"effort": "medium"})
         self.assertNotIn("previous_response_id", request)
         self.assertEqual(request["input"][0]["role"], "system")
