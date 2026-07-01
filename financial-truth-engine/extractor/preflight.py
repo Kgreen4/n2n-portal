@@ -22,7 +22,9 @@ SYNTHETIC_ID_PATTERN = re.compile(r"^SYN-[A-Z0-9]+(-[A-Z0-9]+)*$")
 # detector — it fails closed (flags as real) rather than fails open.
 _DIGIT_RUN = re.compile(r"\d{6,}")
 
-# B3_RUNTIME_DRAFT_003 expected runtime configuration.
+# B3_RUNTIME_DRAFT_004 expected runtime configuration.
+# top_p intentionally excluded: gpt-5.5 rejects it (HTTP 400), confirmed
+# via one live call under Task 006L-B.
 EXPECTED_RUNTIME_CONFIG = {
     "provider": "openai",
     "api_surface": "responses",
@@ -76,8 +78,11 @@ def check_runtime_config(config: dict) -> list[str]:
     if "max_output_tokens" not in config or not isinstance(config.get("max_output_tokens"), int):
         errors.append("runtime_config.max_output_tokens must be explicitly set to an int")
 
-    if "top_p" not in config:
-        errors.append("runtime_config.top_p must be explicitly pinned")
+    if "top_p" in config:
+        errors.append(
+            "runtime_config.top_p must be omitted for gpt-5.5 (unsupported "
+            "parameter — confirmed via live 400 under Task 006L-B)"
+        )
 
     if "reasoning_effort" not in config:
         errors.append("runtime_config.reasoning_effort must be explicitly selected")

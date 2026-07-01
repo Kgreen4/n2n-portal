@@ -111,6 +111,13 @@ class TestRuntimeConfig(unittest.TestCase):
         errors = check_runtime_config(bad)
         self.assertTrue(any("reasoning_effort" in e for e in errors))
 
+    def test_top_p_present_in_config_fails(self):
+        # gpt-5.5 rejects top_p with HTTP 400 (confirmed live, Task 006L-B).
+        # It must be omitted from runtime config entirely, not pinned.
+        bad = {**RUNTIME_CONFIG_VALID, "top_p": 1.0}
+        errors = check_runtime_config(bad)
+        self.assertTrue(any("top_p" in e for e in errors))
+
 
 class TestPromptMatch(unittest.TestCase):
     def test_matching_prompt_passes(self):

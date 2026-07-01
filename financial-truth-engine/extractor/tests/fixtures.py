@@ -95,6 +95,7 @@ MALFORMED_B2_RESPONSE = {
     # missing artifact_label, status, etc. — intentionally malformed
 }
 
+# B3_RUNTIME_DRAFT_004: top_p omitted (gpt-5.5 rejects it with HTTP 400).
 RUNTIME_CONFIG_VALID = {
     "provider": "openai",
     "api_surface": "responses",
@@ -103,6 +104,5 @@ RUNTIME_CONFIG_VALID = {
     "tool_choice": "none",
     "previous_response_id": None,
     "max_output_tokens": 2000,
-    "top_p": 1.0,
     "reasoning_effort": "medium",
 }
