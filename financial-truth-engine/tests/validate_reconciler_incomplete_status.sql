@@ -55,7 +55,7 @@ INSERT INTO fte_observations
    raw_value, normalized_value, confidence_score, page_number,
    is_summary_row, is_superseded, metadata)
 VALUES
-  ('e1o00000-0000-4000-8000-00000000000a',
+  ('e10b0000-0000-4000-8000-00000000000a',
    'e1000000-0000-4000-8000-0000000000fe',
    'e1e00000-0000-4000-8000-00000000000a',
    'payment', 50.00, 'paid',
@@ -70,14 +70,14 @@ INSERT INTO fte_observations
    raw_value, normalized_value, confidence_score, page_number,
    is_summary_row, is_superseded, metadata)
 VALUES
-  ('e1o00000-0000-4000-8000-00000000000b',
+  ('e10b0000-0000-4000-8000-00000000000b',
    'e1000000-0000-4000-8000-0000000000fe',
    'e1e00000-0000-4000-8000-00000000000a',
    'billed_amount', 100.00, 'billed',
    'SYN-E1-BAL-0001', NULL, 'Synthetic Payer',
    '100.00', '100.00', 0.9000, 1,
    false, false, '{}'::jsonb),
-  ('e1o00000-0000-4000-8000-00000000000c',
+  ('e10b0000-0000-4000-8000-00000000000c',
    'e1000000-0000-4000-8000-0000000000fe',
    'e1e00000-0000-4000-8000-00000000000a',
    'payment', 100.00, 'paid',
