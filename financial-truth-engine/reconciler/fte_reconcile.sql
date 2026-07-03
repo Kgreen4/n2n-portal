@@ -29,9 +29,13 @@
 --   5. (late/retry) Wire late_retry review entries to ambiguous payment events
 --   5d. (E2) Emit patient_responsibility_assigned from canonical
 --       patient_responsibility observations (>1 canonical → ambiguous → in_review)
+--   5e. (Denial / Task 014B) Emit denial_posted from amount-bearing canonical
+--       denial observations (multiple denials aggregate; over-denial — denied >
+--       billed − contractual − paid − patient_responsibility — routes the claim
+--       to in_review via an ambiguous marker). No new enum / review reason.
 --   6. Derive financial positions (E2: allowed_amount +
---      patient_responsibility_amount columns; open_balance also subtracts
---      patient responsibility)
+--      patient_responsibility_amount columns; Denial: denied_amount column;
+--      open_balance also subtracts patient responsibility AND denied)
 --   7. Route unbalanced / in_review / incomplete positions to review queue
 --   8. Emit short_pay_detected events for positive open balances
 --   9. Record analysis run, return summary JSON
@@ -749,6 +753,120 @@ BEGIN
 
 
   -- =========================================================================
+  -- PHASE 5e (Denial / Task 014B): Emit denial_posted events from amount-bearing
+  --          canonical denial observations.
+  --
+  -- Ruling: denial is EXPLAINED accounting — the denied amount reduces
+  -- open_balance (Phase 6) and is tracked in denied_amount; it is NOT itself a
+  -- short pay. Multiple denials on a claim are legitimate (line/CARC level) and
+  -- AGGREGATE: one denial_posted per amount-bearing canonical denial observation,
+  -- summed into denied_amount. Multiplicity alone is NOT ambiguity.
+  --
+  -- Part 1 (per observation): emit one denial_posted per amount-bearing canonical
+  -- denial observation (amount IS NOT NULL), honoring active attach_corrected_value
+  -- like Phases 3/4/4b/5c/5d, propagating carc/rarc, with one evidence link.
+  -- No-amount CARC/RARC-only denial signals do NOT derive an amount and emit no
+  -- financial event here (Task 014B ruling; recoverable_amount is Task 014C).
+  --
+  -- Part 2 (per claim): over-denial guard. If billed is known and the claim's
+  -- total denied exceeds the residual available before denial
+  -- (billed − contractual − paid − patient_responsibility), emit a NULL-amount
+  -- ambiguous marker so Phase 6 routes the claim to in_review (existing
+  -- mechanism; no new enum / queue reason). Denied money is not silently clamped
+  -- to balanced.
+  -- =========================================================================
+  -- Part 1: one denial_posted per amount-bearing canonical denial observation.
+  FOR v_obs IN (
+    SELECT
+      cl.id            AS obs_id,
+      cl.evidence_id   AS ev_id,
+      cl.amount        AS denied_amt,
+      cl.carc_code     AS carc_code,
+      cl.rarc_code     AS rarc_code,
+      cl.payer_name    AS payer_name,
+      cl.service_date  AS service_date,
+      cl.confidence_score AS confidence_score,
+      c.id             AS claim_uuid,
+      (SELECT ar.corrected_value FROM _fte_active_resolutions ar
+       WHERE ar.observation_id = cl.id
+         AND ar.action = 'attach_corrected_value' LIMIT 1) AS corrected_denied
+    FROM _fte_classified cl
+    JOIN fte_claims c
+      ON  c.practice_id  = p_practice_id
+      AND c.claim_number = cl.claim_identifier
+    WHERE cl.classification   = 'trusted'
+      AND cl.observation_type = 'denial'
+      AND cl.amount IS NOT NULL
+  ) LOOP
+
+    INSERT INTO fte_claim_events
+      (practice_id, claim_id, event_type, event_date, amount, amount_type,
+       payer_name, carc_code, rarc_code, reason_category, confidence_score,
+       reconciliation_status, metadata)
+    VALUES
+      (p_practice_id, v_obs.claim_uuid, 'denial_posted', v_obs.service_date,
+       COALESCE(v_obs.corrected_denied, v_obs.denied_amt), 'denied',
+       v_obs.payer_name, v_obs.carc_code, v_obs.rarc_code, 'denial',
+       v_obs.confidence_score, 'reconciled', '{}')
+    RETURNING id INTO v_event_id;
+
+    INSERT INTO fte_event_evidence
+      (practice_id, claim_event_id, evidence_id, observation_id, link_role)
+    VALUES
+      (p_practice_id, v_event_id, v_obs.ev_id, v_obs.obs_id, 'derived_from');
+
+  END LOOP;
+
+  -- Part 2: over-denial guard (per claim). billed known + denied > residual
+  -- available before denial -> ambiguous marker -> in_review.
+  FOR v_obs IN (
+    SELECT
+      c.id AS claim_uuid,
+      (SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated')) IS NULL
+        AS billed_unknown,
+      COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated'),                 0)
+        - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied'),  0)
+        - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'payment_applied'),                 0)
+        - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'patient_responsibility_assigned'), 0)
+        AS residual_before_denial,
+      COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'denial_posted'), 0) AS denied_sum
+    FROM fte_claims c
+    JOIN fte_claim_events ce
+      ON  ce.claim_id    = c.id
+      AND ce.practice_id = p_practice_id
+    WHERE c.practice_id = p_practice_id
+    GROUP BY c.id
+    HAVING COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'denial_posted'), 0) > 0
+  ) LOOP
+
+    IF NOT v_obs.billed_unknown
+       AND v_obs.denied_sum > v_obs.residual_before_denial THEN
+      INSERT INTO fte_claim_events
+        (practice_id, claim_id, event_type, event_date, amount, amount_type,
+         reason_category, confidence_score, reconciliation_status, metadata)
+      VALUES
+        (p_practice_id, v_obs.claim_uuid, 'denial_posted', NULL,
+         NULL, 'denied', 'denial', NULL, 'ambiguous',
+         jsonb_build_object('ambiguous_reason', 'denied_exceeds_residual'))
+      RETURNING id INTO v_event_id;
+
+      INSERT INTO fte_event_evidence
+        (practice_id, claim_event_id, evidence_id, observation_id, link_role)
+      SELECT p_practice_id, v_event_id, cl.evidence_id, cl.id, 'derived_from'
+      FROM _fte_classified cl
+      JOIN fte_claims c
+        ON  c.practice_id  = p_practice_id
+        AND c.claim_number = cl.claim_identifier
+      WHERE cl.classification   = 'trusted'
+        AND cl.observation_type = 'denial'
+        AND cl.amount IS NOT NULL
+        AND c.id = v_obs.claim_uuid;
+    END IF;
+
+  END LOOP;
+
+
+  -- =========================================================================
   -- PHASE 6: Derive financial positions.
   --
   -- A position row is created for every claim that has at least one emitted
@@ -775,7 +893,7 @@ BEGIN
   INSERT INTO fte_financial_positions
     (practice_id, claim_id,
      billed_amount, allowed_amount, contractual_adjustment_amount, paid_amount,
-     patient_responsibility_amount,
+     denied_amount, patient_responsibility_amount,
      open_balance_amount, position_confidence_score,
      reconciliation_status, last_reconciled_at)
   SELECT
@@ -794,10 +912,14 @@ BEGIN
     END,
     SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied'),
     SUM(ce.amount) FILTER (WHERE ce.event_type = 'payment_applied'),
+    -- denied_amount (Denial / Task 014B): SUM of denial_posted events. The
+    -- ambiguous over-denial marker carries a NULL amount and is ignored by SUM.
+    SUM(ce.amount) FILTER (WHERE ce.event_type = 'denial_posted'),
     SUM(ce.amount) FILTER (WHERE ce.event_type = 'patient_responsibility_assigned'),
-    -- open_balance (E2): NULL when billed is unknown; else GREATEST(0, billed
-    -- - contractual_adjustment - paid - patient_responsibility). Patient
-    -- responsibility is a known, explained portion of the balance, not a gap.
+    -- open_balance (E2 + Denial): NULL when billed is unknown; else GREATEST(0,
+    -- billed - contractual_adjustment - paid - patient_responsibility - denied).
+    -- Patient responsibility and denial are known, explained portions of the
+    -- balance, not gaps.
     CASE
       WHEN SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated') IS NULL
         THEN NULL
@@ -806,6 +928,7 @@ BEGIN
         - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied'),  0)
         - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'payment_applied'),                 0)
         - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'patient_responsibility_assigned'), 0)
+        - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'denial_posted'),                   0)
       )
     END,
     -- position_confidence_score: min across non-short_pay events; 0 if none.
@@ -842,6 +965,7 @@ BEGIN
           - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied'),  0)
           - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'payment_applied'),                 0)
           - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'patient_responsibility_assigned'), 0)
+          - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'denial_posted'),                   0)
         ) > 0
         THEN 'unbalanced'
       ELSE 'balanced'
