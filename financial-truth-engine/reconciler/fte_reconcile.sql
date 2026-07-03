@@ -13,17 +13,26 @@
 -- Only TRUSTED observations produce claim events. Suspect and excluded
 -- observations are captured in fte_review_queue for human review.
 --
--- 9 phases:
+-- 9 phases (E2 adds derived sub-phases 4b and 5d):
 --   0. Idempotent reset
 --   1. Classify observations into temp table _fte_classified
 --   2. Route non-trusted observations to review queue
 --   3. Emit claim_adjudicated events from trusted billed_amount observations
 --   4. Emit contractual_adjustment_applied events from trusted
 --      contractual_adjustment observations
+--   4b. (E2) DERIVE contractual_adjustment_applied = billed - allowed from
+--       canonical billed_amount + allowed_amount observations (no observation
+--       row is created). Only when no observed contractual event already exists
+--       for the claim. Ambiguous (>1 canonical billed/allowed) or anomalous
+--       (allowed > billed) cases fail closed to an ambiguous marker → in_review.
 --   5c. Emit payment_applied events from trusted payment observations
 --   5. (late/retry) Wire late_retry review entries to ambiguous payment events
---   6. Derive financial positions
---   7. Route unbalanced / in_review positions to review queue
+--   5d. (E2) Emit patient_responsibility_assigned from canonical
+--       patient_responsibility observations (>1 canonical → ambiguous → in_review)
+--   6. Derive financial positions (E2: allowed_amount +
+--      patient_responsibility_amount columns; open_balance also subtracts
+--      patient responsibility)
+--   7. Route unbalanced / in_review / incomplete positions to review queue
 --   8. Emit short_pay_detected events for positive open balances
 --   9. Record analysis run, return summary JSON
 --
@@ -49,6 +58,11 @@ DECLARE
   v_review_count       bigint;
   v_pos_count          bigint;
   v_resolution_count   integer := 0;
+  -- E2 (Task 010B) derived-accounting scratch values.
+  v_billed_eff         numeric(14,2);
+  v_allowed_eff        numeric(14,2);
+  v_adj                numeric(14,2);
+  v_pr_eff             numeric(14,2);
 BEGIN
 
   -- =========================================================================
@@ -320,6 +334,153 @@ BEGIN
 
 
   -- =========================================================================
+  -- PHASE 4b (E2 / Task 010B): DERIVE contractual_adjustment_applied from
+  --          canonical billed_amount and allowed_amount observations.
+  --
+  -- Policy ruling #7: contractual adjustment is DERIVED as an event
+  -- (amount = billed - allowed); NO fte_observations.contractual_adjustment
+  -- row is ever created or mutated here.
+  --
+  -- Per claim (one aggregated row per claim that has >=1 trusted billed or
+  -- allowed observation):
+  --   * Skip if an OBSERVED contractual_adjustment_applied event already
+  --     exists for the claim (Phase 4) — prefer observed over derived.
+  --   * Derive only when EXACTLY one canonical billed_amount AND exactly one
+  --     canonical allowed_amount exist for the claim.
+  --   * billed == allowed  -> emit a zero-amount event (allowed stays
+  --     reconstructible; ruling #1). Zero amounts are permitted by the
+  --     fte_claim_events.amount column (no non-zero constraint).
+  --   * allowed  > billed   -> anomaly: emit NO negative event; instead emit an
+  --     ambiguous-status marker (NULL amount) so Phase 6 routes the claim to
+  --     in_review (existing mechanism; no new enum/queue-reason/migration).
+  --   * >1 canonical billed or allowed -> ambiguous: same fail-closed marker.
+  --   * billed or allowed absent -> no derived event (not ambiguous).
+  -- Effective amounts honor active attach_corrected_value the same way
+  -- Phases 3/4/5c do, so the derived adjustment stays consistent with the
+  -- billed value used for claim_adjudicated.
+  -- =========================================================================
+  FOR v_obs IN (
+    SELECT
+      c.id AS claim_uuid,
+      COUNT(*) FILTER (WHERE cl.observation_type = 'billed_amount')  AS billed_ct,
+      COUNT(*) FILTER (WHERE cl.observation_type = 'allowed_amount') AS allowed_ct,
+      -- uuid has no MAX aggregate; array_agg(...)[1] is deterministic in the
+      -- exactly-one-candidate branch where these ids are actually consumed.
+      (array_agg(cl.id)          FILTER (WHERE cl.observation_type = 'billed_amount'))[1]  AS billed_obs_id,
+      (array_agg(cl.evidence_id) FILTER (WHERE cl.observation_type = 'billed_amount'))[1]  AS billed_ev_id,
+      MAX(cl.amount)           FILTER (WHERE cl.observation_type = 'billed_amount')  AS billed_amt,
+      MAX(cl.confidence_score) FILTER (WHERE cl.observation_type = 'billed_amount')  AS billed_conf,
+      MAX(cl.payer_name)       FILTER (WHERE cl.observation_type = 'billed_amount')  AS billed_payer,
+      MAX(cl.service_date)     FILTER (WHERE cl.observation_type = 'billed_amount')  AS billed_date,
+      (array_agg(cl.id)          FILTER (WHERE cl.observation_type = 'allowed_amount'))[1] AS allowed_obs_id,
+      (array_agg(cl.evidence_id) FILTER (WHERE cl.observation_type = 'allowed_amount'))[1] AS allowed_ev_id,
+      MAX(cl.amount)           FILTER (WHERE cl.observation_type = 'allowed_amount') AS allowed_amt,
+      MAX(cl.confidence_score) FILTER (WHERE cl.observation_type = 'allowed_amount') AS allowed_conf
+    FROM _fte_classified cl
+    JOIN fte_claims c
+      ON  c.practice_id  = p_practice_id
+      AND c.claim_number = cl.claim_identifier
+    WHERE cl.classification   = 'trusted'
+      AND cl.observation_type IN ('billed_amount', 'allowed_amount')
+    GROUP BY c.id
+  ) LOOP
+
+    -- Prefer observed contractual adjustment (Phase 4) over derived.
+    IF EXISTS (
+      SELECT 1 FROM fte_claim_events ce
+      WHERE ce.practice_id = p_practice_id
+        AND ce.claim_id    = v_obs.claim_uuid
+        AND ce.event_type  = 'contractual_adjustment_applied'
+    ) THEN
+      CONTINUE;
+    END IF;
+
+    -- Ambiguous: more than one canonical billed or allowed candidate.
+    IF v_obs.billed_ct > 1 OR v_obs.allowed_ct > 1 THEN
+      INSERT INTO fte_claim_events
+        (practice_id, claim_id, event_type, event_date, amount, amount_type,
+         reason_category, confidence_score, reconciliation_status, metadata)
+      VALUES
+        (p_practice_id, v_obs.claim_uuid, 'contractual_adjustment_applied', NULL,
+         NULL, 'contractual_adjustment', 'contractual', NULL, 'ambiguous',
+         jsonb_build_object('derivation', 'billed_minus_allowed',
+                            'ambiguous_reason', 'multiple_canonical_billed_or_allowed'))
+      RETURNING id INTO v_event_id;
+
+      INSERT INTO fte_event_evidence
+        (practice_id, claim_event_id, evidence_id, observation_id, link_role)
+      SELECT p_practice_id, v_event_id, cl.evidence_id, cl.id, 'derived_from'
+      FROM _fte_classified cl
+      JOIN fte_claims c
+        ON  c.practice_id  = p_practice_id
+        AND c.claim_number = cl.claim_identifier
+      WHERE cl.classification   = 'trusted'
+        AND cl.observation_type IN ('billed_amount', 'allowed_amount')
+        AND c.id = v_obs.claim_uuid;
+
+      CONTINUE;
+    END IF;
+
+    -- Derive only when exactly one billed AND exactly one allowed exist.
+    IF v_obs.billed_ct = 1 AND v_obs.allowed_ct = 1 THEN
+      v_billed_eff := COALESCE(
+        (SELECT ar.corrected_value FROM _fte_active_resolutions ar
+         WHERE ar.observation_id = v_obs.billed_obs_id
+           AND ar.action = 'attach_corrected_value' LIMIT 1),
+        v_obs.billed_amt);
+      v_allowed_eff := COALESCE(
+        (SELECT ar.corrected_value FROM _fte_active_resolutions ar
+         WHERE ar.observation_id = v_obs.allowed_obs_id
+           AND ar.action = 'attach_corrected_value' LIMIT 1),
+        v_obs.allowed_amt);
+      v_adj := v_billed_eff - v_allowed_eff;
+
+      IF v_adj < 0 THEN
+        -- Anomaly (allowed > billed): fail closed to ambiguous marker (no
+        -- negative event), routing the claim to in_review via Phase 6.
+        INSERT INTO fte_claim_events
+          (practice_id, claim_id, event_type, event_date, amount, amount_type,
+           reason_category, confidence_score, reconciliation_status, metadata)
+        VALUES
+          (p_practice_id, v_obs.claim_uuid, 'contractual_adjustment_applied', NULL,
+           NULL, 'contractual_adjustment', 'contractual', NULL, 'ambiguous',
+           jsonb_build_object('derivation', 'billed_minus_allowed',
+                              'ambiguous_reason', 'allowed_exceeds_billed'))
+        RETURNING id INTO v_event_id;
+
+        INSERT INTO fte_event_evidence
+          (practice_id, claim_event_id, evidence_id, observation_id, link_role)
+        VALUES
+          (p_practice_id, v_event_id, v_obs.billed_ev_id,  v_obs.billed_obs_id,  'derived_from'),
+          (p_practice_id, v_event_id, v_obs.allowed_ev_id, v_obs.allowed_obs_id, 'derived_from');
+
+        CONTINUE;
+      END IF;
+
+      -- v_adj >= 0 (including exactly 0 when billed == allowed): emit derived
+      -- contractual_adjustment_applied with two evidence links.
+      INSERT INTO fte_claim_events
+        (practice_id, claim_id, event_type, event_date, amount, amount_type,
+         payer_name, reason_category, confidence_score, reconciliation_status, metadata)
+      VALUES
+        (p_practice_id, v_obs.claim_uuid, 'contractual_adjustment_applied',
+         v_obs.billed_date, v_adj, 'contractual_adjustment',
+         v_obs.billed_payer, 'contractual',
+         LEAST(v_obs.billed_conf, v_obs.allowed_conf), 'reconciled',
+         jsonb_build_object('derivation', 'billed_minus_allowed'))
+      RETURNING id INTO v_event_id;
+
+      INSERT INTO fte_event_evidence
+        (practice_id, claim_event_id, evidence_id, observation_id, link_role)
+      VALUES
+        (p_practice_id, v_event_id, v_obs.billed_ev_id,  v_obs.billed_obs_id,  'derived_from'),
+        (p_practice_id, v_event_id, v_obs.allowed_ev_id, v_obs.allowed_obs_id, 'derived_from');
+    END IF;
+
+  END LOOP;
+
+
+  -- =========================================================================
   -- PHASE 5c: Emit payment_applied events from trusted payment observations.
   --
   -- Each payment event gets two fte_event_evidence links (both link_role=
@@ -459,6 +620,91 @@ BEGIN
 
 
   -- =========================================================================
+  -- PHASE 5d (E2 / Task 010B): Emit patient_responsibility_assigned events
+  --          from canonical patient_responsibility observations.
+  --
+  -- Per claim (one aggregated row per claim with >=1 trusted
+  -- patient_responsibility observation):
+  --   * exactly one canonical candidate -> emit patient_responsibility_assigned
+  --     (honoring active attach_corrected_value, like Phases 3/4/5c).
+  --   * >1 canonical candidate -> ambiguous: emit NULL-amount ambiguous marker
+  --     so Phase 6 routes the claim to in_review (existing mechanism; no new
+  --     enum/queue-reason/migration).
+  --   * absent -> no event.
+  -- A nonzero patient responsibility is NOT itself a short pay; it only feeds
+  -- the Phase 6 open_balance formula.
+  -- =========================================================================
+  FOR v_obs IN (
+    SELECT
+      c.id AS claim_uuid,
+      COUNT(*)                 AS pr_ct,
+      -- uuid has no MAX aggregate; array_agg(...)[1] is deterministic in the
+      -- exactly-one-candidate branch where these ids are actually consumed.
+      (array_agg(cl.id))[1]          AS pr_obs_id,
+      (array_agg(cl.evidence_id))[1] AS pr_ev_id,
+      MAX(cl.amount)           AS pr_amt,
+      MAX(cl.confidence_score) AS pr_conf,
+      MAX(cl.payer_name)       AS pr_payer,
+      MAX(cl.service_date)     AS pr_date
+    FROM _fte_classified cl
+    JOIN fte_claims c
+      ON  c.practice_id  = p_practice_id
+      AND c.claim_number = cl.claim_identifier
+    WHERE cl.classification   = 'trusted'
+      AND cl.observation_type = 'patient_responsibility'
+    GROUP BY c.id
+  ) LOOP
+
+    -- Ambiguous: more than one canonical patient_responsibility candidate.
+    IF v_obs.pr_ct > 1 THEN
+      INSERT INTO fte_claim_events
+        (practice_id, claim_id, event_type, event_date, amount, amount_type,
+         reason_category, confidence_score, reconciliation_status, metadata)
+      VALUES
+        (p_practice_id, v_obs.claim_uuid, 'patient_responsibility_assigned', NULL,
+         NULL, 'patient_responsibility', 'patient_responsibility', NULL, 'ambiguous',
+         jsonb_build_object('ambiguous_reason', 'multiple_canonical_patient_responsibility'))
+      RETURNING id INTO v_event_id;
+
+      INSERT INTO fte_event_evidence
+        (practice_id, claim_event_id, evidence_id, observation_id, link_role)
+      SELECT p_practice_id, v_event_id, cl.evidence_id, cl.id, 'derived_from'
+      FROM _fte_classified cl
+      JOIN fte_claims c
+        ON  c.practice_id  = p_practice_id
+        AND c.claim_number = cl.claim_identifier
+      WHERE cl.classification   = 'trusted'
+        AND cl.observation_type = 'patient_responsibility'
+        AND c.id = v_obs.claim_uuid;
+
+      CONTINUE;
+    END IF;
+
+    -- Exactly one canonical patient_responsibility observation.
+    v_pr_eff := COALESCE(
+      (SELECT ar.corrected_value FROM _fte_active_resolutions ar
+       WHERE ar.observation_id = v_obs.pr_obs_id
+         AND ar.action = 'attach_corrected_value' LIMIT 1),
+      v_obs.pr_amt);
+
+    INSERT INTO fte_claim_events
+      (practice_id, claim_id, event_type, event_date, amount, amount_type,
+       payer_name, reason_category, confidence_score, reconciliation_status, metadata)
+    VALUES
+      (p_practice_id, v_obs.claim_uuid, 'patient_responsibility_assigned',
+       v_obs.pr_date, v_pr_eff, 'patient_responsibility',
+       v_obs.pr_payer, 'patient_responsibility', v_obs.pr_conf, 'reconciled', '{}')
+    RETURNING id INTO v_event_id;
+
+    INSERT INTO fte_event_evidence
+      (practice_id, claim_event_id, evidence_id, observation_id, link_role)
+    VALUES
+      (p_practice_id, v_event_id, v_obs.pr_ev_id, v_obs.pr_obs_id, 'derived_from');
+
+  END LOOP;
+
+
+  -- =========================================================================
   -- PHASE 6: Derive financial positions.
   --
   -- A position row is created for every claim that has at least one emitted
@@ -484,23 +730,38 @@ BEGIN
   -- =========================================================================
   INSERT INTO fte_financial_positions
     (practice_id, claim_id,
-     billed_amount, contractual_adjustment_amount, paid_amount,
+     billed_amount, allowed_amount, contractual_adjustment_amount, paid_amount,
+     patient_responsibility_amount,
      open_balance_amount, position_confidence_score,
      reconciliation_status, last_reconciled_at)
   SELECT
     p_practice_id,
     c.id,
     SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated'),
+    -- allowed_amount (E2): events-derived as billed - contractual_adjustment,
+    -- preserving the "positions computed only from claim_events" invariant.
+    -- NULL when either billed or contractual adjustment is unknown.
+    CASE
+      WHEN SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated') IS NULL
+        OR SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied') IS NULL
+        THEN NULL
+      ELSE SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated')
+         - SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied')
+    END,
     SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied'),
     SUM(ce.amount) FILTER (WHERE ce.event_type = 'payment_applied'),
-    -- open_balance: NULL when billed is unknown; GREATEST(0,...) otherwise.
+    SUM(ce.amount) FILTER (WHERE ce.event_type = 'patient_responsibility_assigned'),
+    -- open_balance (E2): NULL when billed is unknown; else GREATEST(0, billed
+    -- - contractual_adjustment - paid - patient_responsibility). Patient
+    -- responsibility is a known, explained portion of the balance, not a gap.
     CASE
       WHEN SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated') IS NULL
         THEN NULL
       ELSE GREATEST(0,
-        COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated'),              0)
-        - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied'), 0)
-        - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'payment_applied'),               0)
+        COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated'),                 0)
+        - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied'),  0)
+        - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'payment_applied'),                 0)
+        - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'patient_responsibility_assigned'), 0)
       )
     END,
     -- position_confidence_score: min across non-short_pay events; 0 if none.
@@ -533,9 +794,10 @@ BEGIN
       WHEN SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated') IS NULL
         THEN 'incomplete'
       WHEN GREATEST(0,
-          COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated'),              0)
-          - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied'), 0)
-          - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'payment_applied'),               0)
+          COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated'),                 0)
+          - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied'),  0)
+          - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'payment_applied'),                 0)
+          - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'patient_responsibility_assigned'), 0)
         ) > 0
         THEN 'unbalanced'
       ELSE 'balanced'
