@@ -36,6 +36,11 @@
 --   6. Derive financial positions (E2: allowed_amount +
 --      patient_responsibility_amount columns; Denial: denied_amount column;
 --      open_balance also subtracts patient responsibility AND denied)
+--   6b. (Recoverable / Task 014D) Overlay recoverable_amount from
+--       fte_denial_knowledge — the recoverable subset of denied_amount. Reporting
+--       overlay only: does NOT affect open_balance / short_pay / status. Most-
+--       specific applicable knowledge row wins; top-tier conflict or no match
+--       fails closed to non-recoverable. No new events / evidence / review reason.
 --   7. Route unbalanced / in_review / incomplete positions to review queue
 --   8. Emit short_pay_detected events for positive open balances
 --   9. Record analysis run, return summary JSON
@@ -989,6 +994,82 @@ BEGIN
       )
     )
   GROUP BY c.id;
+
+
+  -- =========================================================================
+  -- PHASE 6b (Recoverable / Task 014D): overlay recoverable_amount onto the
+  --          financial positions using fte_denial_knowledge.
+  --
+  -- recoverable_amount is a REPORTING OVERLAY only: it is the subset of
+  -- denied_amount that denial knowledge marks recoverable. It does NOT affect
+  -- open_balance, short_pay, or reconciliation_status (all computed in Phase 6
+  -- above and untouched here). By construction recoverable_amount <= denied_amount.
+  --
+  -- Per amount-bearing denial_posted event, the most-specific applicable
+  -- fte_denial_knowledge row decides recoverability. A knowledge row is
+  -- APPLICABLE when each scoped field is NULL (wildcard) or equals the event/claim
+  -- context. Specificity score: practice(+8) + payer(+4) + carc(+2) + rarc(+1);
+  -- a fully-wildcard row scores 0 (allowed as lowest-specificity catch-all). The
+  -- highest score wins; among the top-score rows the event is recoverable ONLY if
+  -- they unanimously agree recoverable = true (bool_and) — so a no-match event or
+  -- a top-tier conflict fails closed to non-recoverable. No LIMIT/ORDER BY tie
+  -- guessing. No new events, no event_evidence, no review-queue routing.
+  --
+  -- Value convention: recoverable_amount stays NULL when the claim has no denials
+  -- (denied_amount IS NULL); otherwise COALESCE(sum of recoverable denials, 0).
+  -- The ambiguous over-denial marker (NULL amount) is excluded (amount IS NOT NULL).
+  -- Idempotent: Phase 0 clears positions; Phase 6 re-inserts; Phase 6b re-overlays.
+  -- =========================================================================
+  WITH denial_events AS (
+    SELECT ce.id AS event_id, ce.claim_id, ce.amount,
+           ce.carc_code, ce.rarc_code, ce.payer_name, c.practice_id
+    FROM fte_claim_events ce
+    JOIN fte_claims c ON c.id = ce.claim_id
+    WHERE ce.practice_id = p_practice_id
+      AND ce.event_type  = 'denial_posted'
+      AND ce.amount IS NOT NULL
+  ),
+  scored AS (
+    SELECT de.event_id, de.claim_id, de.amount, dk.recoverable,
+           (CASE WHEN dk.practice_id IS NOT NULL THEN 8 ELSE 0 END
+          + CASE WHEN dk.payer_name  IS NOT NULL THEN 4 ELSE 0 END
+          + CASE WHEN dk.carc_code   IS NOT NULL THEN 2 ELSE 0 END
+          + CASE WHEN dk.rarc_code   IS NOT NULL THEN 1 ELSE 0 END) AS score
+    FROM denial_events de
+    JOIN fte_denial_knowledge dk
+      ON  (dk.practice_id = de.practice_id OR dk.practice_id IS NULL)
+      AND (dk.payer_name  = de.payer_name  OR dk.payer_name  IS NULL)
+      AND (dk.carc_code   = de.carc_code   OR dk.carc_code   IS NULL)
+      AND (dk.rarc_code   = de.rarc_code   OR dk.rarc_code   IS NULL)
+  ),
+  best AS (
+    SELECT event_id, MAX(score) AS max_score
+    FROM scored
+    GROUP BY event_id
+  ),
+  event_recoverable AS (
+    -- Recoverable only if EVERY top-score row agrees recoverable = true.
+    -- Mixed top-score rows (conflict) or all-false -> bool_and = false -> not recoverable.
+    SELECT s.event_id, s.claim_id, s.amount, bool_and(s.recoverable) AS is_recoverable
+    FROM scored s
+    JOIN best b ON b.event_id = s.event_id AND s.score = b.max_score
+    GROUP BY s.event_id, s.claim_id, s.amount
+  ),
+  claim_recoverable AS (
+    -- Per claim with denial events: sum only the recoverable amounts (no-match
+    -- events are absent from event_recoverable and contribute 0). COALESCE gives 0
+    -- when the claim has denials but none recoverable.
+    SELECT de.claim_id,
+           COALESCE(SUM(er.amount) FILTER (WHERE er.is_recoverable), 0) AS recoverable_sum
+    FROM denial_events de
+    LEFT JOIN event_recoverable er ON er.event_id = de.event_id
+    GROUP BY de.claim_id
+  )
+  UPDATE fte_financial_positions fp
+     SET recoverable_amount = cr.recoverable_sum
+  FROM claim_recoverable cr
+  WHERE fp.practice_id = p_practice_id
+    AND fp.claim_id    = cr.claim_id;
 
 
   -- =========================================================================
