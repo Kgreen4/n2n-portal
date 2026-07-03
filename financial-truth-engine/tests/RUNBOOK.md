@@ -13,6 +13,7 @@ errors in the Supabase SQL Editor, and missing fixture loads.
 | `tests/validate_schema.sql` | structure only (not counted) | 11 tables, RLS, FK isolation, constraints, indexes |
 | `tests/validate_reconciler.sql` | 12 | 9-phase reconciler, event classification, short-pay detection |
 | `tests/validate_reconciler_incomplete_status.sql` | 7 | E1 incomplete-status fix — payment-without-billed → position `incomplete`, open_balance NULL, review-queue routed, no short_pay; billed-known regression stays `balanced`; rerun idempotency |
+| `tests/validate_reconciler_e2.sql` | 15 | E2 accounting — derived `contractual_adjustment_applied` (billed − allowed, not stored as observation) with two evidence links, zero-amount when billed == allowed; `patient_responsibility_assigned` + position `patient_responsibility_amount`; enhanced open_balance subtracts patient responsibility (balanced despite nonzero patient responsibility); unbalanced → short_pay; E1 incomplete preserved; allowed-without-billed derives nothing; mark_duplicate no double count; rerun idempotency |
 | `tests/validate_review_resolution.sql` | 7 | `confirm_payment_event` — ambiguous → reconciled/balanced |
 | `tests/validate_observation_resolution.sql` | 12 | confirm/reject/mark_duplicate, Phase 1 suppression, ledger recalc |
 | `tests/validate_corrected_value.sql` | 11 | `attach_corrected_value` — correction applied, balanced, idempotency, index |
@@ -30,7 +31,7 @@ errors in the Supabase SQL Editor, and missing fixture loads.
 | `tests/validate_explain_claim.sql` | 14 | `fte_explain_claim` — deterministic JSON explanation: function exists, claim identity, reconciliation_status, open_balance_amount, summary sentence, events/evidence/review_queue arrays, evidence_count on payment_applied, raw_text_snippet ≤ 500 chars |
 | `tests/validate_mock_extraction.sql` | 17 | `fte_mock_extract_observations` — function exists, returns 6, observation count/confidence/extractor-metadata/raw_value, CLM-P3B-0001 balanced+0.00, CLM-P3B-0002 unbalanced+70.00, review-queue routing, fte_explain_claim end-to-end |
 
-**Total numeric checks: 216**
+**Total numeric checks: 231**
 
 All suites are wrapped in `ROLLBACK` — nothing persists to the database.
 `fte_analysis_runs` is append-only and is **not** rolled back; suites use
@@ -138,10 +139,10 @@ Run in this order every time. Migrations are **not** repeated here.
 psql "$DATABASE_URL" -f tests/run_all_validations.sql
 ```
 
-This runner loads all fixtures, then executes all nineteen suites in the correct
+This runner loads all fixtures, then executes all twenty suites in the correct
 order. See `tests/run_all_validations.sql` for the exact sequence.
 
-Expected output: 216 `PASS` NOTICE lines across nineteen suites, plus a banner
+Expected output: 231 `PASS` NOTICE lines across twenty suites, plus a banner
 after each suite. Each suite is independent — a failure in one suite does not
 prevent the next from running, but scroll up to find the EXCEPTION output from
 any failed suite.
@@ -165,6 +166,7 @@ starting from the `begin;` block.
 5. Paste + execute `tests/validate_schema.sql`
 6. Paste + execute `tests/validate_reconciler.sql`
 6b. Paste + execute `tests/validate_reconciler_incomplete_status.sql`
+6c. Paste + execute `tests/validate_reconciler_e2.sql`
 7. Paste + execute `tests/validate_review_resolution.sql`
 8. Paste + execute `tests/validate_observation_resolution.sql`
 9. Paste + execute `tests/validate_corrected_value.sql`
