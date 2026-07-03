@@ -394,13 +394,17 @@ begin
       v_superseded;
   end if;
 
-  -- Valid: observation-level action — volatile snapshot UUID satisfies target-present CHECK.
-  insert into fte_review_resolutions (practice_id, action, target_type, source_claim_event_id)
-    values (v_practice, 'reject_observation', 'observation', 'eeeeeeee-0000-4000-8000-0000000000ce');
+  -- Valid: observation-level action — reject_observation requires observation_id
+  -- (migration 003 constraint fte_review_resolutions_obs_action_needs_obs_id); the
+  -- volatile snapshot UUID additionally satisfies the target-present CHECK.
+  insert into fte_review_resolutions (practice_id, action, target_type, observation_id, source_claim_event_id)
+    values (v_practice, 'reject_observation', 'observation', v_obs, 'eeeeeeee-0000-4000-8000-0000000000ce');
 
-  -- Valid: position-level action — volatile snapshot UUID satisfies target-present CHECK.
-  insert into fte_review_resolutions (practice_id, action, target_type, source_position_id)
-    values (v_practice, 'confirm_short_pay', 'position', 'eeeeeeee-0000-4000-8000-0000000000c0');
+  -- Valid: position-level action — confirm_short_pay requires a stable claim anchor
+  -- (migration 006 constraint fte_review_resolutions_confirm_shortpay_needs_claim_id);
+  -- the volatile snapshot UUID additionally satisfies the target-present CHECK.
+  insert into fte_review_resolutions (practice_id, action, target_type, claim_id, source_position_id)
+    values (v_practice, 'confirm_short_pay', 'position', v_claim, 'eeeeeeee-0000-4000-8000-0000000000c0');
 
   -- Missing all targets beyond practice_id — must be rejected by target-present CHECK.
   begin
