@@ -63,6 +63,14 @@ DECLARE
   v_allowed_eff        numeric(14,2);
   v_adj                numeric(14,2);
   v_pr_eff             numeric(14,2);
+  -- E2 canonical single-candidate id/evidence selectors (Task 012B hardening):
+  -- populated by explicit scalar SELECTs only inside the count = 1 branches.
+  v_billed_obs_id      uuid;
+  v_billed_ev_id       uuid;
+  v_allowed_obs_id     uuid;
+  v_allowed_ev_id      uuid;
+  v_pr_obs_id          uuid;
+  v_pr_ev_id           uuid;
 BEGIN
 
   -- =========================================================================
@@ -364,16 +372,14 @@ BEGIN
       c.id AS claim_uuid,
       COUNT(*) FILTER (WHERE cl.observation_type = 'billed_amount')  AS billed_ct,
       COUNT(*) FILTER (WHERE cl.observation_type = 'allowed_amount') AS allowed_ct,
-      -- uuid has no MAX aggregate; array_agg(...)[1] is deterministic in the
-      -- exactly-one-candidate branch where these ids are actually consumed.
-      (array_agg(cl.id)          FILTER (WHERE cl.observation_type = 'billed_amount'))[1]  AS billed_obs_id,
-      (array_agg(cl.evidence_id) FILTER (WHERE cl.observation_type = 'billed_amount'))[1]  AS billed_ev_id,
+      -- Only aggregate the scalar (numeric/text/date) fields here. The single
+      -- billed/allowed observation id + evidence_id are fetched by explicit
+      -- scalar SELECTs inside the count = 1 branch below (Task 012B), avoiding
+      -- an aggregate over uuid.
       MAX(cl.amount)           FILTER (WHERE cl.observation_type = 'billed_amount')  AS billed_amt,
       MAX(cl.confidence_score) FILTER (WHERE cl.observation_type = 'billed_amount')  AS billed_conf,
       MAX(cl.payer_name)       FILTER (WHERE cl.observation_type = 'billed_amount')  AS billed_payer,
       MAX(cl.service_date)     FILTER (WHERE cl.observation_type = 'billed_amount')  AS billed_date,
-      (array_agg(cl.id)          FILTER (WHERE cl.observation_type = 'allowed_amount'))[1] AS allowed_obs_id,
-      (array_agg(cl.evidence_id) FILTER (WHERE cl.observation_type = 'allowed_amount'))[1] AS allowed_ev_id,
       MAX(cl.amount)           FILTER (WHERE cl.observation_type = 'allowed_amount') AS allowed_amt,
       MAX(cl.confidence_score) FILTER (WHERE cl.observation_type = 'allowed_amount') AS allowed_conf
     FROM _fte_classified cl
@@ -423,14 +429,39 @@ BEGIN
 
     -- Derive only when exactly one billed AND exactly one allowed exist.
     IF v_obs.billed_ct = 1 AND v_obs.allowed_ct = 1 THEN
+      -- Exactly one canonical billed and one canonical allowed observation exist
+      -- for this claim (guaranteed by the counts above). Fetch each one's id +
+      -- evidence_id with an explicit scalar SELECT. This is safe precisely
+      -- because it runs only in this count = 1 branch: the query returns exactly
+      -- one row, so no LIMIT / ORDER BY (which would mask ambiguity) is used.
+      SELECT cl.id, cl.evidence_id
+        INTO v_billed_obs_id, v_billed_ev_id
+      FROM _fte_classified cl
+      JOIN fte_claims c
+        ON  c.practice_id  = p_practice_id
+        AND c.claim_number = cl.claim_identifier
+      WHERE c.id = v_obs.claim_uuid
+        AND cl.classification   = 'trusted'
+        AND cl.observation_type = 'billed_amount';
+
+      SELECT cl.id, cl.evidence_id
+        INTO v_allowed_obs_id, v_allowed_ev_id
+      FROM _fte_classified cl
+      JOIN fte_claims c
+        ON  c.practice_id  = p_practice_id
+        AND c.claim_number = cl.claim_identifier
+      WHERE c.id = v_obs.claim_uuid
+        AND cl.classification   = 'trusted'
+        AND cl.observation_type = 'allowed_amount';
+
       v_billed_eff := COALESCE(
         (SELECT ar.corrected_value FROM _fte_active_resolutions ar
-         WHERE ar.observation_id = v_obs.billed_obs_id
+         WHERE ar.observation_id = v_billed_obs_id
            AND ar.action = 'attach_corrected_value' LIMIT 1),
         v_obs.billed_amt);
       v_allowed_eff := COALESCE(
         (SELECT ar.corrected_value FROM _fte_active_resolutions ar
-         WHERE ar.observation_id = v_obs.allowed_obs_id
+         WHERE ar.observation_id = v_allowed_obs_id
            AND ar.action = 'attach_corrected_value' LIMIT 1),
         v_obs.allowed_amt);
       v_adj := v_billed_eff - v_allowed_eff;
@@ -451,8 +482,8 @@ BEGIN
         INSERT INTO fte_event_evidence
           (practice_id, claim_event_id, evidence_id, observation_id, link_role)
         VALUES
-          (p_practice_id, v_event_id, v_obs.billed_ev_id,  v_obs.billed_obs_id,  'derived_from'),
-          (p_practice_id, v_event_id, v_obs.allowed_ev_id, v_obs.allowed_obs_id, 'derived_from');
+          (p_practice_id, v_event_id, v_billed_ev_id,  v_billed_obs_id,  'derived_from'),
+          (p_practice_id, v_event_id, v_allowed_ev_id, v_allowed_obs_id, 'derived_from');
 
         CONTINUE;
       END IF;
@@ -473,8 +504,8 @@ BEGIN
       INSERT INTO fte_event_evidence
         (practice_id, claim_event_id, evidence_id, observation_id, link_role)
       VALUES
-        (p_practice_id, v_event_id, v_obs.billed_ev_id,  v_obs.billed_obs_id,  'derived_from'),
-        (p_practice_id, v_event_id, v_obs.allowed_ev_id, v_obs.allowed_obs_id, 'derived_from');
+        (p_practice_id, v_event_id, v_billed_ev_id,  v_billed_obs_id,  'derived_from'),
+        (p_practice_id, v_event_id, v_allowed_ev_id, v_allowed_obs_id, 'derived_from');
     END IF;
 
   END LOOP;
@@ -638,10 +669,10 @@ BEGIN
     SELECT
       c.id AS claim_uuid,
       COUNT(*)                 AS pr_ct,
-      -- uuid has no MAX aggregate; array_agg(...)[1] is deterministic in the
-      -- exactly-one-candidate branch where these ids are actually consumed.
-      (array_agg(cl.id))[1]          AS pr_obs_id,
-      (array_agg(cl.evidence_id))[1] AS pr_ev_id,
+      -- Only aggregate the scalar (numeric/text/date) fields here. The single
+      -- patient_responsibility observation id + evidence_id are fetched by an
+      -- explicit scalar SELECT inside the count = 1 path below (Task 012B),
+      -- avoiding an aggregate over uuid.
       MAX(cl.amount)           AS pr_amt,
       MAX(cl.confidence_score) AS pr_conf,
       MAX(cl.payer_name)       AS pr_payer,
@@ -680,10 +711,23 @@ BEGIN
       CONTINUE;
     END IF;
 
-    -- Exactly one canonical patient_responsibility observation.
+    -- Exactly one canonical patient_responsibility observation (pr_ct = 1 here,
+    -- the >1 case returned above). Fetch its id + evidence_id with an explicit
+    -- scalar SELECT — safe because it runs only in this count = 1 path: the
+    -- query returns exactly one row, so no LIMIT / ORDER BY is used.
+    SELECT cl.id, cl.evidence_id
+      INTO v_pr_obs_id, v_pr_ev_id
+    FROM _fte_classified cl
+    JOIN fte_claims c
+      ON  c.practice_id  = p_practice_id
+      AND c.claim_number = cl.claim_identifier
+    WHERE c.id = v_obs.claim_uuid
+      AND cl.classification   = 'trusted'
+      AND cl.observation_type = 'patient_responsibility';
+
     v_pr_eff := COALESCE(
       (SELECT ar.corrected_value FROM _fte_active_resolutions ar
-       WHERE ar.observation_id = v_obs.pr_obs_id
+       WHERE ar.observation_id = v_pr_obs_id
          AND ar.action = 'attach_corrected_value' LIMIT 1),
       v_obs.pr_amt);
 
@@ -699,7 +743,7 @@ BEGIN
     INSERT INTO fte_event_evidence
       (practice_id, claim_event_id, evidence_id, observation_id, link_role)
     VALUES
-      (p_practice_id, v_event_id, v_obs.pr_ev_id, v_obs.pr_obs_id, 'derived_from');
+      (p_practice_id, v_event_id, v_pr_ev_id, v_pr_obs_id, 'derived_from');
 
   END LOOP;
 
