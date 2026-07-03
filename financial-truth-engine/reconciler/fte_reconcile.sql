@@ -514,6 +514,15 @@ BEGIN
     -- payment event is 'ambiguous', the position maps to 'in_review' — even
     -- when the math balances to zero. Financial truth cannot be finalized
     -- while contradicting evidence is unresolved.
+    --
+    -- E1 (Task 007J) incomplete-status fix: when a claim has one or more
+    -- emitted events but NO claim_adjudicated (billed) event, the billed
+    -- amount is unknown, so the balance cannot be computed. Such a position
+    -- must NOT be reported 'balanced' (the old fall-through behavior, since
+    -- GREATEST(0, 0 - adj - paid) is never > 0). It is 'incomplete' instead
+    -- and is routed to review by Phase 7. This branch is placed after the
+    -- ambiguous/unbalanced-event checks (those remain authoritative) and
+    -- before the balance math, so billed-known cases are unaffected.
     CASE
       WHEN COUNT(ce.id) = 0
         THEN 'in_review'
@@ -521,6 +530,8 @@ BEGIN
         THEN 'in_review'
       WHEN COUNT(ce.id) FILTER (WHERE ce.reconciliation_status = 'unbalanced') > 0
         THEN 'unbalanced'
+      WHEN SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated') IS NULL
+        THEN 'incomplete'
       WHEN GREATEST(0,
           COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'claim_adjudicated'),              0)
           - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied'), 0)
@@ -551,8 +562,16 @@ BEGIN
 
 
   -- =========================================================================
-  -- PHASE 7: Route every unbalanced or in_review position to the review
-  -- queue with reason 'unbalanced_financial_position'.
+  -- PHASE 7: Route every unbalanced, in_review, or incomplete position to the
+  -- review queue with reason 'unbalanced_financial_position'.
+  --
+  -- E1 (Task 007J): 'incomplete' positions (billed unknown but other events
+  -- present) are routed here so they are surfaced for review rather than
+  -- silently reported as balanced. Like 'in_review', they always route
+  -- regardless of any resolution (the suppression branch below targets only
+  -- 'unbalanced'). The distinguishing reconciliation_status is preserved in
+  -- the details JSON; no new review-queue reason enum value is introduced
+  -- (that would require a migration, which is out of scope for E1).
   --
   -- dismiss_short_pay suppression: unbalanced positions are skipped when
   -- an active dismiss_short_pay resolution exists for the claim.  The
@@ -582,7 +601,7 @@ BEGIN
     )
   FROM fte_financial_positions fp
   WHERE fp.practice_id          = p_practice_id
-    AND fp.reconciliation_status IN ('unbalanced', 'in_review')
+    AND fp.reconciliation_status IN ('unbalanced', 'in_review', 'incomplete')
     AND (
       -- Only suppress queue routing for unbalanced positions;
       -- in_review positions always route regardless of any resolution.

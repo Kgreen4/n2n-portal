@@ -32,7 +32,7 @@
 -- The reconciler functions (CREATE OR REPLACE) are safe to rerun; do so
 -- whenever fte_reconcile.sql or fte_explain_claim.sql changes.
 --
--- Expected output: 209 PASS NOTICE lines across eighteen suites.
+-- Expected output: 216 PASS NOTICE lines across nineteen suites.
 -- A FAIL raises an EXCEPTION that aborts the current suite's transaction.
 -- Subsequent \i calls still execute — scroll up to find any EXCEPTION output.
 --
@@ -71,6 +71,10 @@
 \echo ''
 \echo '--- validate_reconciler ---'
 \i tests/validate_reconciler.sql
+
+\echo ''
+\echo '--- validate_reconciler_incomplete_status ---'
+\i tests/validate_reconciler_incomplete_status.sql
 
 \echo ''
 \echo '--- validate_review_resolution ---'
@@ -137,5 +141,5 @@
 \i tests/validate_mock_extraction.sql
 
 \echo ''
-\echo '=== All suites complete. Expected: 209 PASS checks. ==='
+\echo '=== All suites complete. Expected: 216 PASS checks. ==='
 \echo ''
