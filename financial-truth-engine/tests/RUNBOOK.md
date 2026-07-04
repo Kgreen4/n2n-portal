@@ -30,10 +30,10 @@ errors in the Supabase SQL Editor, and missing fixture loads.
 | `tests/validate_reject_payment_event.sql` | 18 | `reject_payment_event` — Phase 5c payment_applied suppression, open_balance recalc to full billed, Phase 7/8 not suppressed, observation remains trusted, CLM-APC-2000 isolation, notes/claim_id constraints, cross-action conflict, supersession |
 | `tests/validate_assert_check_identity.sql` | 13 | `assert_check_identity` — durable note only, payment_applied not suppressed, position/balance unchanged, corrected_identifier stored, notes/claim_id/observation_id/corrected_identifier/target_type shape constraints, per-observation uniqueness (duplicate rejected for same observation_id), CLM-APC-2000 isolation, supersession |
 | `tests/validate_extraction_pipeline.sql` | 18 | Phase 3A extraction pipeline — evidence count, observation count, balanced/unbalanced positions, short_pay_detected, review-queue routing, two-link event evidence, [SYNTHETIC] prefix invariant |
-| `tests/validate_explain_claim.sql` | 14 | `fte_explain_claim` — deterministic JSON explanation: function exists, claim identity, reconciliation_status, open_balance_amount, summary sentence, events/evidence/review_queue arrays, evidence_count on payment_applied, raw_text_snippet ≤ 500 chars |
+| `tests/validate_explain_claim.sql` | 20 | `fte_explain_claim` — deterministic JSON explanation: function exists, claim identity, reconciliation_status, open_balance_amount, summary sentence, events/evidence/review_queue arrays, evidence_count on payment_applied, raw_text_snippet ≤ 500 chars |
 | `tests/validate_mock_extraction.sql` | 17 | `fte_mock_extract_observations` — function exists, returns 6, observation count/confidence/extractor-metadata/raw_value, CLM-P3B-0001 balanced+0.00, CLM-P3B-0002 unbalanced+70.00, review-queue routing, fte_explain_claim end-to-end |
 
-**Total numeric checks: 258**
+**Total numeric checks: 264**
 
 All suites are wrapped in `ROLLBACK` — nothing persists to the database.
 `fte_analysis_runs` is append-only and is **not** rolled back; suites use
@@ -144,7 +144,7 @@ psql "$DATABASE_URL" -f tests/run_all_validations.sql
 This runner loads all fixtures, then executes all twenty-two suites in the correct
 order. See `tests/run_all_validations.sql` for the exact sequence.
 
-Expected output: 258 `PASS` NOTICE lines across twenty-two suites, plus a banner
+Expected output: 264 `PASS` NOTICE lines across twenty-two suites, plus a banner
 after each suite. Each suite is independent — a failure in one suite does not
 prevent the next from running, but scroll up to find the EXCEPTION output from
 any failed suite.

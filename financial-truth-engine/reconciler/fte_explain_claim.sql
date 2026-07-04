@@ -59,8 +59,12 @@ BEGIN
   -- =========================================================================
   SELECT fp.reconciliation_status,
          fp.billed_amount,
+         fp.allowed_amount,
          fp.contractual_adjustment_amount,
          fp.paid_amount,
+         fp.patient_responsibility_amount,
+         fp.denied_amount,
+         fp.recoverable_amount,
          fp.open_balance_amount
   INTO   v_pos
   FROM   fte_financial_positions fp
@@ -184,10 +188,25 @@ BEGIN
                                            ELSE v_pos.reconciliation_status END,
     'billed_amount',                  CASE WHEN v_pos IS NULL THEN NULL
                                            ELSE to_char(v_pos.billed_amount, 'FM999999999999990.00') END,
+    'allowed_amount',                 CASE WHEN v_pos IS NULL THEN NULL
+                                           ELSE to_char(v_pos.allowed_amount, 'FM999999999999990.00') END,
     'contractual_adjustment_amount',  CASE WHEN v_pos IS NULL THEN NULL
                                            ELSE to_char(v_pos.contractual_adjustment_amount, 'FM999999999999990.00') END,
     'paid_amount',                    CASE WHEN v_pos IS NULL THEN NULL
                                            ELSE to_char(v_pos.paid_amount, 'FM999999999999990.00') END,
+    'patient_responsibility_amount',  CASE WHEN v_pos IS NULL THEN NULL
+                                           ELSE to_char(v_pos.patient_responsibility_amount, 'FM999999999999990.00') END,
+    'denied_amount',                  CASE WHEN v_pos IS NULL THEN NULL
+                                           ELSE to_char(v_pos.denied_amount, 'FM999999999999990.00') END,
+    'recoverable_amount',             CASE WHEN v_pos IS NULL THEN NULL
+                                           ELSE to_char(v_pos.recoverable_amount, 'FM999999999999990.00') END,
+    -- nonrecoverable_denied_amount (Task 014E2): denied minus recoverable, floored
+    -- at 0; NULL when there are no denials. Derived for reporting only — it does
+    -- not affect open_balance / short_pay / reconciliation_status.
+    'nonrecoverable_denied_amount',   CASE WHEN v_pos IS NULL OR v_pos.denied_amount IS NULL THEN NULL
+                                           ELSE to_char(GREATEST(0, v_pos.denied_amount
+                                                        - COALESCE(v_pos.recoverable_amount, 0)),
+                                                        'FM999999999999990.00') END,
     'open_balance_amount',            CASE WHEN v_pos IS NULL THEN NULL
                                            ELSE to_char(v_pos.open_balance_amount, 'FM999999999999990.00') END,
     'summary',                        v_summary,

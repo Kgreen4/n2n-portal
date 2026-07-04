@@ -205,7 +205,7 @@ As of Task 006D (2026-06-26):
 - Phase 3A extraction baseline: 3-claim balanced/unbalanced fixture (`synthetic_phase3a_extraction_fixture.sql`) — 6 evidence rows, 10 observations, check_payment stub (SYN-4001) enabling two-link event evidence; pipeline validation suite (`validate_extraction_pipeline.sql`) — 18 checks covering evidence/observation counts, payment amounts, balanced/unbalanced positions, short_pay_detected, review-queue routing, two-link event evidence, and [SYNTHETIC] raw_text prefix invariant
 - `fte_explain_claim(p_practice_id, p_claim_id)` — read-only, deterministic JSON explanation function: returns claim identity, reconciled financial position (monetary fields as fixed two-decimal strings), human-readable summary sentence, events array with evidence_count per event, distinct evidence array with raw_text_snippet (≤ 500 chars), and review_queue array; returns NULL for unknown claims; returns partial JSON (advisory summary, null monetary fields) when position not yet materialized
 - Phase 3B mock extraction contract: `fte_mock_extract_observations(p_practice_id)` — deterministic SQL-only mock of the AI extraction boundary; reads synthetic page evidence rows, inserts `fte_observations` with confidence_score=0.9500 and extractor metadata; proves the evidence→observations interface contract without live AI calls; 2-claim fixture (CLM-P3B-0001 balanced, CLM-P3B-0002 unbalanced+70.00); idempotent (skips already-extracted pages)
-- 258 numeric checks across 22 test suites, all passing in a disposable Supabase project
+- 264 numeric checks across 22 test suites, all passing in a disposable Supabase project
 
 Not yet implemented: AI extraction layer, UI, API, Edge Functions.
 
