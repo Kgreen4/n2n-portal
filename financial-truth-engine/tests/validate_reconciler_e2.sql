@@ -56,33 +56,48 @@ INSERT INTO fte_claims (id, practice_id, internal_claim_id, claim_number, payer_
 
 -- Helper column list is the same for every observation insert below.
 -- BAL: billed 100, allowed 80 (adj 20), paid 20, patient_resp 60 -> open 0, balanced.
+-- Column-explicit INSERT ... SELECT: the invariant columns (practice_id,
+-- evidence_id, payer_name, confidence_score, page_number, flags, metadata) are
+-- set ONCE as constants in the SELECT, so each per-row tuple carries only the
+-- fields that vary. This removes practice_id/evidence_id from the wide per-row
+-- VALUES entirely, preventing the positional-drift typo class.
 INSERT INTO fte_observations
-  (id, practice_id, evidence_id, observation_type, amount, amount_type,
-   claim_identifier, check_eft_identifier, payer_name,
-   raw_value, normalized_value, confidence_score, page_number,
-   is_summary_row, is_superseded, metadata)
-VALUES
-  ('e2b00000-0000-4000-8000-00000000000a','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-E2-BAL',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,false,false,'{}'::jsonb),
-  ('e2b00000-0000-4000-8000-00000000000b','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','allowed_amount',80.00,'allowed','SYN-E2-BAL',NULL,'Synthetic Payer','80.00','80.00',0.9000,1,false,false,'{}'::jsonb),
-  ('e2b00000-0000-4000-8000-00000000000c','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','payment',20.00,'paid','SYN-E2-BAL','SYN-E2-CHK-BAL','Synthetic Payer','20.00','20.00',0.9000,1,false,false,'{}'::jsonb),
-  ('e2b00000-0000-4000-8000-00000000000d','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','patient_responsibility',60.00,'patient_responsibility','SYN-E2-BAL',NULL,'Synthetic Payer','60.00','60.00',0.9000,1,false,false,'{}'::jsonb),
+  (practice_id, evidence_id, payer_name, confidence_score, page_number,
+   is_summary_row, is_superseded, metadata,
+   id, observation_type, amount, amount_type, claim_identifier,
+   check_eft_identifier, raw_value, normalized_value)
+SELECT
+  'e2000000-0000-4000-8000-0000000000fe'::uuid,
+  'e2e00000-0000-4000-8000-00000000000a'::uuid,
+  'Synthetic Payer', 0.9000, 1,
+  false, false, '{}'::jsonb,
+  v.id, v.observation_type, v.amount, v.amount_type, v.claim_identifier,
+  v.check_eft_identifier, v.raw_value, v.normalized_value
+FROM (VALUES
+  -- id, observation_type, amount, amount_type, claim_identifier, check_eft_identifier, raw_value, normalized_value
+  -- BAL: billed 100, allowed 80 (adj 20), paid 20, patient_resp 60 -> open 0, balanced.
+  ('e2b00000-0000-4000-8000-00000000000a'::uuid, 'billed_amount'::text, 100.00::numeric, 'billed'::text, 'SYN-E2-BAL'::text, NULL::text, '100.00'::text, '100.00'::text),
+  ('e2b00000-0000-4000-8000-00000000000b', 'allowed_amount', 80.00, 'allowed', 'SYN-E2-BAL', NULL, '80.00', '80.00'),
+  ('e2b00000-0000-4000-8000-00000000000c', 'payment', 20.00, 'paid', 'SYN-E2-BAL', 'SYN-E2-CHK-BAL', '20.00', '20.00'),
+  ('e2b00000-0000-4000-8000-00000000000d', 'patient_responsibility', 60.00, 'patient_responsibility', 'SYN-E2-BAL', NULL, '60.00', '60.00'),
   -- SHORT: billed 100, allowed 80 (adj 20), paid 10, patient_resp 30 -> open 40, unbalanced + short_pay.
-  ('e2b00000-0000-4000-8000-00000000000e','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-E2-SHORT',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,false,false,'{}'::jsonb),
-  ('e2b00000-0000-4000-8000-00000000000f','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','allowed_amount',80.00,'allowed','SYN-E2-SHORT',NULL,'Synthetic Payer','80.00','80.00',0.9000,1,false,false,'{}'::jsonb),
-  ('e2b00000-0000-4000-8000-000000000010','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','payment',10.00,'paid','SYN-E2-SHORT','SYN-E2-CHK-SHORT','Synthetic Payer','10.00','10.00',0.9000,1,false,false,'{}'::jsonb),
-  ('e2b00000-0000-4000-8000-000000000011','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','patient_responsibility',30.00,'patient_responsibility','SYN-E2-SHORT',NULL,'Synthetic Payer','30.00','30.00',0.9000,1,false,false,'{}'::jsonb),
+  ('e2b00000-0000-4000-8000-00000000000e', 'billed_amount', 100.00, 'billed', 'SYN-E2-SHORT', NULL, '100.00', '100.00'),
+  ('e2b00000-0000-4000-8000-00000000000f', 'allowed_amount', 80.00, 'allowed', 'SYN-E2-SHORT', NULL, '80.00', '80.00'),
+  ('e2b00000-0000-4000-8000-000000000010', 'payment', 10.00, 'paid', 'SYN-E2-SHORT', 'SYN-E2-CHK-SHORT', '10.00', '10.00'),
+  ('e2b00000-0000-4000-8000-000000000011', 'patient_responsibility', 30.00, 'patient_responsibility', 'SYN-E2-SHORT', NULL, '30.00', '30.00'),
   -- INC: payment only (trusted via check), no billed -> incomplete (E1).
-  ('e2b00000-0000-4000-8000-000000000012','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','payment',25.00,'paid','SYN-E2-INC','SYN-E2-CHK-INC','Synthetic Payer','25.00','25.00',0.9000,1,false,false,'{}'::jsonb),
+  ('e2b00000-0000-4000-8000-000000000012', 'payment', 25.00, 'paid', 'SYN-E2-INC', 'SYN-E2-CHK-INC', '25.00', '25.00'),
   -- ALLOWONLY: allowed only, no billed -> no contractual derived, no claim_adjudicated.
-  ('e2b00000-0000-4000-8000-000000000013','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','allowed_amount',70.00,'allowed','SYN-E2-ALLOWONLY',NULL,'Synthetic Payer','70.00','70.00',0.9000,1,false,false,'{}'::jsonb),
+  ('e2b00000-0000-4000-8000-000000000013', 'allowed_amount', 70.00, 'allowed', 'SYN-E2-ALLOWONLY', NULL, '70.00', '70.00'),
   -- ZERO: billed 50, allowed 50 (adj 0), paid 50 -> open 0, balanced; zero-amount contractual event.
-  ('e2b00000-0000-4000-8000-000000000014','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','billed_amount',50.00,'billed','SYN-E2-ZERO',NULL,'Synthetic Payer','50.00','50.00',0.9000,1,false,false,'{}'::jsonb),
-  ('e2b00000-0000-4000-8000-000000000015','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','allowed_amount',50.00,'allowed','SYN-E2-ZERO',NULL,'Synthetic Payer','50.00','50.00',0.9000,1,false,false,'{}'::jsonb),
-  ('e2b00000-0000-4000-8000-000000000016','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','payment',50.00,'paid','SYN-E2-ZERO','SYN-E2-CHK-ZERO','Synthetic Payer','50.00','50.00',0.9000,1,false,false,'{}'::jsonb),
+  ('e2b00000-0000-4000-8000-000000000014', 'billed_amount', 50.00, 'billed', 'SYN-E2-ZERO', NULL, '50.00', '50.00'),
+  ('e2b00000-0000-4000-8000-000000000015', 'allowed_amount', 50.00, 'allowed', 'SYN-E2-ZERO', NULL, '50.00', '50.00'),
+  ('e2b00000-0000-4000-8000-000000000016', 'payment', 50.00, 'paid', 'SYN-E2-ZERO', 'SYN-E2-CHK-ZERO', '50.00', '50.00'),
   -- DUP: original billed (suppressed) + corrected billed (canonical) + allowed -> no double count.
-  ('e2b00000-0000-4000-8000-000000000017','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-E2-DUP',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,false,false,'{}'::jsonb),
-  ('e2b00000-0000-4000-8000-000000000018','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-E2-DUP',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,false,false,'{}'::jsonb),
-  ('e2b00000-0000-4000-8000-000000000019','e2000000-0000-4000-8000-0000000000fe','e2e00000-0000-4000-8000-00000000000a','allowed_amount',80.00,'allowed','SYN-E2-DUP',NULL,'Synthetic Payer','80.00','80.00',0.9000,1,false,false,'{}'::jsonb);
+  ('e2b00000-0000-4000-8000-000000000017', 'billed_amount', 100.00, 'billed', 'SYN-E2-DUP', NULL, '100.00', '100.00'),
+  ('e2b00000-0000-4000-8000-000000000018', 'billed_amount', 100.00, 'billed', 'SYN-E2-DUP', NULL, '100.00', '100.00'),
+  ('e2b00000-0000-4000-8000-000000000019', 'allowed_amount', 80.00, 'allowed', 'SYN-E2-DUP', NULL, '80.00', '80.00')
+) AS v(id, observation_type, amount, amount_type, claim_identifier, check_eft_identifier, raw_value, normalized_value);
 
 -- DUP: suppress the original billed (…017) as a duplicate of the corrected (…018).
 INSERT INTO fte_review_resolutions

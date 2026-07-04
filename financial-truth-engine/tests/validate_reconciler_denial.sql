@@ -48,45 +48,59 @@ INSERT INTO fte_claims (id, practice_id, internal_claim_id, claim_number, payer_
   ('e3c00000-0000-4000-8000-000000000012','e3000000-0000-4000-8000-0000000000fe','SYN-DEN-E1','SYN-DEN-E1','Synthetic Payer','open'),
   ('e3c00000-0000-4000-8000-000000000013','e3000000-0000-4000-8000-0000000000fe','SYN-DEN-E2','SYN-DEN-E2','Synthetic Payer','open');
 
+-- Column-explicit INSERT ... SELECT: invariant columns (practice_id,
+-- evidence_id, payer_name, confidence_score, page_number, flags, metadata) are
+-- set ONCE as constants; per-row tuples carry only the varying fields. This
+-- removes practice_id/evidence_id from the wide per-row VALUES, preventing the
+-- positional-drift typo class.
 INSERT INTO fte_observations
-  (id, practice_id, evidence_id, observation_type, amount, amount_type,
-   claim_identifier, check_eft_identifier, payer_name,
-   raw_value, normalized_value, confidence_score, page_number,
-   carc_code, rarc_code, is_summary_row, is_superseded, metadata)
-VALUES
+  (practice_id, evidence_id, payer_name, confidence_score, page_number,
+   is_summary_row, is_superseded, metadata,
+   id, observation_type, amount, amount_type, claim_identifier,
+   check_eft_identifier, carc_code, rarc_code, raw_value, normalized_value)
+SELECT
+  'e3000000-0000-4000-8000-0000000000fe'::uuid,
+  'e3e00000-0000-4000-8000-00000000000a'::uuid,
+  'Synthetic Payer', 0.9000, 1,
+  false, false, '{}'::jsonb,
+  v.id, v.observation_type, v.amount, v.amount_type, v.claim_identifier,
+  v.check_eft_identifier, v.carc_code, v.rarc_code, v.raw_value, v.normalized_value
+FROM (VALUES
+  -- id, observation_type, amount, amount_type, claim_identifier, check_eft_identifier, carc_code, rarc_code, raw_value, normalized_value
   -- FULLDEN: billed 100, denial 100 (no allowed/paid/pr) -> balanced, open 0.
-  ('e3b00000-0000-4000-8000-000000000001','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-DEN-FULL',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-000000000002','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','denial',100.00,'denied','SYN-DEN-FULL',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
+  ('e3b00000-0000-4000-8000-000000000001'::uuid, 'billed_amount'::text, 100.00::numeric, 'billed'::text, 'SYN-DEN-FULL'::text, NULL::text, NULL::text, NULL::text, '100.00'::text, '100.00'::text),
+  ('e3b00000-0000-4000-8000-000000000002', 'denial', 100.00, 'denied', 'SYN-DEN-FULL', NULL, NULL, NULL, '100.00', '100.00'),
   -- MULTIDEN: billed 100, denials 60 + 40 -> aggregate 100 -> balanced.
-  ('e3b00000-0000-4000-8000-000000000003','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-DEN-MULTI',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-000000000004','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','denial',60.00,'denied','SYN-DEN-MULTI',NULL,'Synthetic Payer','60.00','60.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-000000000005','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','denial',40.00,'denied','SYN-DEN-MULTI',NULL,'Synthetic Payer','40.00','40.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
+  ('e3b00000-0000-4000-8000-000000000003', 'billed_amount', 100.00, 'billed', 'SYN-DEN-MULTI', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e3b00000-0000-4000-8000-000000000004', 'denial', 60.00, 'denied', 'SYN-DEN-MULTI', NULL, NULL, NULL, '60.00', '60.00'),
+  ('e3b00000-0000-4000-8000-000000000005', 'denial', 40.00, 'denied', 'SYN-DEN-MULTI', NULL, NULL, NULL, '40.00', '40.00'),
   -- PARTDEN: billed 100, denial 30, paid 20 -> open 50 unbalanced + short_pay.
-  ('e3b00000-0000-4000-8000-000000000006','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-DEN-PART',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-000000000007','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','denial',30.00,'denied','SYN-DEN-PART',NULL,'Synthetic Payer','30.00','30.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-000000000008','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','payment',20.00,'paid','SYN-DEN-PART','SYN-DEN-CHK-PART','Synthetic Payer','20.00','20.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
+  ('e3b00000-0000-4000-8000-000000000006', 'billed_amount', 100.00, 'billed', 'SYN-DEN-PART', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e3b00000-0000-4000-8000-000000000007', 'denial', 30.00, 'denied', 'SYN-DEN-PART', NULL, NULL, NULL, '30.00', '30.00'),
+  ('e3b00000-0000-4000-8000-000000000008', 'payment', 20.00, 'paid', 'SYN-DEN-PART', 'SYN-DEN-CHK-PART', NULL, NULL, '20.00', '20.00'),
   -- DENPR: billed 100, denial 40, patient_resp 60 -> balanced, no false short_pay.
-  ('e3b00000-0000-4000-8000-000000000009','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-DEN-PR',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-00000000000a','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','denial',40.00,'denied','SYN-DEN-PR',NULL,'Synthetic Payer','40.00','40.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-00000000000b','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','patient_responsibility',60.00,'patient_responsibility','SYN-DEN-PR',NULL,'Synthetic Payer','60.00','60.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
+  ('e3b00000-0000-4000-8000-000000000009', 'billed_amount', 100.00, 'billed', 'SYN-DEN-PR', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e3b00000-0000-4000-8000-00000000000a', 'denial', 40.00, 'denied', 'SYN-DEN-PR', NULL, NULL, NULL, '40.00', '40.00'),
+  ('e3b00000-0000-4000-8000-00000000000b', 'patient_responsibility', 60.00, 'patient_responsibility', 'SYN-DEN-PR', NULL, NULL, NULL, '60.00', '60.00'),
   -- DENNOBILL: denial 50 only, no billed -> incomplete (E1).
-  ('e3b00000-0000-4000-8000-00000000000c','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','denial',50.00,'denied','SYN-DEN-NOBILL',NULL,'Synthetic Payer','50.00','50.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
+  ('e3b00000-0000-4000-8000-00000000000c', 'denial', 50.00, 'denied', 'SYN-DEN-NOBILL', NULL, NULL, NULL, '50.00', '50.00'),
   -- CARCNOAMT: billed 100 + CARC-only denial (NULL amount) -> no denied amount derived.
-  ('e3b00000-0000-4000-8000-00000000000d','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-DEN-CARCNOAMT',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-00000000000e','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','denial',NULL,'denied','SYN-DEN-CARCNOAMT',NULL,'Synthetic Payer','CO-97',NULL,0.9000,1,'CO-97',NULL,false,false,'{}'::jsonb),
+  ('e3b00000-0000-4000-8000-00000000000d', 'billed_amount', 100.00, 'billed', 'SYN-DEN-CARCNOAMT', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e3b00000-0000-4000-8000-00000000000e', 'denial', NULL, 'denied', 'SYN-DEN-CARCNOAMT', NULL, 'CO-97', NULL, 'CO-97', NULL),
   -- CARCPROP: billed 100, denial 100 with carc/rarc -> propagated onto event.
-  ('e3b00000-0000-4000-8000-00000000000f','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-DEN-CARCPROP',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-000000000010','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','denial',100.00,'denied','SYN-DEN-CARCPROP',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,'CO-45','N130',false,false,'{}'::jsonb),
+  ('e3b00000-0000-4000-8000-00000000000f', 'billed_amount', 100.00, 'billed', 'SYN-DEN-CARCPROP', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e3b00000-0000-4000-8000-000000000010', 'denial', 100.00, 'denied', 'SYN-DEN-CARCPROP', NULL, 'CO-45', 'N130', '100.00', '100.00'),
   -- OVERDEN: billed 100, denial 150 -> over-denial -> in_review.
-  ('e3b00000-0000-4000-8000-000000000011','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-DEN-OVER',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-000000000012','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','denial',150.00,'denied','SYN-DEN-OVER',NULL,'Synthetic Payer','150.00','150.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
+  ('e3b00000-0000-4000-8000-000000000011', 'billed_amount', 100.00, 'billed', 'SYN-DEN-OVER', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e3b00000-0000-4000-8000-000000000012', 'denial', 150.00, 'denied', 'SYN-DEN-OVER', NULL, NULL, NULL, '150.00', '150.00'),
   -- E1INC: payment only (trusted via check), no billed -> incomplete.
-  ('e3b00000-0000-4000-8000-000000000013','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','payment',25.00,'paid','SYN-DEN-E1','SYN-DEN-CHK-E1','Synthetic Payer','25.00','25.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
+  ('e3b00000-0000-4000-8000-000000000013', 'payment', 25.00, 'paid', 'SYN-DEN-E1', 'SYN-DEN-CHK-E1', NULL, NULL, '25.00', '25.00'),
   -- E2BAL: billed 100, allowed 80, paid 20, patient_resp 60 (no denial) -> balanced.
-  ('e3b00000-0000-4000-8000-000000000014','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-DEN-E2',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-000000000015','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','allowed_amount',80.00,'allowed','SYN-DEN-E2',NULL,'Synthetic Payer','80.00','80.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-000000000016','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','payment',20.00,'paid','SYN-DEN-E2','SYN-DEN-CHK-E2','Synthetic Payer','20.00','20.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e3b00000-0000-4000-8000-000000000017','e3000000-0000-4000-8000-0000000000fe','e3e00000-0000-4000-8000-00000000000a','patient_responsibility',60.00,'patient_responsibility','SYN-DEN-E2',NULL,'Synthetic Payer','60.00','60.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb);
+  ('e3b00000-0000-4000-8000-000000000014', 'billed_amount', 100.00, 'billed', 'SYN-DEN-E2', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e3b00000-0000-4000-8000-000000000015', 'allowed_amount', 80.00, 'allowed', 'SYN-DEN-E2', NULL, NULL, NULL, '80.00', '80.00'),
+  ('e3b00000-0000-4000-8000-000000000016', 'payment', 20.00, 'paid', 'SYN-DEN-E2', 'SYN-DEN-CHK-E2', NULL, NULL, '20.00', '20.00'),
+  ('e3b00000-0000-4000-8000-000000000017', 'patient_responsibility', 60.00, 'patient_responsibility', 'SYN-DEN-E2', NULL, NULL, NULL, '60.00', '60.00')
+) AS v(id, observation_type, amount, amount_type, claim_identifier, check_eft_identifier, carc_code, rarc_code, raw_value, normalized_value);
 
 SELECT fte_reconcile_practice('e3000000-0000-4000-8000-0000000000fe');
 

@@ -80,19 +80,32 @@ INSERT INTO fte_claims (id, practice_id, internal_claim_id, claim_number, payer_
   ('e5c00000-0000-4000-8000-00000000000a','e5000000-0000-4000-8000-0000000000fe','SYN-EXP-REC','SYN-EXP-REC','Synthetic Payer','open'),
   ('e5c00000-0000-4000-8000-00000000000b','e5000000-0000-4000-8000-0000000000fe','SYN-EXP-MIXED','SYN-EXP-MIXED','Synthetic Payer','open');
 
+-- Column-explicit INSERT ... SELECT: invariant columns (practice_id,
+-- evidence_id, payer_name, confidence_score, page_number, flags, metadata) are
+-- set ONCE as constants; per-row tuples carry only the varying fields, so
+-- practice_id/evidence_id can't be positionally miswritten.
 INSERT INTO fte_observations
-  (id, practice_id, evidence_id, observation_type, amount, amount_type,
-   claim_identifier, check_eft_identifier, payer_name,
-   raw_value, normalized_value, confidence_score, page_number,
-   carc_code, rarc_code, is_summary_row, is_superseded, metadata)
-VALUES
+  (practice_id, evidence_id, payer_name, confidence_score, page_number,
+   is_summary_row, is_superseded, metadata,
+   id, observation_type, amount, amount_type, claim_identifier,
+   check_eft_identifier, carc_code, rarc_code, raw_value, normalized_value)
+SELECT
+  'e5000000-0000-4000-8000-0000000000fe'::uuid,
+  'e5e00000-0000-4000-8000-00000000000a'::uuid,
+  'Synthetic Payer', 0.9000, 1,
+  false, false, '{}'::jsonb,
+  v.id, v.observation_type, v.amount, v.amount_type, v.claim_identifier,
+  v.check_eft_identifier, v.carc_code, v.rarc_code, v.raw_value, v.normalized_value
+FROM (VALUES
+  -- id, observation_type, amount, amount_type, claim_identifier, check_eft_identifier, carc_code, rarc_code, raw_value, normalized_value
   -- REC: billed 100, denial 100 CO-45 (recoverable) -> denied 100, recoverable 100, nonrecoverable 0.
-  ('e5b00000-0000-4000-8000-000000000001','e5000000-0000-4000-8000-0000000000fe','e5e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-EXP-REC',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e5b00000-0000-4000-8000-000000000002','e5000000-0000-4000-8000-0000000000fe','e5e00000-0000-4000-8000-00000000000a','denial',100.00,'denied','SYN-EXP-REC',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,'CO-45',NULL,false,false,'{}'::jsonb),
+  ('e5b00000-0000-4000-8000-000000000001'::uuid, 'billed_amount'::text, 100.00::numeric, 'billed'::text, 'SYN-EXP-REC'::text, NULL::text, NULL::text, NULL::text, '100.00'::text, '100.00'::text),
+  ('e5b00000-0000-4000-8000-000000000002', 'denial', 100.00, 'denied', 'SYN-EXP-REC', NULL, 'CO-45', NULL, '100.00', '100.00'),
   -- MIXED: billed 100, denial 60 CO-45 (rec) + denial 40 CO-97 (non-rec) -> denied 100, recoverable 60, nonrecoverable 40.
-  ('e5b00000-0000-4000-8000-000000000003','e5000000-0000-4000-8000-0000000000fe','e5e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-EXP-MIXED',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e5b00000-0000-4000-8000-000000000004','e5000000-0000-4000-8000-0000000000fe','e5e00000-0000-4000-8000-00000000000a','denial',60.00,'denied','SYN-EXP-MIXED',NULL,'Synthetic Payer','60.00','60.00',0.9000,1,'CO-45',NULL,false,false,'{}'::jsonb),
-  ('e5b00000-0000-4000-8000-000000000005','e5000000-0000-4000-8000-0000000000fe','e5e00000-0000-4000-8000-00000000000a','denial',40.00,'denied','SYN-EXP-MIXED',NULL,'Synthetic Payer','40.00','40.00',0.9000,1,'CO-97',NULL,false,false,'{}'::jsonb);
+  ('e5b00000-0000-4000-8000-000000000003', 'billed_amount', 100.00, 'billed', 'SYN-EXP-MIXED', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e5b00000-0000-4000-8000-000000000004', 'denial', 60.00, 'denied', 'SYN-EXP-MIXED', NULL, 'CO-45', NULL, '60.00', '60.00'),
+  ('e5b00000-0000-4000-8000-000000000005', 'denial', 40.00, 'denied', 'SYN-EXP-MIXED', NULL, 'CO-97', NULL, '40.00', '40.00')
+) AS v(id, observation_type, amount, amount_type, claim_identifier, check_eft_identifier, carc_code, rarc_code, raw_value, normalized_value);
 
 DO $$
 DECLARE
