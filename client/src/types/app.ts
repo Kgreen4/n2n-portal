@@ -15,6 +15,7 @@ export type GenkitLimitConfig = {
 
 export type GenkitConfig = {
   temperature: number;
+  gcp_project: string;
   project: string;
   location: string;
   generate: GenkitLimitConfig;
