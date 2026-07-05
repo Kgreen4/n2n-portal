@@ -4,7 +4,7 @@
 </script>
 
 <script lang="ts">
-  import { ClaimsLedger, MetricRibbon, Sidebar } from '$features/dashboard';
+  import { AgentRunStatus, ClaimsLedger, MetricRibbon, Sidebar } from '$features/dashboard';
   import { Button } from '$ui/button';
   import { Input } from '$ui/input';
   import { SheetContent, SheetHeader, SheetOverlay, SheetTitle } from '$ui/sheet';
@@ -22,6 +22,10 @@
   let searchQuery = $state('');
   let batchNotes = $state('');
   let uploadPanelOpen = $state(false);
+  let activeBatchFileCount = $state(0);
+  let activeBatchLabel = $state<string | null>(null);
+  let showAgentStatus = $state(false);
+  let statusDismissTimer: ReturnType<typeof setTimeout> | null = null;
   const agent = useAgent();
   const media = useMedia({
     types: [MIME.documents.types.pdf],
@@ -31,6 +35,17 @@
   const closeUploadPanel = () => {
     uploadPanelOpen = false;
     media.clear();
+  };
+
+  const scheduleStatusDismiss = () => {
+    if (statusDismissTimer) {
+      clearTimeout(statusDismissTimer);
+    }
+
+    statusDismissTimer = setTimeout(() => {
+      showAgentStatus = false;
+      statusDismissTimer = null;
+    }, 4200);
   };
 
   const handleFileSelection = async (event: Event) => {
@@ -60,13 +75,23 @@
       return;
     }
 
+    activeBatchFileCount = documents.length;
+    activeBatchLabel = documents.length === 1 ? documents[0].name : `${documents.length} documents`;
+    showAgentStatus = true;
+
+    if (statusDismissTimer) {
+      clearTimeout(statusDismissTimer);
+      statusDismissTimer = null;
+    }
+
     void agent
       .execute({
         batchId: crypto.randomUUID(),
         notes: batchNotes,
         documents
       })
-      .then(() => invalidateAll());
+      .then(() => invalidateAll())
+      .finally(scheduleStatusDismiss);
 
     uploadPanelOpen = false;
     batchNotes = '';
@@ -179,12 +204,17 @@
           </svg>
           <span class="pointer-events-none absolute top-[calc(100%+8px)] left-1/2 z-10 -translate-x-1/2 -translate-y-1 rounded-full bg-[#151515] px-2.5 py-1 text-[11px] font-medium whitespace-nowrap text-white opacity-0 transition-all duration-300 group-hover:translate-y-0 group-hover:opacity-100">Filter</span>
         </button>
+
+        {#if showAgentStatus}
+          <AgentRunStatus
+            status={agent.status}
+            error={agent.error}
+            fileCount={activeBatchFileCount}
+            batchLabel={activeBatchLabel}
+            variant="toolbar"
+          />
+        {/if}
       </div>
-      {#if agent.status === 'running'}
-        <p class="m-0 text-right text-xs font-semibold text-[#848481]">Agent run started</p>
-      {:else if agent.status === 'failed' && agent.error}
-        <p class="m-0 text-right text-xs font-semibold text-[#c93b2b]">{agent.error}</p>
-      {/if}
     </header>
 
     <MetricRibbon metrics={data.metrics} />

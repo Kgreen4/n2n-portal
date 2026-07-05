@@ -172,8 +172,64 @@ const normalizePatientClaim = (value: unknown): PatientClaim => {
   };
 };
 
+const withCarryForwardContext = (claims: PatientClaim[]): PatientClaim[] => {
+  let lastContext: Pick<PatientClaim, 'member' | 'provider' | 'claim'> | null = null;
+
+  return claims.map((claim) => {
+    const next = {
+      member: {
+        name: claim.member.name || lastContext?.member.name || null,
+        id: claim.member.id || lastContext?.member.id || null
+      },
+      provider: claim.provider || lastContext?.provider || null,
+      claim: {
+        id: claim.claim.id || lastContext?.claim.id || null
+      },
+      lines: claim.lines,
+      total: claim.total
+    };
+
+    if (next.member.id || next.claim.id || next.provider) {
+      lastContext = {
+        member: next.member,
+        provider: next.provider,
+        claim: next.claim
+      };
+    }
+
+    return next;
+  });
+};
+
+const claimGroupKey = (claim: PatientClaim): string => {
+  return [claim.member.id, claim.claim.id, claim.provider].map((part) => part || 'unknown').join('|');
+};
+
+const mergeClaimContinuations = (claims: PatientClaim[]): PatientClaim[] => {
+  const merged = new Map<string, PatientClaim>();
+
+  for (const claim of withCarryForwardContext(claims)) {
+    const key = claimGroupKey(claim);
+    const existing = merged.get(key);
+
+    if (!existing) {
+      merged.set(key, {
+        ...claim,
+        lines: [...claim.lines],
+        total: totalFromLines(claim.lines)
+      });
+      continue;
+    }
+
+    existing.lines.push(...claim.lines);
+    existing.total = totalFromLines(existing.lines);
+  }
+
+  return [...merged.values()];
+};
+
 const normalizePatientClaims = (value: unknown): PatientClaim[] => {
-  return Array.isArray(value) ? value.map(normalizePatientClaim) : [];
+  return Array.isArray(value) ? mergeClaimContinuations(value.map(normalizePatientClaim)) : [];
 };
 
 const normalizeCheck = (value: unknown): Check | null => {

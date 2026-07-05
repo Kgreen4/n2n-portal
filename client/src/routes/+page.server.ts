@@ -102,7 +102,7 @@ const groupPatients = (claims: ClaimWithPatient[]) => {
         id: patientId,
         patientName: `${claim.patient_last_name}, ${claim.patient_first_name}`,
         dob: formatDate(claim.patient_date_of_birth),
-        payerName: 'BCBS',
+        payerName: 'Blue Cross Blue Shield',
         memberId: claim.insurance_member_id ?? claim.patient_id,
         claimCount: 1,
         totalAllowed: ledgerClaim.allowedAmt,

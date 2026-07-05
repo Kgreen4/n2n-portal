@@ -7,6 +7,10 @@ export type AgentDocument = {
   extension: string;
   size: number;
   base64: string;
+  pageNumber?: number;
+  pageCount?: number;
+  sourceDocumentId?: string;
+  sourceDocumentName?: string;
 };
 
 export type AgentRunInput = {

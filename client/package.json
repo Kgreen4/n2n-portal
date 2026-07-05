@@ -26,6 +26,7 @@
     "@genkit-ai/google-genai": "^1.39.0",
     "@lucide/svelte": "^1.23.0",
     "genkit": "^1.39.0",
+    "pdf-lib": "^1.17.1",
     "postgres": "^3.4.9",
     "yaml": "^2.9.0"
   }
