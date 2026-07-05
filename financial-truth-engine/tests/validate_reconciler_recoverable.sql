@@ -58,44 +58,58 @@ INSERT INTO fte_claims (id, practice_id, internal_claim_id, claim_number, payer_
   ('e4c00000-0000-4000-8000-000000000012','e4000000-0000-4000-8000-0000000000fe','SYN-REC-E1','SYN-REC-E1','Synthetic Payer','open'),
   ('e4c00000-0000-4000-8000-000000000013','e4000000-0000-4000-8000-0000000000fe','SYN-REC-E2','SYN-REC-E2','Synthetic Payer','open');
 
+-- Column-explicit INSERT ... SELECT: invariant columns (practice_id,
+-- evidence_id, payer_name, confidence_score, page_number, flags, metadata) are
+-- set ONCE as constants; per-row tuples carry only the varying fields. This
+-- removes practice_id/evidence_id from the wide per-row VALUES, preventing the
+-- positional-drift typo class.
 INSERT INTO fte_observations
-  (id, practice_id, evidence_id, observation_type, amount, amount_type,
-   claim_identifier, check_eft_identifier, payer_name,
-   raw_value, normalized_value, confidence_score, page_number,
-   carc_code, rarc_code, is_summary_row, is_superseded, metadata)
-VALUES
+  (practice_id, evidence_id, payer_name, confidence_score, page_number,
+   is_summary_row, is_superseded, metadata,
+   id, observation_type, amount, amount_type, claim_identifier,
+   check_eft_identifier, carc_code, rarc_code, raw_value, normalized_value)
+SELECT
+  'e4000000-0000-4000-8000-0000000000fe'::uuid,
+  'e4e00000-0000-4000-8000-00000000000a'::uuid,
+  'Synthetic Payer', 0.9000, 1,
+  false, false, '{}'::jsonb,
+  v.id, v.observation_type, v.amount, v.amount_type, v.claim_identifier,
+  v.check_eft_identifier, v.carc_code, v.rarc_code, v.raw_value, v.normalized_value
+FROM (VALUES
+  -- id, observation_type, amount, amount_type, claim_identifier, check_eft_identifier, carc_code, rarc_code, raw_value, normalized_value
   -- REC: billed 100, denial 100 CO-45 (recoverable).
-  ('e4b00000-0000-4000-8000-000000000001','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-REC-REC',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e4b00000-0000-4000-8000-000000000002','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','denial',100.00,'denied','SYN-REC-REC',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,'CO-45',NULL,false,false,'{}'::jsonb),
+  ('e4b00000-0000-4000-8000-000000000001'::uuid, 'billed_amount'::text, 100.00::numeric, 'billed'::text, 'SYN-REC-REC'::text, NULL::text, NULL::text, NULL::text, '100.00'::text, '100.00'::text),
+  ('e4b00000-0000-4000-8000-000000000002', 'denial', 100.00, 'denied', 'SYN-REC-REC', NULL, 'CO-45', NULL, '100.00', '100.00'),
   -- NONREC: billed 100, denial 100 CO-97 (non-recoverable).
-  ('e4b00000-0000-4000-8000-000000000003','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-REC-NONREC',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e4b00000-0000-4000-8000-000000000004','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','denial',100.00,'denied','SYN-REC-NONREC',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,'CO-97',NULL,false,false,'{}'::jsonb),
+  ('e4b00000-0000-4000-8000-000000000003', 'billed_amount', 100.00, 'billed', 'SYN-REC-NONREC', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e4b00000-0000-4000-8000-000000000004', 'denial', 100.00, 'denied', 'SYN-REC-NONREC', NULL, 'CO-97', NULL, '100.00', '100.00'),
   -- MIXED: billed 100, denial 60 CO-45 (rec) + denial 40 CO-97 (non-rec) -> recoverable 60.
-  ('e4b00000-0000-4000-8000-000000000005','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-REC-MIXED',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e4b00000-0000-4000-8000-000000000006','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','denial',60.00,'denied','SYN-REC-MIXED',NULL,'Synthetic Payer','60.00','60.00',0.9000,1,'CO-45',NULL,false,false,'{}'::jsonb),
-  ('e4b00000-0000-4000-8000-000000000007','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','denial',40.00,'denied','SYN-REC-MIXED',NULL,'Synthetic Payer','40.00','40.00',0.9000,1,'CO-97',NULL,false,false,'{}'::jsonb),
+  ('e4b00000-0000-4000-8000-000000000005', 'billed_amount', 100.00, 'billed', 'SYN-REC-MIXED', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e4b00000-0000-4000-8000-000000000006', 'denial', 60.00, 'denied', 'SYN-REC-MIXED', NULL, 'CO-45', NULL, '60.00', '60.00'),
+  ('e4b00000-0000-4000-8000-000000000007', 'denial', 40.00, 'denied', 'SYN-REC-MIXED', NULL, 'CO-97', NULL, '40.00', '40.00'),
   -- UNKNOWN: billed 100, denial 100 CO-99 (no knowledge row) -> not recoverable.
-  ('e4b00000-0000-4000-8000-000000000008','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-REC-UNKNOWN',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e4b00000-0000-4000-8000-000000000009','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','denial',100.00,'denied','SYN-REC-UNKNOWN',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,'CO-99',NULL,false,false,'{}'::jsonb),
+  ('e4b00000-0000-4000-8000-000000000008', 'billed_amount', 100.00, 'billed', 'SYN-REC-UNKNOWN', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e4b00000-0000-4000-8000-000000000009', 'denial', 100.00, 'denied', 'SYN-REC-UNKNOWN', NULL, 'CO-99', NULL, '100.00', '100.00'),
   -- NOCODE: billed 100, denial 100 with no CARC/RARC -> not recoverable (safest default).
-  ('e4b00000-0000-4000-8000-00000000000a','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-REC-NOCODE',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e4b00000-0000-4000-8000-00000000000b','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','denial',100.00,'denied','SYN-REC-NOCODE',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
+  ('e4b00000-0000-4000-8000-00000000000a', 'billed_amount', 100.00, 'billed', 'SYN-REC-NOCODE', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e4b00000-0000-4000-8000-00000000000b', 'denial', 100.00, 'denied', 'SYN-REC-NOCODE', NULL, NULL, NULL, '100.00', '100.00'),
   -- EXACT: billed 100, denial 100 CO-50 + N130 -> exact match (recoverable) beats carc-only (false).
-  ('e4b00000-0000-4000-8000-00000000000c','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-REC-EXACT',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e4b00000-0000-4000-8000-00000000000d','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','denial',100.00,'denied','SYN-REC-EXACT',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,'CO-50','N130',false,false,'{}'::jsonb),
+  ('e4b00000-0000-4000-8000-00000000000c', 'billed_amount', 100.00, 'billed', 'SYN-REC-EXACT', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e4b00000-0000-4000-8000-00000000000d', 'denial', 100.00, 'denied', 'SYN-REC-EXACT', NULL, 'CO-50', 'N130', '100.00', '100.00'),
   -- PAYER: billed 100, denial 100 CO-16 -> payer-specific (recoverable) beats global (false).
-  ('e4b00000-0000-4000-8000-00000000000e','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-REC-PAYER',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e4b00000-0000-4000-8000-00000000000f','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','denial',100.00,'denied','SYN-REC-PAYER',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,'CO-16',NULL,false,false,'{}'::jsonb),
+  ('e4b00000-0000-4000-8000-00000000000e', 'billed_amount', 100.00, 'billed', 'SYN-REC-PAYER', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e4b00000-0000-4000-8000-00000000000f', 'denial', 100.00, 'denied', 'SYN-REC-PAYER', NULL, 'CO-16', NULL, '100.00', '100.00'),
   -- CONFLICT: billed 100, denial 100 CO-11 -> tie disagreement -> fail closed (not recoverable).
-  ('e4b00000-0000-4000-8000-000000000010','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-REC-CONFLICT',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e4b00000-0000-4000-8000-000000000011','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','denial',100.00,'denied','SYN-REC-CONFLICT',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,'CO-11',NULL,false,false,'{}'::jsonb),
+  ('e4b00000-0000-4000-8000-000000000010', 'billed_amount', 100.00, 'billed', 'SYN-REC-CONFLICT', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e4b00000-0000-4000-8000-000000000011', 'denial', 100.00, 'denied', 'SYN-REC-CONFLICT', NULL, 'CO-11', NULL, '100.00', '100.00'),
   -- E1: payment only (trusted via check), no billed -> incomplete.
-  ('e4b00000-0000-4000-8000-000000000012','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','payment',25.00,'paid','SYN-REC-E1','SYN-REC-CHK-E1','Synthetic Payer','25.00','25.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
+  ('e4b00000-0000-4000-8000-000000000012', 'payment', 25.00, 'paid', 'SYN-REC-E1', 'SYN-REC-CHK-E1', NULL, NULL, '25.00', '25.00'),
   -- E2: billed 100, allowed 80, paid 20, patient_resp 60 (no denial) -> balanced.
-  ('e4b00000-0000-4000-8000-000000000013','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','billed_amount',100.00,'billed','SYN-REC-E2',NULL,'Synthetic Payer','100.00','100.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e4b00000-0000-4000-8000-000000000014','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','allowed_amount',80.00,'allowed','SYN-REC-E2',NULL,'Synthetic Payer','80.00','80.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e4b00000-0000-4000-8000-000000000015','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','payment',20.00,'paid','SYN-REC-E2','SYN-REC-CHK-E2','Synthetic Payer','20.00','20.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb),
-  ('e4b00000-0000-4000-8000-000000000016','e4000000-0000-4000-8000-0000000000fe','e4e00000-0000-4000-8000-00000000000a','patient_responsibility',60.00,'patient_responsibility','SYN-REC-E2',NULL,'Synthetic Payer','60.00','60.00',0.9000,1,NULL,NULL,false,false,'{}'::jsonb);
+  ('e4b00000-0000-4000-8000-000000000013', 'billed_amount', 100.00, 'billed', 'SYN-REC-E2', NULL, NULL, NULL, '100.00', '100.00'),
+  ('e4b00000-0000-4000-8000-000000000014', 'allowed_amount', 80.00, 'allowed', 'SYN-REC-E2', NULL, NULL, NULL, '80.00', '80.00'),
+  ('e4b00000-0000-4000-8000-000000000015', 'payment', 20.00, 'paid', 'SYN-REC-E2', 'SYN-REC-CHK-E2', NULL, NULL, '20.00', '20.00'),
+  ('e4b00000-0000-4000-8000-000000000016', 'patient_responsibility', 60.00, 'patient_responsibility', 'SYN-REC-E2', NULL, NULL, NULL, '60.00', '60.00')
+) AS v(id, observation_type, amount, amount_type, claim_identifier, check_eft_identifier, carc_code, rarc_code, raw_value, normalized_value);
 
 SELECT fte_reconcile_practice('e4000000-0000-4000-8000-0000000000fe');
 
