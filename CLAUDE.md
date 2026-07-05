@@ -2,10 +2,11 @@
 
 ## Current Active Lane
 - Active workstream: Financial Truth Engine (`financial-truth-engine/`)
-- Current checkpoint: Tasks 001–006D complete and merged
-- Current main HEAD: 381dcab
-- Validation baseline: 192 numeric checks across 17 suites
-- Next planned task: Task 006F — Mocked AI Observation Extraction Contract + Validation
+- Current checkpoint: complete through Task 015A / PR #46 (E1/E2/denial/recoverable/explain/fixture-hardening arcs merged)
+- Current main HEAD: 3d9ac76
+- Validation baseline: 279 total PASS = 264 counted + 15 validate_schema
+- Open blockers: none
+- Next planned task: none scheduled — awaiting next written task spec
 - Do not start a task without a written task spec and Keith approval
 
 ## Hard Safety Rails
@@ -36,12 +37,15 @@
 - `financial-truth-engine/fixtures/` — synthetic fixtures only
 
 ## FTE Current State
-- Ledger schema complete through migrations 001–011
+- Ledger schema complete through migrations 001–011 (no migrations added since)
 - `fte_reconcile_practice` deterministic 9-phase reconciler complete
 - Reviewer resolution actions complete through Task 005H / docs repair 005I
 - Phase 3A synthetic extraction fixture + validation complete
 - `fte_explain_claim` complete
-- Validation baseline: 192 numeric checks across 17 suites
+- Merged accounting/reporting arcs: E1 incomplete-status (#39), validate_schema repair (#40), E2 reconciler accounting (#41), E2 scalar-selector hardening (#42), core denial accounting (#43), recoverable_amount overlay (#44), explain ledger-field surfacing (#45), fixture observation-insert hardening (#46 / Task 015A)
+- Validation baseline: 279 total PASS = 264 counted + 15 validate_schema
+- Persistent 006L/009C fixture reconcile succeeded; baseline locked; idempotency proven
+- Open blockers: none
 - Derived outputs are volatile: `fte_financial_positions`, `fte_claim_events`, `fte_review_queue`
 - Durable reviewer decision history is `fte_review_resolutions`
 
