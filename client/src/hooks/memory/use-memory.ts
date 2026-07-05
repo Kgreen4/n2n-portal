@@ -3,19 +3,17 @@ import type {
   MemoryRecord,
   MemoryResult
 } from '../../features/agents/blue-cross-blue-shield/types';
+import { useClaimRecord } from '../claims/use-claim-record';
+import { usePatientRecord } from '../patients/use-patient-record';
 import type { Collection } from '../../types/collection';
 
 const persistBlueCrossRecord = async (collection: Collection, record: MemoryRecord) => {
-  const existingPatient = record.patient.insurance_member_id
-    ? await collection.patients.getOneByInsuranceID(record.patient.insurance_member_id)
-    : null;
-  const patient = await collection.patients.put({
-    ...record.patient,
-    id: existingPatient?.id ?? record.patient.id
-  });
-  const claims = await Promise.all(
+  const patients = usePatientRecord(collection.patients);
+  const claimRecords = useClaimRecord(collection.claims);
+  const patient = await patients.findOrPut(record.patient);
+  const persistedClaims = await Promise.all(
     record.claims.map((claim) =>
-      collection.claims.put({
+      claimRecords.putUnique({
         ...claim,
         patient_id: patient.id
       })
@@ -24,7 +22,7 @@ const persistBlueCrossRecord = async (collection: Collection, record: MemoryReco
 
   return {
     patient,
-    claims
+    claims: persistedClaims
   };
 };
 

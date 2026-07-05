@@ -1,4 +1,5 @@
 import { usePostgresCollection } from '$lib/postgres';
+import type { Claim, PatientLedgerRow } from '$features/dashboard';
 import type { ClaimWithPatient } from '../types/claims';
 import type { PageServerLoad } from './$types';
 
@@ -73,12 +74,10 @@ const toLedgerClaim = (claim: ClaimWithPatient) => {
   const fixRequired = isFixRequired(claim);
 
   return {
-    patientName: `${claim.patient_last_name}, ${claim.patient_first_name}`,
-    dob: formatDate(claim.patient_date_of_birth),
-    payerName: 'BCBS',
-    memberId: claim.insurance_member_id ?? claim.patient_id,
     serviceCode: claim.cpt_hcpcs_code ?? '-',
     serviceDesc: claim.service_description ?? 'Not provided',
+    dateOfService: formatDate(claim.date_of_service),
+    providerName: claim.provider_name ?? 'Not provided',
     allowedAmt: claim.allowed_amount,
     insurancePaid: claim.paid_amount,
     patientOwes: claim.patient_responsibility,
@@ -87,7 +86,45 @@ const toLedgerClaim = (claim: ClaimWithPatient) => {
     reasonText: claim.explanation_code ?? 'Processed',
     actionLabel: fixRequired ? 'Fix & Appeal' : 'Post to Chart',
     fixRequired
-  };
+  } satisfies Claim;
+};
+
+const groupPatients = (claims: ClaimWithPatient[]) => {
+  const patients = new Map<string, PatientLedgerRow>();
+
+  for (const claim of claims) {
+    const ledgerClaim = toLedgerClaim(claim);
+    const patientId = claim.patient_id;
+    const existing = patients.get(patientId);
+
+    if (!existing) {
+      patients.set(patientId, {
+        id: patientId,
+        patientName: `${claim.patient_last_name}, ${claim.patient_first_name}`,
+        dob: formatDate(claim.patient_date_of_birth),
+        payerName: 'BCBS',
+        memberId: claim.insurance_member_id ?? claim.patient_id,
+        claimCount: 1,
+        totalAllowed: ledgerClaim.allowedAmt,
+        totalInsurancePaid: ledgerClaim.insurancePaid,
+        totalPatientOwes: ledgerClaim.patientOwes,
+        deniedClaimsValue: ledgerClaim.fixRequired ? ledgerClaim.allowedAmt : 0,
+        hasFixRequired: ledgerClaim.fixRequired,
+        claims: [ledgerClaim]
+      });
+      continue;
+    }
+
+    existing.claimCount += 1;
+    existing.totalAllowed += ledgerClaim.allowedAmt;
+    existing.totalInsurancePaid += ledgerClaim.insurancePaid;
+    existing.totalPatientOwes += ledgerClaim.patientOwes;
+    existing.deniedClaimsValue += ledgerClaim.fixRequired ? ledgerClaim.allowedAmt : 0;
+    existing.hasFixRequired = existing.hasFixRequired || ledgerClaim.fixRequired;
+    existing.claims.push(ledgerClaim);
+  }
+
+  return Array.from(patients.values());
 };
 
 export const load: PageServerLoad = async () => {
@@ -95,13 +132,13 @@ export const load: PageServerLoad = async () => {
     const claims = await usePostgresCollection().claims.getManyWithPatients();
 
     return {
-      claims: claims.map(toLedgerClaim),
+      patients: groupPatients(claims),
       metrics: buildMetrics(claims),
       claimsError: null
     };
   } catch (error) {
     return {
-      claims: [],
+      patients: [],
       metrics: {
         totalInsurancePaid: 0,
         transferredToPatient: 0,

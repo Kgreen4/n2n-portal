@@ -1,5 +1,5 @@
 <script module lang="ts">
-  import type { Claim } from '$features/dashboard';
+  import type { PatientLedgerRow } from '$features/dashboard';
   import type { PageData } from './$types';
 </script>
 
@@ -73,10 +73,10 @@
     media.clear();
   };
 
-  let claims = $derived(data.claims satisfies Claim[]);
+  let patients = $derived(data.patients satisfies PatientLedgerRow[]);
 
-  let visibleClaims = $derived(
-    claims.filter((claim) => {
+  let visiblePatients = $derived(
+    patients.filter((patient) => {
       const query = searchQuery.trim().toLowerCase();
 
       if (!query) {
@@ -84,14 +84,18 @@
       }
 
       return [
-        claim.patientName,
-        claim.dob,
-        claim.payerName,
-        claim.memberId,
-        claim.serviceCode,
-        claim.serviceDesc,
-        claim.reasonText,
-        claim.actionLabel
+        patient.patientName,
+        patient.dob,
+        patient.payerName,
+        patient.memberId,
+        ...patient.claims.flatMap((claim) => [
+          claim.serviceCode,
+          claim.serviceDesc,
+          claim.dateOfService,
+          claim.providerName,
+          claim.reasonText,
+          claim.actionLabel
+        ])
       ]
         .join(' ')
         .toLowerCase()
@@ -184,7 +188,7 @@
     </header>
 
     <MetricRibbon metrics={data.metrics} />
-    <ClaimsLedger claims={visibleClaims} />
+    <ClaimsLedger patients={visiblePatients} />
   </main>
 
   {#if uploadPanelOpen}

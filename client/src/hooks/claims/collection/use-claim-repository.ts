@@ -71,34 +71,6 @@ export const useClaimRepository = (sql: Sql): ClaimRepository => ({
   },
 
   put: async (claim) => {
-    const [existing] = await sql<Claim[]>`
-      SELECT id, claim_number, patient_id, provider_name, date_of_service, cpt_hcpcs_code,
-             service_description, billed_amount, allowed_amount, disallowed_amount,
-             co_pay, deductible, co_insurance, discount_amount, paid_amount,
-             patient_responsibility, explanation_code, created_at
-      FROM claims
-      WHERE claim_number = ${claim.claim_number}
-        AND patient_id = ${claim.patient_id}
-        AND date_of_service = ${claim.date_of_service}
-        AND COALESCE(cpt_hcpcs_code, '') = COALESCE(${claim.cpt_hcpcs_code}, '')
-        AND COALESCE(service_description, '') = COALESCE(${claim.service_description}, '')
-        AND billed_amount = ${claim.billed_amount}
-        AND allowed_amount = ${claim.allowed_amount}
-        AND disallowed_amount = ${claim.disallowed_amount}
-        AND co_pay = ${claim.co_pay}
-        AND deductible = ${claim.deductible}
-        AND co_insurance = ${claim.co_insurance}
-        AND discount_amount = ${claim.discount_amount}
-        AND paid_amount = ${claim.paid_amount}
-        AND patient_responsibility = ${claim.patient_responsibility}
-        AND COALESCE(explanation_code, '') = COALESCE(${claim.explanation_code}, '')
-      LIMIT 1
-    `;
-
-    if (existing) {
-      return existing;
-    }
-
     const [row] = await sql<Claim[]>`
       INSERT INTO claims (
         claim_number, patient_id, provider_name, date_of_service, cpt_hcpcs_code,

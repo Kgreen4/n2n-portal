@@ -1,8 +1,10 @@
 export { useAgent } from './agent/use-agent.svelte';
 export type { UseAgentState } from './agent/use-agent.svelte';
 export { useCollection } from './collection/use-collection';
+export { useClaimRecord } from './claims/use-claim-record';
 export { useClaimRepository } from './claims/collection/use-claim-repository';
 export { useMedia } from './media/use-media.svelte';
 export type { MediaFile, MediaStatus } from './media/use-media.svelte';
 export { useMemory } from './memory/use-memory';
+export { usePatientRecord } from './patients/use-patient-record';
 export { usePatientRepository } from './patients/collection/use-patient-repository';
