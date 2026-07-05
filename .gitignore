@@ -1,43 +1,39 @@
-# Secrets & credentials
-*.key.json
-*.key.json.json
-cardio-sa-key*
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# SvelteKit / Vite output
+.svelte-kit/
+build/
+dist/
+.vite/
+
+# Runtime and package manager noise
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.yarn/
+.pnpm-store/
+
+# TypeScript / tooling caches
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+.cache/
+coverage/
+
+# Environment files
 .env
 .env.*
+!.env.example
 
-# Node/Deno
-node_modules/
-.deno/
-
-# Next.js / Vercel
-.next/
-.vercel/
-
-# OS files
+# Local editor state
 .DS_Store
 Thumbs.db
-desktop.ini
-
-# IDE
-.vscode/
 .idea/
-
-# Sample documents (large PDFs - don't version control)
-Sample Docs/
-
-# n8n workflow backups (keep the main ones)
-*.bak
-
-# Logs
-*.log
-
-# Claude Code session files
-.claude/*
-!.claude/agents/
-.claude/agents/*
-!.claude/agents/*.md
-
-# Windows artifacts
-nul
-.vercel
-.env*.local
+*.swp
+*.swo

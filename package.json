@@ -1,5 +1,33 @@
 {
+  "name": "client",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-auto": "latest",
+    "@sveltejs/kit": "latest",
+    "@sveltejs/vite-plugin-svelte": "latest",
+    "@tailwindcss/vite": "latest",
+    "clsx": "latest",
+    "svelte": "latest",
+    "svelte-check": "latest",
+    "tailwind-merge": "latest",
+    "tailwindcss": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  },
   "dependencies": {
-    "@google-cloud/bigquery": "^8.1.1"
+    "@genkit-ai/google-genai": "^1.39.0",
+    "@lucide/svelte": "^1.23.0",
+    "genkit": "^1.39.0",
+    "pdf-lib": "^1.17.1",
+    "postgres": "^3.4.9",
+    "yaml": "^2.9.0"
   }
 }
