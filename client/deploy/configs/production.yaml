@@ -1,0 +1,18 @@
+database:
+  dsn: postgres://n2n:change-me@postgres:5432/n2n_portal
+  maxConns: 20
+  maxIdleTime: 30
+genkit:
+  temperature: 0.1
+  project: n2n-production
+  location: us-central1
+  generate:
+    model: vertexai/gemini-2.5-flash
+    slots: 3
+    pace: 1000
+    burst: 3
+  embed:
+    model: vertexai/text-embedding-005
+    slots: 6
+    pace: 333
+    burst: 6

@@ -1,0 +1,24 @@
+services:
+  postgres:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: n2n-portal-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: n2n_portal
+      POSTGRES_USER: n2n
+      POSTGRES_PASSWORD: n2n_local_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - n2n_postgres_data:/var/lib/postgresql/data
+      - ../migration:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U n2n -d n2n_portal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  n2n_postgres_data:
