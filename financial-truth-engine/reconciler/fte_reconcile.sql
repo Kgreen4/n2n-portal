@@ -872,6 +872,175 @@ BEGIN
 
 
   -- =========================================================================
+  -- PHASE 5f (Denial lifecycle / Task 017C): consume actionable lifecycle
+  -- resolutions from _fte_active_resolutions and emit lifecycle events.
+  --
+  -- Gate: the existing actionable-resolution gate — a row present in
+  -- _fte_active_resolutions (Phase 0.5 already filtered is_superseded = false).
+  -- No new approval path is introduced.
+  --
+  --   file_appeal        -> appeal_filed        (reporting-only, non-monetary)
+  --   record_recovery    -> recovery_received   (reclassifies denied money)
+  --   approve_write_off  -> write_off_approved  (reclassifies denied money)
+  --
+  -- recovery_received and write_off_approved draw from the SAME per-claim GROSS
+  -- denied pool (SUM of amount-bearing denial_posted events). A running per-claim
+  -- consumed total enforces the cumulative cap recovered + written_off <= gross
+  -- denied. Rows are processed in deterministic (claim_id, resolved_at, id) order
+  -- and each amount is validated against the REMAINING pool after prior lifecycle
+  -- consumption. Phase 6 folds these events into the position: denied_amount
+  -- becomes NET (gross - recovered - written_off); recovered_amount /
+  -- written_off_amount are cumulative buckets; open_balance stays on GROSS denied
+  -- (unchanged). Lifecycle events are 'reconciled' with NULL confidence, so they
+  -- do not alter position status or confidence.
+  --
+  -- Event-sourced idempotency: Phase 0 wiped prior events, so re-emitting here
+  -- from the same active resolutions yields identical events/amounts on rerun.
+  --
+  -- Anomaly routing (existing mechanism; NO monetary effect, NO clamping): an
+  -- unresolvable/ambiguous target, a claim with no denied pool, or an amount that
+  -- exceeds the remaining pool is recorded in fte_review_queue with the existing
+  -- reason 'conflicting_observations' and an anomaly descriptor in details, and
+  -- the resolution emits no event and consumes nothing.
+  -- =========================================================================
+  DECLARE
+    v_lc         record;
+    v_claim_uuid uuid;
+    v_claim_ct   integer;
+    v_gross      numeric;
+    v_consumed   numeric := 0;
+    v_prev_claim uuid    := NULL;
+    v_remaining  numeric;
+    v_lc_event   uuid;
+    v_link_ev    uuid;
+    v_link_obs   uuid;
+    v_anom       text;
+  BEGIN
+    FOR v_lc IN (
+      SELECT ar.id, ar.claim_id, ar.action, ar.lifecycle_amount,
+             ar.observation_id, ar.evidence_id, ar.resolved_at
+      FROM _fte_active_resolutions ar
+      WHERE ar.action IN ('file_appeal', 'record_recovery', 'approve_write_off')
+      ORDER BY ar.claim_id NULLS LAST, ar.resolved_at, ar.id
+    ) LOOP
+
+      -- Reset the per-claim running consumed total when the claim changes.
+      IF v_prev_claim IS DISTINCT FROM v_lc.claim_id THEN
+        v_consumed   := 0;
+        v_prev_claim := v_lc.claim_id;
+      END IF;
+
+      -- Resolve the target position (claim), practice-scoped and unique.
+      v_claim_uuid := NULL;
+      v_claim_ct   := 0;
+      IF v_lc.claim_id IS NOT NULL THEN
+        SELECT count(*) INTO v_claim_ct
+        FROM fte_claims c
+        WHERE c.id = v_lc.claim_id AND c.practice_id = p_practice_id;
+        IF v_claim_ct = 1 THEN
+          v_claim_uuid := v_lc.claim_id;
+        END IF;
+      END IF;
+
+      IF v_claim_uuid IS NULL THEN
+        -- Anomaly: no (or non-unique) target position resolvable. No mutation.
+        v_anom := CASE WHEN v_claim_ct > 1 THEN 'lifecycle_target_ambiguous'
+                       ELSE 'lifecycle_target_unresolved' END;
+        INSERT INTO fte_review_queue (practice_id, claim_id, reason, status, details)
+        VALUES (p_practice_id, NULL, 'conflicting_observations', 'open',
+          jsonb_build_object('anomaly', v_anom, 'action', v_lc.action,
+            'lifecycle_amount', v_lc.lifecycle_amount, 'resolution_id', v_lc.id));
+        CONTINUE;
+      END IF;
+
+      -- Best available evidence link: prefer the claim's denial_posted evidence
+      -- chain; fall back to the resolution's own evidence/observation reference.
+      v_link_ev  := NULL;
+      v_link_obs := NULL;
+      SELECT ee.evidence_id, ee.observation_id INTO v_link_ev, v_link_obs
+      FROM fte_event_evidence ee
+      JOIN fte_claim_events ce ON ce.id = ee.claim_event_id
+      WHERE ce.practice_id = p_practice_id
+        AND ce.claim_id    = v_claim_uuid
+        AND ce.event_type  = 'denial_posted'
+        AND ee.link_role   = 'derived_from'
+      LIMIT 1;
+      IF v_link_ev IS NULL AND v_link_obs IS NULL THEN
+        v_link_ev  := v_lc.evidence_id;
+        v_link_obs := v_lc.observation_id;
+      END IF;
+
+      -- file_appeal: reporting-only marker. Emit appeal_filed; no consumption.
+      IF v_lc.action = 'file_appeal' THEN
+        INSERT INTO fte_claim_events
+          (practice_id, claim_id, event_type, event_date, amount, amount_type,
+           reason_category, confidence_score, reconciliation_status, metadata)
+        VALUES
+          (p_practice_id, v_claim_uuid, 'appeal_filed', v_lc.resolved_at::date,
+           NULL, NULL, 'appeal', NULL, 'reconciled',
+           jsonb_build_object('resolution_id', v_lc.id))
+        RETURNING id INTO v_lc_event;
+
+        IF v_link_ev IS NOT NULL OR v_link_obs IS NOT NULL THEN
+          INSERT INTO fte_event_evidence
+            (practice_id, claim_event_id, evidence_id, observation_id, link_role)
+          VALUES (p_practice_id, v_lc_event, v_link_ev, v_link_obs, 'derived_from');
+        END IF;
+        CONTINUE;
+      END IF;
+
+      -- record_recovery / approve_write_off: validate against the denied pool.
+      SELECT COALESCE(SUM(ce.amount), 0) INTO v_gross
+      FROM fte_claim_events ce
+      WHERE ce.practice_id = p_practice_id
+        AND ce.claim_id    = v_claim_uuid
+        AND ce.event_type  = 'denial_posted'
+        AND ce.amount IS NOT NULL;
+
+      v_remaining := v_gross - v_consumed;
+
+      IF v_gross <= 0 OR v_lc.lifecycle_amount > v_remaining THEN
+        -- Anomaly: no denied pool, or amount exceeds remaining pool. No mutation,
+        -- no clamping.
+        v_anom := CASE WHEN v_gross <= 0 THEN 'lifecycle_no_denied_pool'
+                       ELSE 'lifecycle_amount_exceeds_remaining_denied' END;
+        INSERT INTO fte_review_queue (practice_id, claim_id, reason, status, details)
+        VALUES (p_practice_id, v_claim_uuid, 'conflicting_observations', 'open',
+          jsonb_build_object('anomaly', v_anom, 'action', v_lc.action,
+            'lifecycle_amount', v_lc.lifecycle_amount,
+            'gross_denied', v_gross, 'remaining_denied', v_remaining,
+            'resolution_id', v_lc.id));
+        CONTINUE;
+      END IF;
+
+      -- Valid: emit the lifecycle event and consume from the denied pool.
+      INSERT INTO fte_claim_events
+        (practice_id, claim_id, event_type, event_date, amount, amount_type,
+         reason_category, confidence_score, reconciliation_status, metadata)
+      VALUES
+        (p_practice_id, v_claim_uuid,
+         CASE v_lc.action WHEN 'record_recovery' THEN 'recovery_received'
+                          ELSE 'write_off_approved' END,
+         v_lc.resolved_at::date, v_lc.lifecycle_amount,
+         CASE v_lc.action WHEN 'record_recovery' THEN 'recovery' ELSE 'write_off' END,
+         CASE v_lc.action WHEN 'record_recovery' THEN 'recovery' ELSE 'write_off' END,
+         NULL, 'reconciled',
+         jsonb_build_object('resolution_id', v_lc.id))
+      RETURNING id INTO v_lc_event;
+
+      IF v_link_ev IS NOT NULL OR v_link_obs IS NOT NULL THEN
+        INSERT INTO fte_event_evidence
+          (practice_id, claim_event_id, evidence_id, observation_id, link_role)
+        VALUES (p_practice_id, v_lc_event, v_link_ev, v_link_obs, 'derived_from');
+      END IF;
+
+      v_consumed := v_consumed + v_lc.lifecycle_amount;
+
+    END LOOP;
+  END;
+
+
+  -- =========================================================================
   -- PHASE 6: Derive financial positions.
   --
   -- A position row is created for every claim that has at least one emitted
@@ -898,7 +1067,7 @@ BEGIN
   INSERT INTO fte_financial_positions
     (practice_id, claim_id,
      billed_amount, allowed_amount, contractual_adjustment_amount, paid_amount,
-     denied_amount, patient_responsibility_amount,
+     denied_amount, patient_responsibility_amount, recovered_amount, written_off_amount,
      open_balance_amount, position_confidence_score,
      reconciliation_status, last_reconciled_at)
   SELECT
@@ -917,10 +1086,24 @@ BEGIN
     END,
     SUM(ce.amount) FILTER (WHERE ce.event_type = 'contractual_adjustment_applied'),
     SUM(ce.amount) FILTER (WHERE ce.event_type = 'payment_applied'),
-    -- denied_amount (Denial / Task 014B): SUM of denial_posted events. The
-    -- ambiguous over-denial marker carries a NULL amount and is ignored by SUM.
-    SUM(ce.amount) FILTER (WHERE ce.event_type = 'denial_posted'),
+    -- denied_amount (Denial 014B; NET after lifecycle 017C): gross SUM of
+    -- denial_posted, reduced by recovery_received and write_off_approved. NULL
+    -- when the claim has no denials. Non-negative — the Phase 5f cumulative cap
+    -- guarantees recovered + written_off <= gross denied. The ambiguous
+    -- over-denial marker carries a NULL amount and is ignored by SUM.
+    CASE
+      WHEN SUM(ce.amount) FILTER (WHERE ce.event_type = 'denial_posted') IS NULL
+        THEN NULL
+      ELSE SUM(ce.amount) FILTER (WHERE ce.event_type = 'denial_posted')
+         - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'recovery_received'),   0)
+         - COALESCE(SUM(ce.amount) FILTER (WHERE ce.event_type = 'write_off_approved'), 0)
+    END,
     SUM(ce.amount) FILTER (WHERE ce.event_type = 'patient_responsibility_assigned'),
+    -- recovered_amount / written_off_amount (017C): cumulative reclassified
+    -- buckets. NULL when none. open_balance and status below stay on GROSS denied
+    -- (SUM of denial_posted), so they are unchanged by lifecycle reclassification.
+    SUM(ce.amount) FILTER (WHERE ce.event_type = 'recovery_received'),
+    SUM(ce.amount) FILTER (WHERE ce.event_type = 'write_off_approved'),
     -- open_balance (E2 + Denial): NULL when billed is unknown; else GREATEST(0,
     -- billed - contractual_adjustment - paid - patient_responsibility - denied).
     -- Patient responsibility and denial are known, explained portions of the
