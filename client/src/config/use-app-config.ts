@@ -54,7 +54,6 @@ const normalizeConfig = (value: unknown, environment: AppEnvironment): AppConfig
     },
     genkit: {
       temperature: assertNumber(genkit.temperature ?? 0, 'genkit.temperature'),
-      gcp_project: assertString(genkit.gcp_project ?? genkit.project, 'genkit.gcp_project'),
       project: assertString(genkit.project, 'genkit.project'),
       location: assertString(genkit.location, 'genkit.location'),
       generate: {

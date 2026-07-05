@@ -1,5 +1,6 @@
 <script module lang="ts">
   import type { Claim } from '$features/dashboard';
+  import type { PageData } from './$types';
 </script>
 
 <script lang="ts">
@@ -10,11 +11,13 @@
   import { Textarea } from '$ui/textarea';
   import { useAgent } from '$hooks/agent/use-agent.svelte';
   import { useMedia } from '$hooks/media/use-media.svelte';
+  import { invalidateAll } from '$app/navigation';
   import { MIME } from '../types/media';
   import { fly } from 'svelte/transition';
 
   type Operation = 'upload' | 'search' | 'filter';
 
+  let { data }: { data: PageData } = $props();
   let activeOperation = $state<Operation | null>(null);
   let searchQuery = $state('');
   let batchNotes = $state('');
@@ -57,67 +60,20 @@
       return;
     }
 
-    agent.execute({
-      batchId: crypto.randomUUID(),
-      notes: batchNotes,
-      documents
-    });
+    void agent
+      .execute({
+        batchId: crypto.randomUUID(),
+        notes: batchNotes,
+        documents
+      })
+      .then(() => invalidateAll());
 
     uploadPanelOpen = false;
     batchNotes = '';
     media.clear();
   };
 
-  let claims: Claim[] = [
-    {
-      patientName: 'Dionne, Anthony',
-      dob: '14 Dec 1984',
-      payerName: 'BCBS',
-      memberId: '9482014',
-      serviceCode: '99214',
-      serviceDesc: 'Outpatient Office Visit',
-      allowedAmt: 150.0,
-      insurancePaid: 120.0,
-      patientOwes: 30.0,
-      owesLabel: 'Flat Co-pay',
-      statusClass: 'clean',
-      reasonText: 'Contractual allowance applied',
-      actionLabel: 'Post to Chart',
-      fixRequired: false
-    },
-    {
-      patientName: 'Yahodin, Nick',
-      dob: '22 Mar 1991',
-      payerName: 'AETNA',
-      memberId: '4491024',
-      serviceCode: '70551',
-      serviceDesc: 'Brain MRI w/o Contrast',
-      allowedAmt: 850.0,
-      insurancePaid: 0.0,
-      patientOwes: 850.0,
-      owesLabel: 'Deductible Applied',
-      statusClass: 'clean',
-      reasonText: 'PR-1: Patient deductible not met',
-      actionLabel: 'Bill Patient',
-      fixRequired: false
-    },
-    {
-      patientName: 'Aimaq, Mujeeb',
-      dob: '05 Jan 1978',
-      payerName: 'CIGNA',
-      memberId: '1102934',
-      serviceCode: '99215',
-      serviceDesc: 'Extended Complex Visit',
-      allowedAmt: 220.0,
-      insurancePaid: 0.0,
-      patientOwes: 0.0,
-      owesLabel: '-',
-      statusClass: 'denied',
-      reasonText: 'CO-16: Missing medical records / documentation',
-      actionLabel: 'Fix & Appeal',
-      fixRequired: true
-    }
-  ];
+  let claims = $derived(data.claims satisfies Claim[]);
 
   let visibleClaims = $derived(
     claims.filter((claim) => {
@@ -227,7 +183,7 @@
       {/if}
     </header>
 
-    <MetricRibbon />
+    <MetricRibbon metrics={data.metrics} />
     <ClaimsLedger claims={visibleClaims} />
   </main>
 

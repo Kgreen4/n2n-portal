@@ -4,7 +4,6 @@ database:
   maxIdleTime: 30
 genkit:
   temperature: 0.1
-  gcp_project: cardio-metrics-dev
   project: n2n-production
   location: us-central1
   generate:

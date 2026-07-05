@@ -11,32 +11,31 @@ export const useAgent = () => {
   let result = $state<AgentRunResult | null>(null);
   let error = $state<string | null>(null);
 
-  const execute = (input: AgentRunInput) => {
+  const execute = async (input: AgentRunInput) => {
     status = 'running';
     result = null;
     error = null;
 
-    void fetch('/api/agent', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json'
-      },
-      body: JSON.stringify(input)
-    })
-      .then(async (response) => {
-        const payload = (await response.json()) as AgentRunResult | { error?: string };
-
-        if (!response.ok) {
-          throw new Error('error' in payload && payload.error ? payload.error : 'agent: run failed');
-        }
-
-        result = payload as AgentRunResult;
-        status = result.status;
-      })
-      .catch((cause) => {
-        error = cause instanceof Error ? cause.message : String(cause);
-        status = 'failed';
+    try {
+      const response = await fetch('/api/agent', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify(input)
       });
+      const payload = (await response.json()) as AgentRunResult | { error?: string };
+
+      if (!response.ok) {
+        throw new Error('error' in payload && payload.error ? payload.error : 'agent: run failed');
+      }
+
+      result = payload as AgentRunResult;
+      status = result.status;
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+      status = 'failed';
+    }
   };
 
   return {

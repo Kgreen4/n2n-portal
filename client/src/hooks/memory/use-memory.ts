@@ -6,8 +6,21 @@ import type {
 import type { Collection } from '../../types/collection';
 
 const persistBlueCrossRecord = async (collection: Collection, record: MemoryRecord) => {
-  const patient = await collection.patients.put(record.patient);
-  const claims = await Promise.all(record.claims.map((claim) => collection.claims.put(claim)));
+  const existingPatient = record.patient.insurance_member_id
+    ? await collection.patients.getOneByInsuranceID(record.patient.insurance_member_id)
+    : null;
+  const patient = await collection.patients.put({
+    ...record.patient,
+    id: existingPatient?.id ?? record.patient.id
+  });
+  const claims = await Promise.all(
+    record.claims.map((claim) =>
+      collection.claims.put({
+        ...claim,
+        patient_id: patient.id
+      })
+    )
+  );
 
   return {
     patient,

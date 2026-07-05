@@ -1,5 +1,5 @@
 <SYSTEM>
-Analyze the attached medical document image and extract all claim line items into a structured JSON array matching the structure shown in <EXAMPLE>.
+Analyze every page of the attached medical document file and extract all claim line items into a structured JSON array matching the structure shown in <EXAMPLE>.
 </SYSTEM>
 
 <RULES>
@@ -81,5 +81,5 @@ Output Pattern:
 </EXAMPLE>
 
 <CONTEXT>
-Process the attached file payload using the mapping logic in <EXAMPLE>. Output ONLY the raw valid JSON array. No conversational text.
+Process the attached file payload across all pages using the mapping logic in <EXAMPLE>. Output ONLY the raw valid JSON array. No conversational text.
 </CONTEXT>

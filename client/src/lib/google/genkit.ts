@@ -1,4 +1,4 @@
-import { genkit, type Genkit } from 'genkit';
+import { genkit, type Genkit, type Part } from 'genkit';
 import { vertexAI } from '@genkit-ai/google-genai';
 
 export type Model = string;
@@ -28,6 +28,12 @@ export type PromptTemplate<Input = unknown> =
   | {
       render: (input: Input) => string;
     };
+
+type MediaDocument = {
+  name?: string;
+  type?: string;
+  base64?: string;
+};
 
 type RuntimeContext = AbortSignal | { signal?: AbortSignal } | undefined;
 
@@ -171,12 +177,30 @@ export const run = async <Result, Input = unknown>(
   const ai = ensureInitialized();
 
   return retry(signal, generate, async () => {
+    const mediaParts = mediaPartsFromInput(input);
+    const request = mediaParts.length
+      ? {
+          model: vertexAI.model(stripVertexPrefix(modelToUse)),
+          messages: [
+            {
+              role: 'user' as const,
+              content: [{ text: promptText }, ...mediaParts]
+            }
+          ],
+          config: {
+            temperature
+          }
+        }
+      : {
+          model: vertexAI.model(stripVertexPrefix(modelToUse)),
+          prompt: promptText,
+          config: {
+            temperature
+          }
+        };
+
     const response = await ai.generate({
-      model: vertexAI.model(stripVertexPrefix(modelToUse)),
-      prompt: promptText,
-      config: {
-        temperature
-      }
+      ...request
     });
 
     return extractGeneratedData<Result>(response);
@@ -261,6 +285,32 @@ const renderPrompt = <Input>(prompt: PromptTemplate<Input>, input: Input) => {
   }
 
   return prompt.render(input);
+};
+
+const hasDocuments = (value: unknown): value is { documents: MediaDocument[] } => {
+  if (!value || typeof value !== 'object' || !('documents' in value)) {
+    return false;
+  }
+
+  return Array.isArray((value as { documents?: unknown }).documents);
+};
+
+const mediaPartsFromInput = (input: unknown): Part[] => {
+  if (!hasDocuments(input)) {
+    return [];
+  }
+
+  return input.documents
+    .filter((document) => document.type && document.base64)
+    .map((document) => ({
+      media: {
+        contentType: document.type,
+        url: `data:${document.type};base64,${document.base64}`
+      },
+      metadata: {
+        name: document.name
+      }
+    }));
 };
 
 const extractGeneratedData = <Result>(response: any): Result => {
